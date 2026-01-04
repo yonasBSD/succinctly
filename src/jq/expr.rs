@@ -230,9 +230,9 @@ pub enum Builtin {
     Inside(Box<Expr>),
 
     // Phase 5: Array Functions
-    /// `first` - first element (.[0])
+    /// `first` - first element (`.[0]`)
     First,
-    /// `last` - last element (.[-1])
+    /// `last` - last element (`.[−1]`)
     Last,
     /// `nth(n)` - nth element
     Nth(Box<Expr>),

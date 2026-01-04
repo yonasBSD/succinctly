@@ -2987,9 +2987,7 @@ fn builtin_match<'a, W: Clone + AsRef<[u64]>>(
     } else {
         // Return first match or null
         match re.find(&input) {
-            Some(m) => {
-                QueryResult::Owned(build_match_object(&re, m.as_str(), m.start(), &input))
-            }
+            Some(m) => QueryResult::Owned(build_match_object(&re, m.as_str(), m.start(), &input)),
             None => QueryResult::Owned(OwnedValue::Null),
         }
     }
@@ -2997,17 +2995,15 @@ fn builtin_match<'a, W: Clone + AsRef<[u64]>>(
 
 /// Build a jq match object
 #[cfg(feature = "regex")]
-fn build_match_object(
-    re: &regex::Regex,
-    matched: &str,
-    offset: usize,
-    input: &str,
-) -> OwnedValue {
+fn build_match_object(re: &regex::Regex, matched: &str, offset: usize, input: &str) -> OwnedValue {
     let mut obj = BTreeMap::new();
 
     obj.insert("offset".to_string(), OwnedValue::Int(offset as i64));
     obj.insert("length".to_string(), OwnedValue::Int(matched.len() as i64));
-    obj.insert("string".to_string(), OwnedValue::String(matched.to_string()));
+    obj.insert(
+        "string".to_string(),
+        OwnedValue::String(matched.to_string()),
+    );
 
     // Build captures array
     let mut captures = Vec::new();
