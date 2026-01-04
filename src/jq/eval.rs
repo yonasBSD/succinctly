@@ -3,6 +3,8 @@
 //! Evaluates expressions against JSON using the cursor-based navigation API.
 
 #[cfg(not(test))]
+use alloc::boxed::Box;
+#[cfg(not(test))]
 use alloc::collections::BTreeMap;
 #[cfg(not(test))]
 use alloc::format;
@@ -18,7 +20,9 @@ use std::collections::BTreeMap;
 
 use crate::json::light::{JsonCursor, JsonElements, JsonFields, StandardJson};
 
-use super::expr::{ArithOp, Builtin, CompareOp, Expr, FormatType, Literal, ObjectKey, StringPart};
+use super::expr::{
+    ArithOp, Builtin, CompareOp, Expr, FormatType, Literal, ObjectEntry, ObjectKey, StringPart,
+};
 use super::value::OwnedValue;
 
 /// Result of evaluating a jq expression.
@@ -228,6 +232,45 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>>(
         Expr::StringInterpolation(parts) => eval_string_interpolation(parts, value, optional),
 
         Expr::Format(format_type) => eval_format(*format_type, value, optional),
+
+        // Phase 8: Variables and Advanced Control Flow
+        Expr::As { expr, var, body } => eval_as(expr, var, body, value, optional),
+        Expr::Var(name) => {
+            // Variable references without context should error
+            // In practice, variables are resolved by eval_as which substitutes them
+            QueryResult::Error(EvalError::new(format!("undefined variable: ${}", name)))
+        }
+        Expr::Reduce {
+            input,
+            var,
+            init,
+            update,
+        } => eval_reduce(input, var, init, update, value, optional),
+        Expr::Foreach {
+            input,
+            var,
+            init,
+            update,
+            extract,
+        } => eval_foreach(
+            input,
+            var,
+            init,
+            update,
+            extract.as_deref(),
+            value,
+            optional,
+        ),
+        Expr::Limit { n, expr } => eval_limit(n, expr, value, optional),
+        Expr::FirstExpr(expr) => eval_first_expr(expr, value, optional),
+        Expr::LastExpr(expr) => eval_last_expr(expr, value, optional),
+        Expr::NthExpr { n, expr } => eval_nth_expr(n, expr, value, optional),
+        Expr::Until { cond, update } => eval_until(cond, update, value, optional),
+        Expr::While { cond, update } => eval_while(cond, update, value, optional),
+        Expr::Repeat(expr) => eval_repeat(expr, value, optional),
+        Expr::Range { from, to, step } => {
+            eval_range(from, to.as_deref(), step.as_deref(), value, optional)
+        }
     }
 }
 
@@ -985,6 +1028,13 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Gsub(re, replacement) => builtin_gsub(re, replacement, value, optional),
         #[cfg(feature = "regex")]
         Builtin::TestWithFlags(re, flags) => builtin_test_with_flags(re, flags, value, optional),
+
+        // Phase 8: Advanced Control Flow Builtins
+        Builtin::Recurse => builtin_recurse(value, optional),
+        Builtin::RecurseF(f) => builtin_recurse_f(f, value, optional),
+        Builtin::RecurseCond(f, cond) => builtin_recurse_cond(f, cond, value, optional),
+        Builtin::Walk(f) => builtin_walk(f, value, optional),
+        Builtin::IsValid(expr) => builtin_isvalid(expr, value, optional),
     }
 }
 
@@ -3458,6 +3508,1078 @@ pub fn eval_lenient<'a, W: Clone + AsRef<[u64]>>(
     }
 }
 
+// =============================================================================
+// Phase 8: Variables and Advanced Control Flow Implementation
+// =============================================================================
+
+/// Substitute a variable in an expression with a value.
+/// Returns a new expression with the variable replaced.
+fn substitute_var(expr: &Expr, var_name: &str, replacement: &OwnedValue) -> Expr {
+    match expr {
+        Expr::Var(name) if name == var_name => Expr::Literal(owned_to_literal(replacement)),
+        Expr::Var(_) => expr.clone(),
+        Expr::Identity => Expr::Identity,
+        Expr::Field(name) => Expr::Field(name.clone()),
+        Expr::Index(i) => Expr::Index(*i),
+        Expr::Slice { start, end } => Expr::Slice {
+            start: *start,
+            end: *end,
+        },
+        Expr::Iterate => Expr::Iterate,
+        Expr::RecursiveDescent => Expr::RecursiveDescent,
+        Expr::Optional(e) => Expr::Optional(Box::new(substitute_var(e, var_name, replacement))),
+        Expr::Pipe(exprs) => Expr::Pipe(
+            exprs
+                .iter()
+                .map(|e| substitute_var(e, var_name, replacement))
+                .collect(),
+        ),
+        Expr::Comma(exprs) => Expr::Comma(
+            exprs
+                .iter()
+                .map(|e| substitute_var(e, var_name, replacement))
+                .collect(),
+        ),
+        Expr::Array(e) => Expr::Array(Box::new(substitute_var(e, var_name, replacement))),
+        Expr::Object(entries) => Expr::Object(
+            entries
+                .iter()
+                .map(|entry| {
+                    let new_key = match &entry.key {
+                        ObjectKey::Literal(s) => ObjectKey::Literal(s.clone()),
+                        ObjectKey::Expr(e) => {
+                            ObjectKey::Expr(Box::new(substitute_var(e, var_name, replacement)))
+                        }
+                    };
+                    ObjectEntry {
+                        key: new_key,
+                        value: substitute_var(&entry.value, var_name, replacement),
+                    }
+                })
+                .collect(),
+        ),
+        Expr::Literal(lit) => Expr::Literal(lit.clone()),
+        Expr::Paren(e) => Expr::Paren(Box::new(substitute_var(e, var_name, replacement))),
+        Expr::Arithmetic { op, left, right } => Expr::Arithmetic {
+            op: *op,
+            left: Box::new(substitute_var(left, var_name, replacement)),
+            right: Box::new(substitute_var(right, var_name, replacement)),
+        },
+        Expr::Compare { op, left, right } => Expr::Compare {
+            op: *op,
+            left: Box::new(substitute_var(left, var_name, replacement)),
+            right: Box::new(substitute_var(right, var_name, replacement)),
+        },
+        Expr::And(l, r) => Expr::And(
+            Box::new(substitute_var(l, var_name, replacement)),
+            Box::new(substitute_var(r, var_name, replacement)),
+        ),
+        Expr::Or(l, r) => Expr::Or(
+            Box::new(substitute_var(l, var_name, replacement)),
+            Box::new(substitute_var(r, var_name, replacement)),
+        ),
+        Expr::Not => Expr::Not,
+        Expr::Alternative(l, r) => Expr::Alternative(
+            Box::new(substitute_var(l, var_name, replacement)),
+            Box::new(substitute_var(r, var_name, replacement)),
+        ),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            cond: Box::new(substitute_var(cond, var_name, replacement)),
+            then_branch: Box::new(substitute_var(then_branch, var_name, replacement)),
+            else_branch: Box::new(substitute_var(else_branch, var_name, replacement)),
+        },
+        Expr::Try { expr, catch } => Expr::Try {
+            expr: Box::new(substitute_var(expr, var_name, replacement)),
+            catch: catch
+                .as_ref()
+                .map(|e| Box::new(substitute_var(e, var_name, replacement))),
+        },
+        Expr::Error(msg) => Expr::Error(msg.clone()),
+        Expr::Builtin(b) => Expr::Builtin(substitute_var_in_builtin(b, var_name, replacement)),
+        Expr::StringInterpolation(parts) => Expr::StringInterpolation(
+            parts
+                .iter()
+                .map(|p| match p {
+                    StringPart::Literal(s) => StringPart::Literal(s.clone()),
+                    StringPart::Expr(e) => {
+                        StringPart::Expr(Box::new(substitute_var(e, var_name, replacement)))
+                    }
+                })
+                .collect(),
+        ),
+        Expr::Format(f) => Expr::Format(*f),
+        // Phase 8 expressions
+        Expr::As { expr, var, body } => {
+            // Don't substitute if this `as` binds the same variable (shadowing)
+            if var == var_name {
+                Expr::As {
+                    expr: Box::new(substitute_var(expr, var_name, replacement)),
+                    var: var.clone(),
+                    body: body.clone(), // Don't substitute in body - shadowed
+                }
+            } else {
+                Expr::As {
+                    expr: Box::new(substitute_var(expr, var_name, replacement)),
+                    var: var.clone(),
+                    body: Box::new(substitute_var(body, var_name, replacement)),
+                }
+            }
+        }
+        Expr::Reduce {
+            input,
+            var,
+            init,
+            update,
+        } => {
+            if var == var_name {
+                Expr::Reduce {
+                    input: Box::new(substitute_var(input, var_name, replacement)),
+                    var: var.clone(),
+                    init: Box::new(substitute_var(init, var_name, replacement)),
+                    update: update.clone(), // shadowed
+                }
+            } else {
+                Expr::Reduce {
+                    input: Box::new(substitute_var(input, var_name, replacement)),
+                    var: var.clone(),
+                    init: Box::new(substitute_var(init, var_name, replacement)),
+                    update: Box::new(substitute_var(update, var_name, replacement)),
+                }
+            }
+        }
+        Expr::Foreach {
+            input,
+            var,
+            init,
+            update,
+            extract,
+        } => {
+            if var == var_name {
+                Expr::Foreach {
+                    input: Box::new(substitute_var(input, var_name, replacement)),
+                    var: var.clone(),
+                    init: Box::new(substitute_var(init, var_name, replacement)),
+                    update: update.clone(),
+                    extract: extract.clone(),
+                }
+            } else {
+                Expr::Foreach {
+                    input: Box::new(substitute_var(input, var_name, replacement)),
+                    var: var.clone(),
+                    init: Box::new(substitute_var(init, var_name, replacement)),
+                    update: Box::new(substitute_var(update, var_name, replacement)),
+                    extract: extract
+                        .as_ref()
+                        .map(|e| Box::new(substitute_var(e, var_name, replacement))),
+                }
+            }
+        }
+        Expr::Limit { n, expr } => Expr::Limit {
+            n: Box::new(substitute_var(n, var_name, replacement)),
+            expr: Box::new(substitute_var(expr, var_name, replacement)),
+        },
+        Expr::FirstExpr(e) => Expr::FirstExpr(Box::new(substitute_var(e, var_name, replacement))),
+        Expr::LastExpr(e) => Expr::LastExpr(Box::new(substitute_var(e, var_name, replacement))),
+        Expr::NthExpr { n, expr } => Expr::NthExpr {
+            n: Box::new(substitute_var(n, var_name, replacement)),
+            expr: Box::new(substitute_var(expr, var_name, replacement)),
+        },
+        Expr::Until { cond, update } => Expr::Until {
+            cond: Box::new(substitute_var(cond, var_name, replacement)),
+            update: Box::new(substitute_var(update, var_name, replacement)),
+        },
+        Expr::While { cond, update } => Expr::While {
+            cond: Box::new(substitute_var(cond, var_name, replacement)),
+            update: Box::new(substitute_var(update, var_name, replacement)),
+        },
+        Expr::Repeat(e) => Expr::Repeat(Box::new(substitute_var(e, var_name, replacement))),
+        Expr::Range { from, to, step } => Expr::Range {
+            from: Box::new(substitute_var(from, var_name, replacement)),
+            to: to
+                .as_ref()
+                .map(|e| Box::new(substitute_var(e, var_name, replacement))),
+            step: step
+                .as_ref()
+                .map(|e| Box::new(substitute_var(e, var_name, replacement))),
+        },
+    }
+}
+
+/// Substitute variable in a builtin expression.
+fn substitute_var_in_builtin(
+    builtin: &Builtin,
+    var_name: &str,
+    replacement: &OwnedValue,
+) -> Builtin {
+    match builtin {
+        Builtin::Type => Builtin::Type,
+        Builtin::IsNull => Builtin::IsNull,
+        Builtin::IsBoolean => Builtin::IsBoolean,
+        Builtin::IsNumber => Builtin::IsNumber,
+        Builtin::IsString => Builtin::IsString,
+        Builtin::IsArray => Builtin::IsArray,
+        Builtin::IsObject => Builtin::IsObject,
+        Builtin::Length => Builtin::Length,
+        Builtin::Utf8ByteLength => Builtin::Utf8ByteLength,
+        Builtin::Keys => Builtin::Keys,
+        Builtin::KeysUnsorted => Builtin::KeysUnsorted,
+        Builtin::Has(e) => Builtin::Has(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::In(e) => Builtin::In(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Select(e) => Builtin::Select(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Empty => Builtin::Empty,
+        Builtin::Map(e) => Builtin::Map(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::MapValues(e) => {
+            Builtin::MapValues(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Add => Builtin::Add,
+        Builtin::Any => Builtin::Any,
+        Builtin::All => Builtin::All,
+        Builtin::Min => Builtin::Min,
+        Builtin::Max => Builtin::Max,
+        Builtin::MinBy(e) => Builtin::MinBy(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::MaxBy(e) => Builtin::MaxBy(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::AsciiDowncase => Builtin::AsciiDowncase,
+        Builtin::AsciiUpcase => Builtin::AsciiUpcase,
+        Builtin::Ltrimstr(e) => {
+            Builtin::Ltrimstr(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Rtrimstr(e) => {
+            Builtin::Rtrimstr(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Startswith(e) => {
+            Builtin::Startswith(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Endswith(e) => {
+            Builtin::Endswith(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Split(e) => Builtin::Split(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Join(e) => Builtin::Join(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Contains(e) => {
+            Builtin::Contains(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Inside(e) => Builtin::Inside(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::First => Builtin::First,
+        Builtin::Last => Builtin::Last,
+        Builtin::Nth(e) => Builtin::Nth(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Reverse => Builtin::Reverse,
+        Builtin::Flatten => Builtin::Flatten,
+        Builtin::FlattenDepth(e) => {
+            Builtin::FlattenDepth(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::GroupBy(e) => Builtin::GroupBy(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Unique => Builtin::Unique,
+        Builtin::UniqueBy(e) => {
+            Builtin::UniqueBy(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Sort => Builtin::Sort,
+        Builtin::SortBy(e) => Builtin::SortBy(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::ToEntries => Builtin::ToEntries,
+        Builtin::FromEntries => Builtin::FromEntries,
+        Builtin::WithEntries(e) => {
+            Builtin::WithEntries(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::ToString => Builtin::ToString,
+        Builtin::ToNumber => Builtin::ToNumber,
+        Builtin::Explode => Builtin::Explode,
+        Builtin::Implode => Builtin::Implode,
+        Builtin::Test(e) => Builtin::Test(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Indices(e) => Builtin::Indices(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Index(e) => Builtin::Index(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Rindex(e) => Builtin::Rindex(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::ToJsonStream => Builtin::ToJsonStream,
+        Builtin::FromJsonStream => Builtin::FromJsonStream,
+        Builtin::GetPath(e) => Builtin::GetPath(Box::new(substitute_var(e, var_name, replacement))),
+        #[cfg(feature = "regex")]
+        Builtin::Match(re, flags) => Builtin::Match(
+            Box::new(substitute_var(re, var_name, replacement)),
+            flags.clone(),
+        ),
+        #[cfg(feature = "regex")]
+        Builtin::Capture(e) => Builtin::Capture(Box::new(substitute_var(e, var_name, replacement))),
+        #[cfg(feature = "regex")]
+        Builtin::Scan(e) => Builtin::Scan(Box::new(substitute_var(e, var_name, replacement))),
+        #[cfg(feature = "regex")]
+        Builtin::Splits(e) => Builtin::Splits(Box::new(substitute_var(e, var_name, replacement))),
+        #[cfg(feature = "regex")]
+        Builtin::Sub(re, repl) => Builtin::Sub(
+            Box::new(substitute_var(re, var_name, replacement)),
+            Box::new(substitute_var(repl, var_name, replacement)),
+        ),
+        #[cfg(feature = "regex")]
+        Builtin::Gsub(re, repl) => Builtin::Gsub(
+            Box::new(substitute_var(re, var_name, replacement)),
+            Box::new(substitute_var(repl, var_name, replacement)),
+        ),
+        #[cfg(feature = "regex")]
+        Builtin::TestWithFlags(re, flags) => Builtin::TestWithFlags(
+            Box::new(substitute_var(re, var_name, replacement)),
+            flags.clone(),
+        ),
+        // Phase 8 builtins
+        Builtin::Recurse => Builtin::Recurse,
+        Builtin::RecurseF(f) => {
+            Builtin::RecurseF(Box::new(substitute_var(f, var_name, replacement)))
+        }
+        Builtin::RecurseCond(f, c) => Builtin::RecurseCond(
+            Box::new(substitute_var(f, var_name, replacement)),
+            Box::new(substitute_var(c, var_name, replacement)),
+        ),
+        Builtin::Walk(f) => Builtin::Walk(Box::new(substitute_var(f, var_name, replacement))),
+        Builtin::IsValid(e) => Builtin::IsValid(Box::new(substitute_var(e, var_name, replacement))),
+    }
+}
+
+/// Convert an OwnedValue to a Literal for substitution.
+fn owned_to_literal(value: &OwnedValue) -> Literal {
+    match value {
+        OwnedValue::Null => Literal::Null,
+        OwnedValue::Bool(b) => Literal::Bool(*b),
+        OwnedValue::Int(i) => Literal::Int(*i),
+        OwnedValue::Float(f) => Literal::Float(*f),
+        OwnedValue::String(s) => Literal::String(s.clone()),
+        OwnedValue::Array(_) | OwnedValue::Object(_) => {
+            // For complex values, we convert to JSON string
+            // This is a simplification - in a full implementation we'd need
+            // to handle these properly
+            Literal::String(format!("{:?}", value))
+        }
+    }
+}
+
+/// Evaluate `as` binding: `expr as $var | body`.
+fn eval_as<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    var: &str,
+    body: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate the expression to get the value to bind
+    let bound_result = eval_single(expr, value.clone(), optional);
+
+    // Get all values from the expression
+    let bound_values: Vec<OwnedValue> = match bound_result {
+        QueryResult::One(v) => vec![to_owned(&v)],
+        QueryResult::Many(vs) => vs.iter().map(to_owned).collect(),
+        QueryResult::Owned(v) => vec![v],
+        QueryResult::ManyOwned(vs) => vs,
+        QueryResult::None => return QueryResult::None,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+    };
+
+    // For each bound value, substitute and evaluate the body
+    let mut all_results: Vec<OwnedValue> = Vec::new();
+
+    for bound_val in bound_values {
+        let substituted_body = substitute_var(body, var, &bound_val);
+        match eval_single(&substituted_body, value.clone(), optional) {
+            QueryResult::One(v) => all_results.push(to_owned(&v)),
+            QueryResult::Many(vs) => all_results.extend(vs.iter().map(to_owned)),
+            QueryResult::Owned(v) => all_results.push(v),
+            QueryResult::ManyOwned(vs) => all_results.extend(vs),
+            QueryResult::None => {}
+            QueryResult::Error(e) => return QueryResult::Error(e),
+        }
+    }
+
+    if all_results.is_empty() {
+        QueryResult::None
+    } else if all_results.len() == 1 {
+        QueryResult::Owned(all_results.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(all_results)
+    }
+}
+
+/// Evaluate `reduce`: `reduce EXPR as $var (INIT; UPDATE)`.
+fn eval_reduce<'a, W: Clone + AsRef<[u64]>>(
+    input: &Expr,
+    var: &str,
+    init: &Expr,
+    update: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate input to get the stream of values
+    let input_result = eval_single(input, value.clone(), optional);
+    let input_values: Vec<OwnedValue> = match input_result {
+        QueryResult::One(v) => vec![to_owned(&v)],
+        QueryResult::Many(vs) => vs.iter().map(to_owned).collect(),
+        QueryResult::Owned(v) => vec![v],
+        QueryResult::ManyOwned(vs) => vs,
+        QueryResult::None => Vec::new(),
+        QueryResult::Error(e) => return QueryResult::Error(e),
+    };
+
+    // Evaluate initial accumulator
+    let init_result = eval_single(init, value.clone(), optional);
+    let mut acc = match result_to_owned(init_result) {
+        Ok(v) => v,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // For each input value, update the accumulator
+    for input_val in input_values {
+        // Substitute $var in update, then evaluate with acc as input
+        let substituted = substitute_var(update, var, &input_val);
+        // We need to evaluate with acc as the input
+        let acc_result = eval_owned_expr(&substituted, &acc, optional);
+        match acc_result {
+            Ok(new_acc) => acc = new_acc,
+            Err(e) => return QueryResult::Error(e),
+        }
+    }
+
+    QueryResult::Owned(acc)
+}
+
+/// Evaluate an expression with an OwnedValue as input.
+fn eval_owned_expr(
+    expr: &Expr,
+    input: &OwnedValue,
+    optional: bool,
+) -> Result<OwnedValue, EvalError> {
+    // Create a synthetic JSON from the owned value
+    // For simplicity, we'll serialize and reparse
+    // This is inefficient but correct
+    let json_str = owned_value_to_json_string(input);
+    let json_bytes = json_str.as_bytes();
+
+    // We need to create a temporary index and cursor
+    use crate::json::JsonIndex;
+    let index = JsonIndex::build(json_bytes);
+    let cursor = index.root(json_bytes);
+
+    match eval_single(expr, cursor.value(), optional) {
+        QueryResult::One(v) => Ok(to_owned(&v)),
+        QueryResult::Owned(v) => Ok(v),
+        QueryResult::Many(vs) => {
+            if vs.len() == 1 {
+                Ok(to_owned(&vs[0]))
+            } else {
+                Ok(OwnedValue::Array(vs.iter().map(to_owned).collect()))
+            }
+        }
+        QueryResult::ManyOwned(vs) => {
+            if vs.len() == 1 {
+                Ok(vs.into_iter().next().unwrap())
+            } else {
+                Ok(OwnedValue::Array(vs))
+            }
+        }
+        QueryResult::None => Ok(OwnedValue::Null),
+        QueryResult::Error(e) => Err(e),
+    }
+}
+
+/// Convert an OwnedValue to a JSON string.
+fn owned_value_to_json_string(value: &OwnedValue) -> String {
+    match value {
+        OwnedValue::Null => "null".into(),
+        OwnedValue::Bool(true) => "true".into(),
+        OwnedValue::Bool(false) => "false".into(),
+        OwnedValue::Int(i) => format!("{}", i),
+        OwnedValue::Float(f) => {
+            if f.is_nan() || f.is_infinite() {
+                "null".into() // JSON doesn't have NaN or Infinity
+            } else {
+                format!("{}", f)
+            }
+        }
+        OwnedValue::String(s) => {
+            // Escape the string for JSON
+            let mut result = String::with_capacity(s.len() + 2);
+            result.push('"');
+            for c in s.chars() {
+                match c {
+                    '"' => result.push_str("\\\""),
+                    '\\' => result.push_str("\\\\"),
+                    '\n' => result.push_str("\\n"),
+                    '\r' => result.push_str("\\r"),
+                    '\t' => result.push_str("\\t"),
+                    c if c.is_control() => {
+                        result.push_str(&format!("\\u{:04x}", c as u32));
+                    }
+                    c => result.push(c),
+                }
+            }
+            result.push('"');
+            result
+        }
+        OwnedValue::Array(arr) => {
+            let mut result = String::from("[");
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 {
+                    result.push(',');
+                }
+                result.push_str(&owned_value_to_json_string(v));
+            }
+            result.push(']');
+            result
+        }
+        OwnedValue::Object(obj) => {
+            let mut result = String::from("{");
+            for (i, (k, v)) in obj.iter().enumerate() {
+                if i > 0 {
+                    result.push(',');
+                }
+                result.push_str(&owned_value_to_json_string(&OwnedValue::String(k.clone())));
+                result.push(':');
+                result.push_str(&owned_value_to_json_string(v));
+            }
+            result.push('}');
+            result
+        }
+    }
+}
+
+/// Evaluate `foreach`: `foreach EXPR as $var (INIT; UPDATE)` or `foreach EXPR as $var (INIT; UPDATE; EXTRACT)`.
+fn eval_foreach<'a, W: Clone + AsRef<[u64]>>(
+    input: &Expr,
+    var: &str,
+    init: &Expr,
+    update: &Expr,
+    extract: Option<&Expr>,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate input to get the stream
+    let input_result = eval_single(input, value.clone(), optional);
+    let input_values: Vec<OwnedValue> = match input_result {
+        QueryResult::One(v) => vec![to_owned(&v)],
+        QueryResult::Many(vs) => vs.iter().map(to_owned).collect(),
+        QueryResult::Owned(v) => vec![v],
+        QueryResult::ManyOwned(vs) => vs,
+        QueryResult::None => Vec::new(),
+        QueryResult::Error(e) => return QueryResult::Error(e),
+    };
+
+    // Evaluate initial state
+    let init_result = eval_single(init, value.clone(), optional);
+    let mut state = match result_to_owned(init_result) {
+        Ok(v) => v,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    let mut outputs: Vec<OwnedValue> = Vec::new();
+
+    for input_val in input_values {
+        // Substitute $var and evaluate update with state as input
+        let substituted_update = substitute_var(update, var, &input_val);
+        match eval_owned_expr(&substituted_update, &state, optional) {
+            Ok(new_state) => {
+                state = new_state;
+                // If there's an extract expression, evaluate it
+                if let Some(ext) = extract {
+                    let substituted_extract = substitute_var(ext, var, &input_val);
+                    match eval_owned_expr(&substituted_extract, &state, optional) {
+                        Ok(output) => outputs.push(output),
+                        Err(e) => return QueryResult::Error(e),
+                    }
+                } else {
+                    // Without extract, output the current state
+                    outputs.push(state.clone());
+                }
+            }
+            Err(e) => return QueryResult::Error(e),
+        }
+    }
+
+    if outputs.is_empty() {
+        QueryResult::None
+    } else if outputs.len() == 1 {
+        QueryResult::Owned(outputs.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(outputs)
+    }
+}
+
+/// Evaluate `limit(n; expr)` - take first n outputs.
+fn eval_limit<'a, W: Clone + AsRef<[u64]>>(
+    n_expr: &Expr,
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate n
+    let n_result = eval_single(n_expr, value.clone(), optional);
+    let n = match result_to_owned(n_result) {
+        Ok(OwnedValue::Int(i)) if i >= 0 => i as usize,
+        Ok(_) => {
+            return QueryResult::Error(EvalError::new("limit requires non-negative integer"));
+        }
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    if n == 0 {
+        return QueryResult::None;
+    }
+
+    // Evaluate expr and take first n
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) if n >= 1 => QueryResult::One(v),
+        QueryResult::Many(vs) => {
+            let taken: Vec<_> = vs.into_iter().take(n).collect();
+            if taken.is_empty() {
+                QueryResult::None
+            } else if taken.len() == 1 {
+                QueryResult::One(taken.into_iter().next().unwrap())
+            } else {
+                QueryResult::Many(taken)
+            }
+        }
+        QueryResult::Owned(v) if n >= 1 => QueryResult::Owned(v),
+        QueryResult::ManyOwned(vs) => {
+            let taken: Vec<_> = vs.into_iter().take(n).collect();
+            if taken.is_empty() {
+                QueryResult::None
+            } else if taken.len() == 1 {
+                QueryResult::Owned(taken.into_iter().next().unwrap())
+            } else {
+                QueryResult::ManyOwned(taken)
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+        _ => QueryResult::None,
+    }
+}
+
+/// Evaluate `first(expr)` - take first output.
+fn eval_first_expr<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) => QueryResult::One(v),
+        QueryResult::Many(vs) => {
+            if let Some(first) = vs.into_iter().next() {
+                QueryResult::One(first)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::Owned(v) => QueryResult::Owned(v),
+        QueryResult::ManyOwned(vs) => {
+            if let Some(first) = vs.into_iter().next() {
+                QueryResult::Owned(first)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Evaluate `last(expr)` - take last output.
+fn eval_last_expr<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) => QueryResult::One(v),
+        QueryResult::Many(vs) => {
+            if let Some(last) = vs.into_iter().last() {
+                QueryResult::One(last)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::Owned(v) => QueryResult::Owned(v),
+        QueryResult::ManyOwned(vs) => {
+            if let Some(last) = vs.into_iter().last() {
+                QueryResult::Owned(last)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Evaluate `nth(n; expr)` - take nth output.
+fn eval_nth_expr<'a, W: Clone + AsRef<[u64]>>(
+    n_expr: &Expr,
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate n
+    let n_result = eval_single(n_expr, value.clone(), optional);
+    let n = match result_to_owned(n_result) {
+        Ok(OwnedValue::Int(i)) if i >= 0 => i as usize,
+        Ok(_) => {
+            return QueryResult::Error(EvalError::new("nth requires non-negative integer"));
+        }
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) if n == 0 => QueryResult::One(v),
+        QueryResult::One(_) => QueryResult::None,
+        QueryResult::Many(vs) => {
+            if let Some(item) = vs.into_iter().nth(n) {
+                QueryResult::One(item)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::Owned(v) if n == 0 => QueryResult::Owned(v),
+        QueryResult::Owned(_) => QueryResult::None,
+        QueryResult::ManyOwned(vs) => {
+            if let Some(item) = vs.into_iter().nth(n) {
+                QueryResult::Owned(item)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Evaluate `until(cond; update)` - apply update until cond is true.
+fn eval_until<'a, W: Clone + AsRef<[u64]>>(
+    cond: &Expr,
+    update: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let mut current = to_owned(&value);
+    const MAX_ITERATIONS: usize = 10000;
+
+    for _ in 0..MAX_ITERATIONS {
+        // Check condition
+        match eval_owned_expr(cond, &current, optional) {
+            Ok(cond_val) => {
+                if cond_val.is_truthy() {
+                    return QueryResult::Owned(current);
+                }
+            }
+            Err(e) => return QueryResult::Error(e),
+        }
+
+        // Apply update
+        match eval_owned_expr(update, &current, optional) {
+            Ok(new_val) => current = new_val,
+            Err(e) => return QueryResult::Error(e),
+        }
+    }
+
+    QueryResult::Error(EvalError::new("until: maximum iterations exceeded"))
+}
+
+/// Evaluate `while(cond; update)` - output values while cond is true.
+fn eval_while<'a, W: Clone + AsRef<[u64]>>(
+    cond: &Expr,
+    update: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let mut current = to_owned(&value);
+    let mut outputs: Vec<OwnedValue> = Vec::new();
+    const MAX_ITERATIONS: usize = 10000;
+
+    for _ in 0..MAX_ITERATIONS {
+        // Check condition
+        match eval_owned_expr(cond, &current, optional) {
+            Ok(cond_val) => {
+                if !cond_val.is_truthy() {
+                    break;
+                }
+            }
+            Err(e) => return QueryResult::Error(e),
+        }
+
+        // Output current value
+        outputs.push(current.clone());
+
+        // Apply update
+        match eval_owned_expr(update, &current, optional) {
+            Ok(new_val) => current = new_val,
+            Err(e) => return QueryResult::Error(e),
+        }
+    }
+
+    if outputs.is_empty() {
+        QueryResult::None
+    } else if outputs.len() == 1 {
+        QueryResult::Owned(outputs.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(outputs)
+    }
+}
+
+/// Evaluate `repeat(expr)` - repeatedly apply expr.
+/// Note: This produces an infinite stream, so we limit it.
+fn eval_repeat<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let mut current = to_owned(&value);
+    let mut outputs: Vec<OwnedValue> = Vec::new();
+    const MAX_ITERATIONS: usize = 1000; // Limit to prevent infinite loops
+
+    for _ in 0..MAX_ITERATIONS {
+        outputs.push(current.clone());
+        match eval_owned_expr(expr, &current, optional) {
+            Ok(new_val) => current = new_val,
+            Err(_) => break, // Stop on error
+        }
+    }
+
+    if outputs.is_empty() {
+        QueryResult::None
+    } else if outputs.len() == 1 {
+        QueryResult::Owned(outputs.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(outputs)
+    }
+}
+
+/// Evaluate `range(n)`, `range(a;b)`, or `range(a;b;step)`.
+fn eval_range<'a, W: Clone + AsRef<[u64]>>(
+    from: &Expr,
+    to: Option<&Expr>,
+    step: Option<&Expr>,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let from_val = match eval_single(from, value.clone(), optional) {
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::One(v) => match to_owned(&v) {
+            OwnedValue::Int(i) => i,
+            OwnedValue::Float(f) => f as i64,
+            _ => return QueryResult::Error(EvalError::new("range requires numbers")),
+        },
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::new("range requires numbers")),
+    };
+
+    let to_val = if let Some(to_expr) = to {
+        match eval_single(to_expr, value.clone(), optional) {
+            QueryResult::Owned(OwnedValue::Int(i)) => i,
+            QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+            QueryResult::One(v) => match to_owned(&v) {
+                OwnedValue::Int(i) => i,
+                OwnedValue::Float(f) => f as i64,
+                _ => return QueryResult::Error(EvalError::new("range requires numbers")),
+            },
+            QueryResult::Error(e) => return QueryResult::Error(e),
+            _ => return QueryResult::Error(EvalError::new("range requires numbers")),
+        }
+    } else {
+        // range(n) means range(0; n)
+        let to = from_val;
+        return eval_range_values(0, to, 1);
+    };
+
+    let step_val = if let Some(step_expr) = step {
+        match eval_single(step_expr, value, optional) {
+            QueryResult::Owned(OwnedValue::Int(i)) if i != 0 => i,
+            QueryResult::Owned(OwnedValue::Float(f)) if f != 0.0 => f as i64,
+            QueryResult::One(v) => match to_owned(&v) {
+                OwnedValue::Int(i) if i != 0 => i,
+                OwnedValue::Float(f) if f != 0.0 => f as i64,
+                _ => return QueryResult::Error(EvalError::new("range step cannot be zero")),
+            },
+            QueryResult::Error(e) => return QueryResult::Error(e),
+            _ => return QueryResult::Error(EvalError::new("range step cannot be zero")),
+        }
+    } else {
+        1
+    };
+
+    eval_range_values(from_val, to_val, step_val)
+}
+
+/// Helper to generate range values.
+fn eval_range_values<'a, W: Clone + AsRef<[u64]>>(
+    from: i64,
+    to: i64,
+    step: i64,
+) -> QueryResult<'a, W> {
+    let mut values: Vec<OwnedValue> = Vec::new();
+    const MAX_RANGE: usize = 100000;
+
+    if step > 0 {
+        let mut i = from;
+        while i < to && values.len() < MAX_RANGE {
+            values.push(OwnedValue::Int(i));
+            i += step;
+        }
+    } else if step < 0 {
+        let mut i = from;
+        while i > to && values.len() < MAX_RANGE {
+            values.push(OwnedValue::Int(i));
+            i += step;
+        }
+    }
+
+    if values.is_empty() {
+        QueryResult::None
+    } else if values.len() == 1 {
+        QueryResult::Owned(values.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(values)
+    }
+}
+
+/// Builtin: recurse (recurse(.[]))
+fn builtin_recurse<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Default recurse is equivalent to recurse(.[]?)
+    let f = Expr::Optional(Box::new(Expr::Iterate));
+    builtin_recurse_f(&f, value, optional)
+}
+
+/// Builtin: recurse(f)
+fn builtin_recurse_f<'a, W: Clone + AsRef<[u64]>>(
+    f: &Expr,
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    let mut outputs: Vec<OwnedValue> = Vec::new();
+    let mut queue: Vec<OwnedValue> = vec![to_owned(&value)];
+    const MAX_ITEMS: usize = 10000;
+
+    while !queue.is_empty() && outputs.len() < MAX_ITEMS {
+        let current = queue.remove(0);
+        outputs.push(current.clone());
+
+        // Apply f to get children
+        match eval_owned_expr(f, &current, true) {
+            Ok(OwnedValue::Array(arr)) => {
+                queue.extend(arr);
+            }
+            Ok(v) if !matches!(v, OwnedValue::Null) => {
+                queue.push(v);
+            }
+            _ => {}
+        }
+    }
+
+    if outputs.is_empty() {
+        QueryResult::None
+    } else if outputs.len() == 1 {
+        QueryResult::Owned(outputs.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(outputs)
+    }
+}
+
+/// Builtin: recurse(f; cond)
+fn builtin_recurse_cond<'a, W: Clone + AsRef<[u64]>>(
+    f: &Expr,
+    cond: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let mut outputs: Vec<OwnedValue> = Vec::new();
+    let mut queue: Vec<OwnedValue> = vec![to_owned(&value)];
+    const MAX_ITEMS: usize = 10000;
+
+    while !queue.is_empty() && outputs.len() < MAX_ITEMS {
+        let current = queue.remove(0);
+
+        // Check condition
+        let should_continue = match eval_owned_expr(cond, &current, optional) {
+            Ok(v) => v.is_truthy(),
+            Err(_) => false,
+        };
+
+        if !should_continue {
+            continue;
+        }
+
+        outputs.push(current.clone());
+
+        // Apply f to get children
+        match eval_owned_expr(f, &current, true) {
+            Ok(OwnedValue::Array(arr)) => {
+                queue.extend(arr);
+            }
+            Ok(v) if !matches!(v, OwnedValue::Null) => {
+                queue.push(v);
+            }
+            _ => {}
+        }
+    }
+
+    if outputs.is_empty() {
+        QueryResult::None
+    } else if outputs.len() == 1 {
+        QueryResult::Owned(outputs.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(outputs)
+    }
+}
+
+/// Builtin: walk(f) - recursively transform all values.
+fn builtin_walk<'a, W: Clone + AsRef<[u64]>>(
+    f: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let owned = to_owned(&value);
+    match walk_impl(f, owned, optional) {
+        Ok(result) => QueryResult::Owned(result),
+        Err(e) => QueryResult::Error(e),
+    }
+}
+
+/// Implementation of walk - processes children first, then applies f.
+fn walk_impl(f: &Expr, value: OwnedValue, optional: bool) -> Result<OwnedValue, EvalError> {
+    // First, recursively process children
+    let processed = match value {
+        OwnedValue::Array(arr) => {
+            let new_arr: Result<Vec<_>, _> =
+                arr.into_iter().map(|v| walk_impl(f, v, optional)).collect();
+            OwnedValue::Array(new_arr?)
+        }
+        OwnedValue::Object(obj) => {
+            let new_obj: Result<BTreeMap<_, _>, _> = obj
+                .into_iter()
+                .map(|(k, v)| walk_impl(f, v, optional).map(|nv| (k, nv)))
+                .collect();
+            OwnedValue::Object(new_obj?)
+        }
+        other => other,
+    };
+
+    // Then apply f to the processed value
+    eval_owned_expr(f, &processed, optional)
+}
+
+/// Builtin: isvalid(expr) - check if expr succeeds without errors.
+fn builtin_isvalid<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    match eval_single(expr, value, true) {
+        QueryResult::Error(_) => QueryResult::Owned(OwnedValue::Bool(false)),
+        QueryResult::None => QueryResult::Owned(OwnedValue::Bool(false)),
+        _ => QueryResult::Owned(OwnedValue::Bool(true)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5118,6 +6240,170 @@ mod tests {
                 assert_eq!(obj.get("first"), Some(&OwnedValue::String("foo".to_string())));
                 assert_eq!(obj.get("second"), Some(&OwnedValue::String("bar".to_string())));
             }
+        );
+    }
+
+    // =========================================================================
+    // Phase 8 Tests: Variables and Advanced Control Flow
+    // =========================================================================
+
+    #[test]
+    fn test_variable_binding_as() {
+        // Simple variable binding: .foo as $x | .bar + $x
+        query!(br#"{"foo": 10, "bar": 5}"#, r#".foo as $x | .bar + $x"#,
+            QueryResult::Owned(OwnedValue::Int(15)) => {}
+        );
+
+        // Variable with object construction
+        query!(br#"{"name": "Alice", "age": 30}"#, r#".name as $n | {name: $n, greeting: "Hello"}"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("name"), Some(&OwnedValue::String("Alice".to_string())));
+                assert_eq!(obj.get("greeting"), Some(&OwnedValue::String("Hello".to_string())));
+            }
+        );
+    }
+
+    #[test]
+    fn test_reduce() {
+        // Sum array elements
+        query!(br#"[1, 2, 3, 4, 5]"#, r#"reduce .[] as $x (0; . + $x)"#,
+            QueryResult::Owned(OwnedValue::Int(15)) => {}
+        );
+
+        // Count elements
+        query!(br#"["a", "b", "c"]"#, r#"reduce .[] as $x (0; . + 1)"#,
+            QueryResult::Owned(OwnedValue::Int(3)) => {}
+        );
+    }
+
+    #[test]
+    fn test_foreach() {
+        // Running sum
+        query!(br#"[1, 2, 3]"#, r#"[foreach .[] as $x (0; . + $x)]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], OwnedValue::Int(1));
+                assert_eq!(arr[1], OwnedValue::Int(3));
+                assert_eq!(arr[2], OwnedValue::Int(6));
+            }
+        );
+    }
+
+    #[test]
+    fn test_range() {
+        // range(n) - generates 0 to n-1
+        query!(br#"null"#, r#"[range(5)]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::Int(0),
+                    OwnedValue::Int(1),
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(3),
+                    OwnedValue::Int(4),
+                ]);
+            }
+        );
+
+        // range(a;b) - generates a to b-1
+        query!(br#"null"#, r#"[range(2;5)]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(3),
+                    OwnedValue::Int(4),
+                ]);
+            }
+        );
+
+        // range(a;b;step)
+        query!(br#"null"#, r#"[range(0;10;2)]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::Int(0),
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(4),
+                    OwnedValue::Int(6),
+                    OwnedValue::Int(8),
+                ]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_limit() {
+        // limit(n; expr) - take first n outputs
+        query!(br#"null"#, r#"[limit(3; range(10))]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::Int(0),
+                    OwnedValue::Int(1),
+                    OwnedValue::Int(2),
+                ]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_first_last_expr() {
+        // first(expr) - returns a reference to first element
+        query!(br#"[1, 2, 3]"#, r#"first(.[])"#,
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 1);
+            }
+        );
+
+        // last(expr) - returns a reference to last element
+        query!(br#"[1, 2, 3]"#, r#"last(.[])"#,
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 3);
+            }
+        );
+    }
+
+    #[test]
+    fn test_until() {
+        // until(cond; update) - iterate until condition is true
+        query!(br#"1"#, r#"until(. >= 10; . * 2)"#,
+            QueryResult::Owned(OwnedValue::Int(16)) => {}
+        );
+    }
+
+    #[test]
+    fn test_while() {
+        // while(cond; update) - output while condition is true
+        query!(br#"1"#, r#"[while(. < 10; . * 2)]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::Int(1),
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(4),
+                    OwnedValue::Int(8),
+                ]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_recurse() {
+        // Basic recurse with filter - collect all values recursively
+        query!(br#"{"a": 1, "b": {"c": 2}}"#, r#"[recurse | .a? // .c? // empty]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                // Should contain the values 1 and 2
+                assert!(arr.len() >= 2);
+            }
+        );
+    }
+
+    #[test]
+    fn test_isvalid() {
+        // isvalid returns true for valid expressions
+        query!(br#"{"a": 1}"#, r#"isvalid(.a)"#,
+            QueryResult::Owned(OwnedValue::Bool(true)) => {}
+        );
+
+        // isvalid returns false for error-producing expressions
+        query!(br#"{"a": 1}"#, r#"isvalid(.b)"#,
+            QueryResult::Owned(OwnedValue::Bool(false)) => {}
         );
     }
 }

@@ -778,7 +778,14 @@ impl<'a> Parser<'a> {
                 self.parse_postfix(expr)
             }
 
-            // Keywords: null, true, false, not, if, try, error, builtins
+            // Variable reference: $varname
+            Some('$') => {
+                self.next();
+                let name = self.parse_ident()?;
+                Ok(Expr::Var(name))
+            }
+
+            // Keywords: null, true, false, not, if, try, error, reduce, foreach, etc.
             Some(c) if c.is_alphabetic() => {
                 if self.matches_keyword("null") {
                     self.consume_keyword("null");
@@ -798,6 +805,24 @@ impl<'a> Parser<'a> {
                     self.parse_try_expr()
                 } else if self.matches_keyword("error") {
                     self.parse_error_expr()
+                } else if self.matches_keyword("reduce") {
+                    self.parse_reduce_expr()
+                } else if self.matches_keyword("foreach") {
+                    self.parse_foreach_expr()
+                } else if self.matches_keyword("limit") {
+                    self.parse_limit_expr()
+                } else if self.matches_keyword("until") {
+                    self.parse_until_expr()
+                } else if self.matches_keyword("while") {
+                    self.parse_while_expr()
+                } else if self.matches_keyword("repeat") {
+                    self.parse_repeat_expr()
+                } else if self.matches_keyword("range") {
+                    self.parse_range_expr()
+                } else if self.matches_keyword("first") {
+                    self.parse_first_expr()
+                } else if self.matches_keyword("last") {
+                    self.parse_last_expr()
                 } else if let Some(builtin) = self.try_parse_builtin()? {
                     Ok(Expr::Builtin(builtin))
                 } else {
@@ -944,6 +969,258 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Expr::Error(msg))
+    }
+
+    /// Parse a reduce expression.
+    /// Syntax: reduce EXPR as $VAR (INIT; UPDATE)
+    fn parse_reduce_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("reduce");
+        self.skip_ws();
+
+        // Parse input expression - use parse_alternative to stop before 'as'
+        let input = self.parse_alternative()?;
+        self.skip_ws();
+
+        // Expect 'as'
+        if !self.matches_keyword("as") {
+            return Err(ParseError::new("expected 'as'", self.pos));
+        }
+        self.consume_keyword("as");
+        self.skip_ws();
+
+        // Parse variable name (with $)
+        self.expect('$')?;
+        let var = self.parse_ident()?;
+        self.skip_ws();
+
+        // Parse (init; update)
+        self.expect('(')?;
+        self.skip_ws();
+        let init = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(';')?;
+        self.skip_ws();
+        let update = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::Reduce {
+            input: Box::new(input),
+            var,
+            init: Box::new(init),
+            update: Box::new(update),
+        })
+    }
+
+    /// Parse a foreach expression.
+    /// Syntax: foreach EXPR as $VAR (INIT; UPDATE) or foreach EXPR as $VAR (INIT; UPDATE; EXTRACT)
+    fn parse_foreach_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("foreach");
+        self.skip_ws();
+
+        // Parse input expression - use parse_alternative to stop before 'as'
+        let input = self.parse_alternative()?;
+        self.skip_ws();
+
+        // Expect 'as'
+        if !self.matches_keyword("as") {
+            return Err(ParseError::new("expected 'as'", self.pos));
+        }
+        self.consume_keyword("as");
+        self.skip_ws();
+
+        // Parse variable name (with $)
+        self.expect('$')?;
+        let var = self.parse_ident()?;
+        self.skip_ws();
+
+        // Parse (init; update[; extract])
+        self.expect('(')?;
+        self.skip_ws();
+        let init = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(';')?;
+        self.skip_ws();
+        let update = self.parse_pipe_expr()?;
+        self.skip_ws();
+
+        // Optional extract expression
+        let extract = if self.peek() == Some(';') {
+            self.next();
+            self.skip_ws();
+            Some(Box::new(self.parse_pipe_expr()?))
+        } else {
+            None
+        };
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::Foreach {
+            input: Box::new(input),
+            var,
+            init: Box::new(init),
+            update: Box::new(update),
+            extract,
+        })
+    }
+
+    /// Parse a limit expression.
+    /// Syntax: limit(N; EXPR)
+    fn parse_limit_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("limit");
+        self.skip_ws();
+        self.expect('(')?;
+        self.skip_ws();
+        let n = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(';')?;
+        self.skip_ws();
+        let expr = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::Limit {
+            n: Box::new(n),
+            expr: Box::new(expr),
+        })
+    }
+
+    /// Parse an until expression.
+    /// Syntax: until(COND; UPDATE)
+    fn parse_until_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("until");
+        self.skip_ws();
+        self.expect('(')?;
+        self.skip_ws();
+        let cond = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(';')?;
+        self.skip_ws();
+        let update = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::Until {
+            cond: Box::new(cond),
+            update: Box::new(update),
+        })
+    }
+
+    /// Parse a while expression.
+    /// Syntax: while(COND; UPDATE)
+    fn parse_while_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("while");
+        self.skip_ws();
+        self.expect('(')?;
+        self.skip_ws();
+        let cond = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(';')?;
+        self.skip_ws();
+        let update = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::While {
+            cond: Box::new(cond),
+            update: Box::new(update),
+        })
+    }
+
+    /// Parse a repeat expression.
+    /// Syntax: repeat(EXPR)
+    fn parse_repeat_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("repeat");
+        self.skip_ws();
+        self.expect('(')?;
+        self.skip_ws();
+        let expr = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::Repeat(Box::new(expr)))
+    }
+
+    /// Parse a first expression.
+    /// Syntax: first or first(expr)
+    fn parse_first_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("first");
+        self.skip_ws();
+        if self.peek() == Some('(') {
+            self.next();
+            self.skip_ws();
+            let expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            Ok(Expr::FirstExpr(Box::new(expr)))
+        } else {
+            Ok(Expr::Builtin(Builtin::First))
+        }
+    }
+
+    /// Parse a last expression.
+    /// Syntax: last or last(expr)
+    fn parse_last_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("last");
+        self.skip_ws();
+        if self.peek() == Some('(') {
+            self.next();
+            self.skip_ws();
+            let expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            Ok(Expr::LastExpr(Box::new(expr)))
+        } else {
+            Ok(Expr::Builtin(Builtin::Last))
+        }
+    }
+
+    /// Parse a range expression.
+    /// Syntax: range(N) or range(A; B) or range(A; B; STEP)
+    fn parse_range_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("range");
+        self.skip_ws();
+        self.expect('(')?;
+        self.skip_ws();
+        let first = self.parse_pipe_expr()?;
+        self.skip_ws();
+
+        if self.peek() == Some(')') {
+            // range(N) - from 0 to N
+            self.next();
+            return Ok(Expr::Range {
+                from: Box::new(Expr::Literal(Literal::Int(0))),
+                to: Some(Box::new(first)),
+                step: None,
+            });
+        }
+
+        self.expect(';')?;
+        self.skip_ws();
+        let second = self.parse_pipe_expr()?;
+        self.skip_ws();
+
+        if self.peek() == Some(')') {
+            // range(A; B)
+            self.next();
+            return Ok(Expr::Range {
+                from: Box::new(first),
+                to: Some(Box::new(second)),
+                step: None,
+            });
+        }
+
+        self.expect(';')?;
+        self.skip_ws();
+        let step = self.parse_pipe_expr()?;
+        self.skip_ws();
+        self.expect(')')?;
+
+        Ok(Expr::Range {
+            from: Box::new(first),
+            to: Some(Box::new(second)),
+            step: Some(Box::new(step)),
+        })
     }
 
     /// Parse a format string: @text, @json, @uri, etc.
@@ -1232,14 +1509,8 @@ impl<'a> Parser<'a> {
         }
 
         // Phase 5: Array Functions
-        if self.matches_keyword("first") {
-            self.consume_keyword("first");
-            return Ok(Some(Builtin::First));
-        }
-        if self.matches_keyword("last") {
-            self.consume_keyword("last");
-            return Ok(Some(Builtin::Last));
-        }
+        // Note: first, last are handled in parse_primary before try_parse_builtin
+        // to support both first/last (no args) and first(expr)/last(expr)
         if self.matches_keyword("nth") {
             self.consume_keyword("nth");
             self.skip_ws();
@@ -1500,6 +1771,54 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Phase 8: Advanced Control Flow Builtins
+        // recurse, recurse(f), recurse(f; cond)
+        if self.matches_keyword("recurse") {
+            self.consume_keyword("recurse");
+            self.skip_ws();
+            if self.peek() == Some('(') {
+                self.next();
+                self.skip_ws();
+                let f = self.parse_pipe_expr()?;
+                self.skip_ws();
+                if self.peek() == Some(';') {
+                    self.next();
+                    self.skip_ws();
+                    let cond = self.parse_pipe_expr()?;
+                    self.skip_ws();
+                    self.expect(')')?;
+                    return Ok(Some(Builtin::RecurseCond(Box::new(f), Box::new(cond))));
+                }
+                self.expect(')')?;
+                return Ok(Some(Builtin::RecurseF(Box::new(f))));
+            }
+            return Ok(Some(Builtin::Recurse));
+        }
+
+        // walk(f)
+        if self.matches_keyword("walk") {
+            self.consume_keyword("walk");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let f = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Walk(Box::new(f))));
+        }
+
+        // isvalid(expr)
+        if self.matches_keyword("isvalid") {
+            self.consume_keyword("isvalid");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::IsValid(Box::new(expr))));
+        }
+
         Ok(None)
     }
 
@@ -1516,7 +1835,7 @@ impl<'a> Parser<'a> {
             // Comparison operators
             Some('=') | Some('!') | Some('<') | Some('>') => true,
             // Keywords that follow expressions
-            Some('a') if self.matches_keyword("and") => true,
+            Some('a') if self.matches_keyword("and") || self.matches_keyword("as") => true,
             Some('o') if self.matches_keyword("or") => true,
             // Conditional keywords
             Some('t') if self.matches_keyword("then") => true,
@@ -1728,9 +2047,27 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a pipe expression: `expr | expr | ...`
+    /// Also handles `as` binding: `expr as $var | body`
     fn parse_pipe_expr(&mut self) -> Result<Expr, ParseError> {
         let first = self.parse_alternative()?;
         self.skip_ws();
+
+        // Check for `as` binding
+        if self.matches_keyword("as") {
+            self.consume_keyword("as");
+            self.skip_ws();
+            self.expect('$')?;
+            let var = self.parse_ident()?;
+            self.skip_ws();
+            self.expect('|')?;
+            self.skip_ws();
+            let body = self.parse_pipe_expr()?;
+            return Ok(Expr::As {
+                expr: Box::new(first),
+                var,
+                body: Box::new(body),
+            });
+        }
 
         if self.peek() != Some('|') {
             return Ok(first);
@@ -1741,8 +2078,36 @@ impl<'a> Parser<'a> {
         while self.peek() == Some('|') {
             self.next();
             self.skip_ws();
-            exprs.push(self.parse_alternative()?);
+            let next_expr = self.parse_alternative()?;
             self.skip_ws();
+
+            // Check for `as` binding after pipe
+            if self.matches_keyword("as") {
+                self.consume_keyword("as");
+                self.skip_ws();
+                self.expect('$')?;
+                let var = self.parse_ident()?;
+                self.skip_ws();
+                self.expect('|')?;
+                self.skip_ws();
+                let body = self.parse_pipe_expr()?;
+                // Wrap what we have so far as the expression being bound
+                let so_far = if exprs.len() == 1 {
+                    exprs.pop().unwrap()
+                } else {
+                    Expr::Pipe(exprs)
+                };
+                return Ok(Expr::Pipe(vec![
+                    so_far,
+                    Expr::As {
+                        expr: Box::new(next_expr),
+                        var,
+                        body: Box::new(body),
+                    },
+                ]));
+            }
+
+            exprs.push(next_expr);
         }
 
         Ok(Expr::pipe(exprs))

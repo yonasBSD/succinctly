@@ -112,6 +112,79 @@ pub enum Expr {
 
     /// Format string: `@json`, `@text`, `@uri`, etc.
     Format(FormatType),
+
+    // Phase 8: Variables and Advanced Control Flow
+    /// Variable binding: `.foo as $x | .bar + $x`
+    As {
+        /// Expression to evaluate and bind
+        expr: Box<Expr>,
+        /// Variable name (without the $)
+        var: String,
+        /// Body expression where the variable is in scope
+        body: Box<Expr>,
+    },
+
+    /// Variable reference: `$x`
+    Var(String),
+
+    /// Reduce: `reduce .[] as $x (0; . + $x)`
+    Reduce {
+        /// Input expression (what to iterate over)
+        input: Box<Expr>,
+        /// Variable name for each element
+        var: String,
+        /// Initial accumulator value
+        init: Box<Expr>,
+        /// Update expression (has access to accumulator via . and element via $var)
+        update: Box<Expr>,
+    },
+
+    /// Foreach: `foreach .[] as $x (0; . + 1)` or `foreach .[] as $x (0; . + 1; .)`
+    Foreach {
+        /// Input expression
+        input: Box<Expr>,
+        /// Variable name for each element
+        var: String,
+        /// Initial accumulator value
+        init: Box<Expr>,
+        /// Update expression
+        update: Box<Expr>,
+        /// Extract expression (optional, defaults to identity)
+        extract: Option<Box<Expr>>,
+    },
+
+    /// Limit: `limit(n; expr)` - take first n outputs
+    Limit {
+        /// Number of outputs to take
+        n: Box<Expr>,
+        /// Expression to limit
+        expr: Box<Expr>,
+    },
+
+    /// First with expression: `first(expr)` - first output of expr
+    FirstExpr(Box<Expr>),
+
+    /// Last with expression: `last(expr)` - last output of expr
+    LastExpr(Box<Expr>),
+
+    /// Nth with expression: `nth(n; expr)` - nth output of expr
+    NthExpr { n: Box<Expr>, expr: Box<Expr> },
+
+    /// Until: `until(cond; update)` - loop until condition is true
+    Until { cond: Box<Expr>, update: Box<Expr> },
+
+    /// While: `while(cond; update)` - loop while condition is true
+    While { cond: Box<Expr>, update: Box<Expr> },
+
+    /// Repeat: `repeat(expr)` - infinite repetition
+    Repeat(Box<Expr>),
+
+    /// Range: `range(n)` or `range(a;b)` or `range(a;b;step)`
+    Range {
+        from: Box<Expr>,
+        to: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
 }
 
 /// A part of a string interpolation expression.
@@ -309,6 +382,18 @@ pub enum Builtin {
     /// `test(re; flags)` - test with flags (extends basic test)
     #[cfg(feature = "regex")]
     TestWithFlags(Box<Expr>, String),
+
+    // Phase 8: Advanced Control Flow Builtins
+    /// `recurse` - recursively apply .[] (same as recurse(.[];true))
+    Recurse,
+    /// `recurse(f)` - recursively apply f
+    RecurseF(Box<Expr>),
+    /// `recurse(f; cond)` - recurse while condition holds
+    RecurseCond(Box<Expr>, Box<Expr>),
+    /// `walk(f)` - apply f to all values bottom-up
+    Walk(Box<Expr>),
+    /// `isvalid(expr)` - true if expr produces at least one output without error
+    IsValid(Box<Expr>),
 }
 
 /// Arithmetic operators.
