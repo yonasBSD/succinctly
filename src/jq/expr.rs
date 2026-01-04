@@ -286,6 +286,29 @@ pub enum Builtin {
     FromJsonStream,
     /// `getpath(path)` - get value at path
     GetPath(Box<Expr>),
+
+    // Phase 7: Regular Expression Functions (requires "regex" feature)
+    /// `match(re)` or `match(re; flags)` - return match object
+    #[cfg(feature = "regex")]
+    Match(Box<Expr>, Option<String>),
+    /// `capture(re)` - return named captures as object
+    #[cfg(feature = "regex")]
+    Capture(Box<Expr>),
+    /// `scan(re)` - find all matches
+    #[cfg(feature = "regex")]
+    Scan(Box<Expr>),
+    /// `splits(re)` - split by regex (iterator version)
+    #[cfg(feature = "regex")]
+    Splits(Box<Expr>),
+    /// `sub(re; replacement)` - replace first match
+    #[cfg(feature = "regex")]
+    Sub(Box<Expr>, Box<Expr>),
+    /// `gsub(re; replacement)` - replace all matches
+    #[cfg(feature = "regex")]
+    Gsub(Box<Expr>, Box<Expr>),
+    /// `test(re; flags)` - test with flags (extends basic test)
+    #[cfg(feature = "regex")]
+    TestWithFlags(Box<Expr>, String),
 }
 
 /// Arithmetic operators.

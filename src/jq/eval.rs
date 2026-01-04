@@ -969,6 +969,22 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::ToJsonStream => builtin_tojsonstream(value, optional),
         Builtin::FromJsonStream => builtin_fromjsonstream(value, optional),
         Builtin::GetPath(path) => builtin_getpath(path, value, optional),
+
+        // Phase 7: Regex Functions (requires "regex" feature)
+        #[cfg(feature = "regex")]
+        Builtin::Match(re, flags) => builtin_match(re, flags.as_deref(), value, optional),
+        #[cfg(feature = "regex")]
+        Builtin::Capture(re) => builtin_capture(re, value, optional),
+        #[cfg(feature = "regex")]
+        Builtin::Scan(re) => builtin_scan(re, value, optional),
+        #[cfg(feature = "regex")]
+        Builtin::Splits(re) => builtin_splits(re, value, optional),
+        #[cfg(feature = "regex")]
+        Builtin::Sub(re, replacement) => builtin_sub(re, replacement, value, optional),
+        #[cfg(feature = "regex")]
+        Builtin::Gsub(re, replacement) => builtin_gsub(re, replacement, value, optional),
+        #[cfg(feature = "regex")]
+        Builtin::TestWithFlags(re, flags) => builtin_test_with_flags(re, flags, value, optional),
     }
 }
 
@@ -2892,6 +2908,410 @@ fn builtin_getpath<'a, W: Clone + AsRef<[u64]>>(
     QueryResult::Owned(current)
 }
 
+// =============================================================================
+// Phase 7: Regex Functions (requires "regex" feature)
+// =============================================================================
+
+/// Build regex flags from jq flag string
+#[cfg(feature = "regex")]
+fn build_regex(pattern: &str, flags: Option<&str>) -> Result<regex::Regex, EvalError> {
+    let mut pattern = pattern.to_string();
+
+    // Apply flags
+    if let Some(flags) = flags {
+        let mut prefix = String::from("(?");
+        for c in flags.chars() {
+            match c {
+                'i' => prefix.push('i'), // case insensitive
+                'x' => prefix.push('x'), // extended mode (ignore whitespace)
+                's' => prefix.push('s'), // single-line mode (. matches newline)
+                'm' => prefix.push('m'), // multi-line mode
+                'g' => {}                // global - handled at call site
+                'p' => {}                // PCRE mode - not fully supported
+                _ => {}
+            }
+        }
+        if prefix.len() > 2 {
+            prefix.push(')');
+            pattern = format!("{}{}", prefix, pattern);
+        }
+    }
+
+    regex::Regex::new(&pattern).map_err(|e| EvalError::new(format!("invalid regex: {}", e)))
+}
+
+/// Builtin: match(re) or match(re; flags) - return match object
+#[cfg(feature = "regex")]
+fn builtin_match<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    flags: Option<&str>,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, flags) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Check if global flag is set
+    let global = flags.map(|f| f.contains('g')).unwrap_or(false);
+
+    if global {
+        // Return all matches
+        let matches: Vec<OwnedValue> = re
+            .find_iter(&input)
+            .map(|m| build_match_object(&re, m.as_str(), m.start(), &input))
+            .collect();
+        QueryResult::Owned(OwnedValue::Array(matches))
+    } else {
+        // Return first match or null
+        match re.find(&input) {
+            Some(m) => {
+                QueryResult::Owned(build_match_object(&re, m.as_str(), m.start(), &input))
+            }
+            None => QueryResult::Owned(OwnedValue::Null),
+        }
+    }
+}
+
+/// Build a jq match object
+#[cfg(feature = "regex")]
+fn build_match_object(
+    re: &regex::Regex,
+    matched: &str,
+    offset: usize,
+    input: &str,
+) -> OwnedValue {
+    let mut obj = BTreeMap::new();
+
+    obj.insert("offset".to_string(), OwnedValue::Int(offset as i64));
+    obj.insert("length".to_string(), OwnedValue::Int(matched.len() as i64));
+    obj.insert("string".to_string(), OwnedValue::String(matched.to_string()));
+
+    // Build captures array
+    let mut captures = Vec::new();
+    if let Some(caps) = re.captures(input) {
+        for (i, name) in re.capture_names().enumerate() {
+            if i == 0 {
+                continue; // Skip the full match
+            }
+            let cap = caps.get(i);
+            let mut cap_obj = BTreeMap::new();
+            cap_obj.insert(
+                "offset".to_string(),
+                cap.map(|m| OwnedValue::Int(m.start() as i64))
+                    .unwrap_or(OwnedValue::Null),
+            );
+            cap_obj.insert(
+                "length".to_string(),
+                cap.map(|m| OwnedValue::Int(m.len() as i64))
+                    .unwrap_or(OwnedValue::Int(0)),
+            );
+            cap_obj.insert(
+                "string".to_string(),
+                cap.map(|m| OwnedValue::String(m.as_str().to_string()))
+                    .unwrap_or(OwnedValue::Null),
+            );
+            cap_obj.insert(
+                "name".to_string(),
+                name.map(|n| OwnedValue::String(n.to_string()))
+                    .unwrap_or(OwnedValue::Null),
+            );
+            captures.push(OwnedValue::Object(cap_obj));
+        }
+    }
+    obj.insert("captures".to_string(), OwnedValue::Array(captures));
+
+    OwnedValue::Object(obj)
+}
+
+/// Builtin: capture(re) - return named captures as object
+#[cfg(feature = "regex")]
+fn builtin_capture<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, None) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Extract named captures
+    match re.captures(&input) {
+        Some(caps) => {
+            let mut result = BTreeMap::new();
+            for name in re.capture_names().flatten() {
+                if let Some(m) = caps.name(name) {
+                    result.insert(name.to_string(), OwnedValue::String(m.as_str().to_string()));
+                }
+            }
+            QueryResult::Owned(OwnedValue::Object(result))
+        }
+        None => QueryResult::Owned(OwnedValue::Null),
+    }
+}
+
+/// Builtin: scan(re) - find all matches
+#[cfg(feature = "regex")]
+fn builtin_scan<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, None) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Find all matches
+    let matches: Vec<OwnedValue> = re
+        .find_iter(&input)
+        .map(|m| OwnedValue::String(m.as_str().to_string()))
+        .collect();
+
+    QueryResult::ManyOwned(matches)
+}
+
+/// Builtin: splits(re) - split by regex
+#[cfg(feature = "regex")]
+fn builtin_splits<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, None) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Split by regex
+    let parts: Vec<OwnedValue> = re
+        .split(&input)
+        .map(|s| OwnedValue::String(s.to_string()))
+        .collect();
+
+    QueryResult::Owned(OwnedValue::Array(parts))
+}
+
+/// Builtin: sub(re; replacement) - replace first match
+#[cfg(feature = "regex")]
+fn builtin_sub<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    replacement_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the replacement
+    let replacement = match result_to_owned(eval_single(replacement_expr, value.clone(), optional))
+    {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "replacement")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, None) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Replace first match
+    let result = re.replace(&input, replacement.as_str());
+    QueryResult::Owned(OwnedValue::String(result.into_owned()))
+}
+
+/// Builtin: gsub(re; replacement) - replace all matches
+#[cfg(feature = "regex")]
+fn builtin_gsub<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    replacement_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the replacement
+    let replacement = match result_to_owned(eval_single(replacement_expr, value.clone(), optional))
+    {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "replacement")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, None) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Replace all matches
+    let result = re.replace_all(&input, replacement.as_str());
+    QueryResult::Owned(OwnedValue::String(result.into_owned()))
+}
+
+/// Builtin: test(re; flags) - test with flags
+#[cfg(feature = "regex")]
+fn builtin_test_with_flags<'a, W: Clone + AsRef<[u64]>>(
+    re_expr: &Expr,
+    flags: &str,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Get the pattern
+    let pattern = match result_to_owned(eval_single(re_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "pattern")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Get the input string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", type_name(&value))),
+    };
+
+    // Build regex
+    let re = match build_regex(&pattern, Some(flags)) {
+        Ok(r) => r,
+        Err(_e) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Test if regex matches
+    QueryResult::Owned(OwnedValue::Bool(re.is_match(&input)))
+}
+
 /// Evaluate a pipe (chain) of expressions.
 fn eval_pipe<'a, W: Clone + AsRef<[u64]>>(
     exprs: &[Expr],
@@ -4616,6 +5036,91 @@ mod tests {
         query!(br#"[1, 2, 3]"#, r#"getpath([1])"#,
             QueryResult::Owned(OwnedValue::Int(n)) => {
                 assert_eq!(n, 2);
+            }
+        );
+    }
+
+    // =========================================================================
+    // Phase 7: Regex Functions (requires "regex" feature)
+    // =========================================================================
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn test_regex_scan() {
+        query!(br#""test abc test""#, r#"scan("test")"#,
+            QueryResult::ManyOwned(matches) => {
+                assert_eq!(matches.len(), 2);
+                assert_eq!(matches[0], OwnedValue::String("test".to_string()));
+                assert_eq!(matches[1], OwnedValue::String("test".to_string()));
+            }
+        );
+    }
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn test_regex_splits() {
+        query!(br#""a1b2c3d""#, r#"splits("[0-9]")"#,
+            QueryResult::Owned(OwnedValue::Array(parts)) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], OwnedValue::String("a".to_string()));
+                assert_eq!(parts[1], OwnedValue::String("b".to_string()));
+                assert_eq!(parts[2], OwnedValue::String("c".to_string()));
+                assert_eq!(parts[3], OwnedValue::String("d".to_string()));
+            }
+        );
+    }
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn test_regex_sub() {
+        query!(br#""hello world world""#, r#"sub("world"; "there")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "hello there world");
+            }
+        );
+    }
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn test_regex_gsub() {
+        query!(br#""hello world world""#, r#"gsub("world"; "there")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "hello there there");
+            }
+        );
+
+        // Replace all digits with X
+        query!(br#""a1b2c3""#, r#"gsub("[0-9]"; "X")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "aXbXcX");
+            }
+        );
+    }
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn test_regex_match() {
+        query!(br#""test123test""#, r#"match("[0-9]+")"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("string"), Some(&OwnedValue::String("123".to_string())));
+                assert_eq!(obj.get("offset"), Some(&OwnedValue::Int(4)));
+                assert_eq!(obj.get("length"), Some(&OwnedValue::Int(3)));
+            }
+        );
+
+        // No match returns null
+        query!(br#""hello""#, r#"match("[0-9]+")"#,
+            QueryResult::Owned(OwnedValue::Null) => {}
+        );
+    }
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn test_regex_capture() {
+        query!(br#""foo bar""#, r#"capture("(?P<first>\\w+) (?P<second>\\w+)")"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("first"), Some(&OwnedValue::String("foo".to_string())));
+                assert_eq!(obj.get("second"), Some(&OwnedValue::String("bar".to_string())));
             }
         );
     }

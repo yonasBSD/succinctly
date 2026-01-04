@@ -29,6 +29,9 @@ serde = ["dep:serde"]
 # CLI tool features
 cli = ["clap", "rand", "rand_chacha", "anyhow", "serde_json", "memmap2"]
 
+# Enable regex support in jq query language
+regex = ["dep:regex"]
+
 # Test features (not for production)
 large-tests = []    # 1G bitvector tests (~125MB RAM)
 huge-tests = []     # 5G bitvector tests (~625MB RAM)
@@ -39,6 +42,7 @@ bytemuck = { version = "1.14", features = ["derive"] }
 memmap2 = { version = "0.9", optional = true }
 tempfile = { version = "3.10", optional = true }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"], optional = true }
+regex = { version = "1.10", optional = true }
 
 # CLI dependencies (optional, only for binary)
 clap = { version = "4.5", features = ["derive"], optional = true }
