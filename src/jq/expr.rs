@@ -447,6 +447,120 @@ pub enum Builtin {
     Walk(Box<Expr>),
     /// `isvalid(expr)` - true if expr produces at least one output without error
     IsValid(Box<Expr>),
+
+    // Phase 10: Path Expressions
+    /// `path(expr)` - return the path to values selected by expr
+    Path(Box<Expr>),
+    /// `paths` - all paths to values (excluding empty paths)
+    Paths,
+    /// `paths(filter)` - paths to values matching filter
+    PathsFilter(Box<Expr>),
+    /// `leaf_paths` - paths to scalar (non-container) values
+    LeafPaths,
+    /// `setpath(path; value)` - set value at path (returns modified copy)
+    SetPath(Box<Expr>, Box<Expr>),
+    /// `delpaths(paths)` - delete paths from value
+    DelPaths(Box<Expr>),
+
+    // Phase 10: Math Functions
+    /// `floor` - floor of number
+    Floor,
+    /// `ceil` - ceiling of number
+    Ceil,
+    /// `round` - round to nearest integer
+    Round,
+    /// `sqrt` - square root
+    Sqrt,
+    /// `fabs` - absolute value
+    Fabs,
+    /// `log` - natural logarithm
+    Log,
+    /// `log10` - base-10 logarithm
+    Log10,
+    /// `log2` - base-2 logarithm
+    Log2,
+    /// `exp` - e^x
+    Exp,
+    /// `exp10` - 10^x
+    Exp10,
+    /// `exp2` - 2^x
+    Exp2,
+    /// `pow(x; y)` - x^y
+    Pow(Box<Expr>, Box<Expr>),
+    /// `sin` - sine
+    Sin,
+    /// `cos` - cosine
+    Cos,
+    /// `tan` - tangent
+    Tan,
+    /// `asin` - arc sine
+    Asin,
+    /// `acos` - arc cosine
+    Acos,
+    /// `atan` - arc tangent
+    Atan,
+    /// `atan(x; y)` - two-argument arc tangent
+    Atan2(Box<Expr>, Box<Expr>),
+    /// `sinh` - hyperbolic sine
+    Sinh,
+    /// `cosh` - hyperbolic cosine
+    Cosh,
+    /// `tanh` - hyperbolic tangent
+    Tanh,
+    /// `asinh` - inverse hyperbolic sine
+    Asinh,
+    /// `acosh` - inverse hyperbolic cosine
+    Acosh,
+    /// `atanh` - inverse hyperbolic tangent
+    Atanh,
+
+    // Phase 10: Number Classification & Constants
+    /// `infinite` - positive infinity constant
+    Infinite,
+    /// `nan` - NaN constant
+    Nan,
+    /// `isinfinite` - true if value is infinite
+    IsInfinite,
+    /// `isnan` - true if value is NaN
+    IsNan,
+    /// `isnormal` - true if value is a normal number (not zero, infinite, NaN, or subnormal)
+    IsNormal,
+    /// `isfinite` - true if value is finite (not infinite or NaN)
+    IsFinite,
+
+    // Phase 10: Debug
+    /// `debug` - output value to stderr, pass through unchanged
+    Debug,
+    /// `debug(msg)` - output message and value to stderr
+    DebugMsg(Box<Expr>),
+
+    // Phase 10: Environment
+    /// `env` - object of all environment variables
+    Env,
+    /// `env.VAR` or `$ENV.VAR` - get environment variable
+    EnvVar(Box<Expr>),
+
+    // Phase 10: Null handling
+    /// `null` - the null constant
+    NullLit,
+
+    // Phase 10: String functions
+    /// `trim` - remove leading/trailing whitespace
+    Trim,
+    /// `ltrim` - remove leading whitespace
+    Ltrim,
+    /// `rtrim` - remove trailing whitespace
+    Rtrim,
+
+    // Phase 10: Array functions
+    /// `transpose` - transpose array of arrays
+    Transpose,
+    /// `bsearch(x)` - binary search for x in sorted array
+    BSearch(Box<Expr>),
+
+    // Phase 10: Object functions
+    /// `modulemeta(name)` - get module metadata (stub for compatibility)
+    ModuleMeta(Box<Expr>),
 }
 
 /// Arithmetic operators.

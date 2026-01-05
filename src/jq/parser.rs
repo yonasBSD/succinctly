@@ -1284,7 +1284,10 @@ impl<'a> Parser<'a> {
                             break;
                         }
                         _ => {
-                            return Err(ParseError::new("expected ',' or '}' in pattern", self.pos));
+                            return Err(ParseError::new(
+                                "expected ',' or '}' in pattern",
+                                self.pos,
+                            ));
                         }
                     }
                 }
@@ -1320,7 +1323,10 @@ impl<'a> Parser<'a> {
                             break;
                         }
                         _ => {
-                            return Err(ParseError::new("expected ',' or ']' in pattern", self.pos));
+                            return Err(ParseError::new(
+                                "expected ',' or ']' in pattern",
+                                self.pos,
+                            ));
                         }
                     }
                 }
@@ -2051,6 +2057,284 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             self.expect(')')?;
             return Ok(Some(Builtin::IsValid(Box::new(expr))));
+        }
+
+        // Phase 10: Path Expressions
+        // path(expr) - return the path to values selected by expr
+        if self.matches_keyword("path") {
+            self.consume_keyword("path");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Path(Box::new(expr))));
+        }
+        // leaf_paths - must check before paths
+        if self.matches_keyword("leaf_paths") {
+            self.consume_keyword("leaf_paths");
+            return Ok(Some(Builtin::LeafPaths));
+        }
+        // paths or paths(filter)
+        if self.matches_keyword("paths") {
+            self.consume_keyword("paths");
+            self.skip_ws();
+            if self.peek() == Some('(') {
+                self.next();
+                self.skip_ws();
+                let filter = self.parse_pipe_expr()?;
+                self.skip_ws();
+                self.expect(')')?;
+                return Ok(Some(Builtin::PathsFilter(Box::new(filter))));
+            }
+            return Ok(Some(Builtin::Paths));
+        }
+        // setpath(path; value)
+        if self.matches_keyword("setpath") {
+            self.consume_keyword("setpath");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let path = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(';')?;
+            self.skip_ws();
+            let value = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::SetPath(Box::new(path), Box::new(value))));
+        }
+        // delpaths(paths)
+        if self.matches_keyword("delpaths") {
+            self.consume_keyword("delpaths");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let paths = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::DelPaths(Box::new(paths))));
+        }
+
+        // Phase 10: Math Functions
+        if self.matches_keyword("floor") {
+            self.consume_keyword("floor");
+            return Ok(Some(Builtin::Floor));
+        }
+        if self.matches_keyword("ceil") {
+            self.consume_keyword("ceil");
+            return Ok(Some(Builtin::Ceil));
+        }
+        if self.matches_keyword("round") {
+            self.consume_keyword("round");
+            return Ok(Some(Builtin::Round));
+        }
+        if self.matches_keyword("sqrt") {
+            self.consume_keyword("sqrt");
+            return Ok(Some(Builtin::Sqrt));
+        }
+        if self.matches_keyword("fabs") {
+            self.consume_keyword("fabs");
+            return Ok(Some(Builtin::Fabs));
+        }
+        // Logarithmic - check log10 and log2 before log
+        if self.matches_keyword("log10") {
+            self.consume_keyword("log10");
+            return Ok(Some(Builtin::Log10));
+        }
+        if self.matches_keyword("log2") {
+            self.consume_keyword("log2");
+            return Ok(Some(Builtin::Log2));
+        }
+        if self.matches_keyword("log") {
+            self.consume_keyword("log");
+            return Ok(Some(Builtin::Log));
+        }
+        // Exponential - check exp10 and exp2 before exp
+        if self.matches_keyword("exp10") {
+            self.consume_keyword("exp10");
+            return Ok(Some(Builtin::Exp10));
+        }
+        if self.matches_keyword("exp2") {
+            self.consume_keyword("exp2");
+            return Ok(Some(Builtin::Exp2));
+        }
+        if self.matches_keyword("exp") {
+            self.consume_keyword("exp");
+            return Ok(Some(Builtin::Exp));
+        }
+        // pow(base; exp)
+        if self.matches_keyword("pow") {
+            self.consume_keyword("pow");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let base = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(';')?;
+            self.skip_ws();
+            let exp = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Pow(Box::new(base), Box::new(exp))));
+        }
+        // Trigonometric functions - check longer names first
+        if self.matches_keyword("sinh") {
+            self.consume_keyword("sinh");
+            return Ok(Some(Builtin::Sinh));
+        }
+        if self.matches_keyword("cosh") {
+            self.consume_keyword("cosh");
+            return Ok(Some(Builtin::Cosh));
+        }
+        if self.matches_keyword("tanh") {
+            self.consume_keyword("tanh");
+            return Ok(Some(Builtin::Tanh));
+        }
+        if self.matches_keyword("asinh") {
+            self.consume_keyword("asinh");
+            return Ok(Some(Builtin::Asinh));
+        }
+        if self.matches_keyword("acosh") {
+            self.consume_keyword("acosh");
+            return Ok(Some(Builtin::Acosh));
+        }
+        if self.matches_keyword("atanh") {
+            self.consume_keyword("atanh");
+            return Ok(Some(Builtin::Atanh));
+        }
+        // atan2(y; x) - must check before atan
+        if self.matches_keyword("atan2") {
+            self.consume_keyword("atan2");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let y = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(';')?;
+            self.skip_ws();
+            let x = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Atan2(Box::new(y), Box::new(x))));
+        }
+        if self.matches_keyword("asin") {
+            self.consume_keyword("asin");
+            return Ok(Some(Builtin::Asin));
+        }
+        if self.matches_keyword("acos") {
+            self.consume_keyword("acos");
+            return Ok(Some(Builtin::Acos));
+        }
+        if self.matches_keyword("atan") {
+            self.consume_keyword("atan");
+            return Ok(Some(Builtin::Atan));
+        }
+        if self.matches_keyword("sin") {
+            self.consume_keyword("sin");
+            return Ok(Some(Builtin::Sin));
+        }
+        if self.matches_keyword("cos") {
+            self.consume_keyword("cos");
+            return Ok(Some(Builtin::Cos));
+        }
+        if self.matches_keyword("tan") {
+            self.consume_keyword("tan");
+            return Ok(Some(Builtin::Tan));
+        }
+
+        // Phase 10: Number Classification & Constants
+        // Check isinfinite, isnan, isnormal, isfinite before infinite, nan
+        if self.matches_keyword("isinfinite") {
+            self.consume_keyword("isinfinite");
+            return Ok(Some(Builtin::IsInfinite));
+        }
+        if self.matches_keyword("isnan") {
+            self.consume_keyword("isnan");
+            return Ok(Some(Builtin::IsNan));
+        }
+        if self.matches_keyword("isnormal") {
+            self.consume_keyword("isnormal");
+            return Ok(Some(Builtin::IsNormal));
+        }
+        if self.matches_keyword("isfinite") {
+            self.consume_keyword("isfinite");
+            return Ok(Some(Builtin::IsFinite));
+        }
+        if self.matches_keyword("infinite") {
+            self.consume_keyword("infinite");
+            return Ok(Some(Builtin::Infinite));
+        }
+        if self.matches_keyword("nan") {
+            self.consume_keyword("nan");
+            return Ok(Some(Builtin::Nan));
+        }
+
+        // Phase 10: Debug
+        if self.matches_keyword("debug") {
+            self.consume_keyword("debug");
+            self.skip_ws();
+            if self.peek() == Some('(') {
+                self.next();
+                self.skip_ws();
+                let msg = self.parse_pipe_expr()?;
+                self.skip_ws();
+                self.expect(')')?;
+                return Ok(Some(Builtin::DebugMsg(Box::new(msg))));
+            }
+            return Ok(Some(Builtin::Debug));
+        }
+
+        // Phase 10: Environment
+        // $ENV - the full environment object - handled via Var("ENV") after $ is parsed
+        // env.VAR or env (as builtin)
+        if self.matches_keyword("env") {
+            self.consume_keyword("env");
+            return Ok(Some(Builtin::Env));
+        }
+
+        // Phase 10: String functions
+        // Check ltrim and rtrim before trim
+        if self.matches_keyword("ltrim") {
+            self.consume_keyword("ltrim");
+            return Ok(Some(Builtin::Ltrim));
+        }
+        if self.matches_keyword("rtrim") {
+            self.consume_keyword("rtrim");
+            return Ok(Some(Builtin::Rtrim));
+        }
+        if self.matches_keyword("trim") {
+            self.consume_keyword("trim");
+            return Ok(Some(Builtin::Trim));
+        }
+
+        // Phase 10: Array functions
+        if self.matches_keyword("transpose") {
+            self.consume_keyword("transpose");
+            return Ok(Some(Builtin::Transpose));
+        }
+        if self.matches_keyword("bsearch") {
+            self.consume_keyword("bsearch");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let x = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::BSearch(Box::new(x))));
+        }
+
+        // Phase 10: Object functions
+        if self.matches_keyword("modulemeta") {
+            self.consume_keyword("modulemeta");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let name = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::ModuleMeta(Box::new(name))));
         }
 
         Ok(None)

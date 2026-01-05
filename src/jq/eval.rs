@@ -1050,6 +1050,72 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::RecurseCond(f, cond) => builtin_recurse_cond(f, cond, value, optional),
         Builtin::Walk(f) => builtin_walk(f, value, optional),
         Builtin::IsValid(expr) => builtin_isvalid(expr, value, optional),
+
+        // Phase 10: Path Expressions
+        Builtin::Path(expr) => builtin_path(expr, value, optional),
+        Builtin::Paths => builtin_paths(value, optional),
+        Builtin::PathsFilter(filter) => builtin_paths_filter(filter, value, optional),
+        Builtin::LeafPaths => builtin_leaf_paths(value, optional),
+        Builtin::SetPath(path, val) => builtin_setpath(path, val, value, optional),
+        Builtin::DelPaths(paths) => builtin_delpaths(paths, value, optional),
+
+        // Phase 10: Math Functions
+        Builtin::Floor => builtin_floor(value, optional),
+        Builtin::Ceil => builtin_ceil(value, optional),
+        Builtin::Round => builtin_round(value, optional),
+        Builtin::Sqrt => builtin_sqrt(value, optional),
+        Builtin::Fabs => builtin_fabs(value, optional),
+        Builtin::Log => builtin_log(value, optional),
+        Builtin::Log10 => builtin_log10(value, optional),
+        Builtin::Log2 => builtin_log2(value, optional),
+        Builtin::Exp => builtin_exp(value, optional),
+        Builtin::Exp10 => builtin_exp10(value, optional),
+        Builtin::Exp2 => builtin_exp2(value, optional),
+        Builtin::Pow(base, exp) => builtin_pow(base, exp, value, optional),
+        Builtin::Sin => builtin_sin(value, optional),
+        Builtin::Cos => builtin_cos(value, optional),
+        Builtin::Tan => builtin_tan(value, optional),
+        Builtin::Asin => builtin_asin(value, optional),
+        Builtin::Acos => builtin_acos(value, optional),
+        Builtin::Atan => builtin_atan(value, optional),
+        Builtin::Atan2(y, x) => builtin_atan2(y, x, value, optional),
+        Builtin::Sinh => builtin_sinh(value, optional),
+        Builtin::Cosh => builtin_cosh(value, optional),
+        Builtin::Tanh => builtin_tanh(value, optional),
+        Builtin::Asinh => builtin_asinh(value, optional),
+        Builtin::Acosh => builtin_acosh(value, optional),
+        Builtin::Atanh => builtin_atanh(value, optional),
+
+        // Phase 10: Number Classification & Constants
+        Builtin::Infinite => QueryResult::Owned(OwnedValue::Float(f64::INFINITY)),
+        Builtin::Nan => QueryResult::Owned(OwnedValue::Float(f64::NAN)),
+        Builtin::IsInfinite => builtin_isinfinite(value, optional),
+        Builtin::IsNan => builtin_isnan(value, optional),
+        Builtin::IsNormal => builtin_isnormal(value, optional),
+        Builtin::IsFinite => builtin_isfinite(value, optional),
+
+        // Phase 10: Debug
+        Builtin::Debug => builtin_debug(value, optional),
+        Builtin::DebugMsg(msg) => builtin_debug_msg(msg, value, optional),
+
+        // Phase 10: Environment
+        Builtin::Env => builtin_env(value, optional),
+        Builtin::EnvVar(var) => builtin_envvar(var, value, optional),
+
+        // Phase 10: Null handling
+        Builtin::NullLit => QueryResult::Owned(OwnedValue::Null),
+
+        // Phase 10: String functions
+        Builtin::Trim => builtin_trim(value, optional),
+        Builtin::Ltrim => builtin_ltrim(value, optional),
+        Builtin::Rtrim => builtin_rtrim(value, optional),
+
+        // Phase 10: Array functions
+        Builtin::Transpose => builtin_transpose(value, optional),
+        Builtin::BSearch(x) => builtin_bsearch(x, value, optional),
+
+        // Phase 10: Object functions
+        Builtin::ModuleMeta(name) => builtin_modulemeta(name, value, optional),
     }
 }
 
@@ -3944,6 +4010,72 @@ fn substitute_var_in_builtin(
         ),
         Builtin::Walk(f) => Builtin::Walk(Box::new(substitute_var(f, var_name, replacement))),
         Builtin::IsValid(e) => Builtin::IsValid(Box::new(substitute_var(e, var_name, replacement))),
+        // Phase 10 builtins
+        Builtin::Path(e) => Builtin::Path(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Paths => Builtin::Paths,
+        Builtin::PathsFilter(e) => {
+            Builtin::PathsFilter(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::LeafPaths => Builtin::LeafPaths,
+        Builtin::SetPath(p, v) => Builtin::SetPath(
+            Box::new(substitute_var(p, var_name, replacement)),
+            Box::new(substitute_var(v, var_name, replacement)),
+        ),
+        Builtin::DelPaths(e) => {
+            Builtin::DelPaths(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Floor => Builtin::Floor,
+        Builtin::Ceil => Builtin::Ceil,
+        Builtin::Round => Builtin::Round,
+        Builtin::Sqrt => Builtin::Sqrt,
+        Builtin::Fabs => Builtin::Fabs,
+        Builtin::Log => Builtin::Log,
+        Builtin::Log10 => Builtin::Log10,
+        Builtin::Log2 => Builtin::Log2,
+        Builtin::Exp => Builtin::Exp,
+        Builtin::Exp10 => Builtin::Exp10,
+        Builtin::Exp2 => Builtin::Exp2,
+        Builtin::Pow(x, y) => Builtin::Pow(
+            Box::new(substitute_var(x, var_name, replacement)),
+            Box::new(substitute_var(y, var_name, replacement)),
+        ),
+        Builtin::Sin => Builtin::Sin,
+        Builtin::Cos => Builtin::Cos,
+        Builtin::Tan => Builtin::Tan,
+        Builtin::Asin => Builtin::Asin,
+        Builtin::Acos => Builtin::Acos,
+        Builtin::Atan => Builtin::Atan,
+        Builtin::Atan2(x, y) => Builtin::Atan2(
+            Box::new(substitute_var(x, var_name, replacement)),
+            Box::new(substitute_var(y, var_name, replacement)),
+        ),
+        Builtin::Sinh => Builtin::Sinh,
+        Builtin::Cosh => Builtin::Cosh,
+        Builtin::Tanh => Builtin::Tanh,
+        Builtin::Asinh => Builtin::Asinh,
+        Builtin::Acosh => Builtin::Acosh,
+        Builtin::Atanh => Builtin::Atanh,
+        Builtin::Infinite => Builtin::Infinite,
+        Builtin::Nan => Builtin::Nan,
+        Builtin::IsInfinite => Builtin::IsInfinite,
+        Builtin::IsNan => Builtin::IsNan,
+        Builtin::IsNormal => Builtin::IsNormal,
+        Builtin::IsFinite => Builtin::IsFinite,
+        Builtin::Debug => Builtin::Debug,
+        Builtin::DebugMsg(e) => {
+            Builtin::DebugMsg(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Env => Builtin::Env,
+        Builtin::EnvVar(e) => Builtin::EnvVar(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::NullLit => Builtin::NullLit,
+        Builtin::Trim => Builtin::Trim,
+        Builtin::Ltrim => Builtin::Ltrim,
+        Builtin::Rtrim => Builtin::Rtrim,
+        Builtin::Transpose => Builtin::Transpose,
+        Builtin::BSearch(e) => Builtin::BSearch(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::ModuleMeta(e) => {
+            Builtin::ModuleMeta(Box::new(substitute_var(e, var_name, replacement)))
+        }
     }
 }
 
@@ -4692,6 +4824,1034 @@ fn builtin_isvalid<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::None => QueryResult::Owned(OwnedValue::Bool(false)),
         _ => QueryResult::Owned(OwnedValue::Bool(true)),
     }
+}
+
+// ============================================================================
+// Phase 10: Path Expressions, Math, Environment, etc.
+// ============================================================================
+
+/// Builtin: path(expr) - return the path to values selected by expr
+/// Since we don't track paths during evaluation, we return an empty array (stub)
+fn builtin_path<'a, W: Clone + AsRef<[u64]>>(
+    _expr: &Expr,
+    _value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    // In a full implementation, path() would track the path to each value.
+    // For now, return an empty array as a stub.
+    QueryResult::Owned(OwnedValue::Array(vec![]))
+}
+
+/// Helper to collect all paths recursively
+fn collect_paths(value: &OwnedValue, current_path: &[OwnedValue], paths: &mut Vec<OwnedValue>) {
+    match value {
+        OwnedValue::Object(entries) => {
+            for (key, val) in entries {
+                let mut new_path = current_path.to_vec();
+                new_path.push(OwnedValue::String(key.clone()));
+                paths.push(OwnedValue::Array(new_path.clone()));
+                collect_paths(val, &new_path, paths);
+            }
+        }
+        OwnedValue::Array(arr) => {
+            for (i, val) in arr.iter().enumerate() {
+                let mut new_path = current_path.to_vec();
+                new_path.push(OwnedValue::Int(i as i64));
+                paths.push(OwnedValue::Array(new_path.clone()));
+                collect_paths(val, &new_path, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Builtin: paths - all paths to values (excluding empty paths)
+fn builtin_paths<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    let owned = to_owned(&value);
+    let mut paths = Vec::new();
+    collect_paths(&owned, &[], &mut paths);
+    QueryResult::Owned(OwnedValue::Array(paths))
+}
+
+/// Builtin: paths(filter) - paths to values matching filter
+fn builtin_paths_filter<'a, W: Clone + AsRef<[u64]>>(
+    filter: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let owned = to_owned(&value);
+    let mut all_paths = Vec::new();
+    collect_paths(&owned, &[], &mut all_paths);
+
+    let mut filtered_paths = Vec::new();
+    for path in all_paths {
+        if let OwnedValue::Array(path_arr) = &path {
+            // Get the value at this path
+            if let Some(val_at_path) = get_value_at_path(&owned, path_arr) {
+                // Check if filter matches
+                if let Ok(OwnedValue::Bool(true)) = eval_owned_expr(filter, &val_at_path, optional)
+                {
+                    filtered_paths.push(path);
+                }
+            }
+        }
+    }
+    QueryResult::Owned(OwnedValue::Array(filtered_paths))
+}
+
+/// Helper to get value at a path
+fn get_value_at_path(value: &OwnedValue, path: &[OwnedValue]) -> Option<OwnedValue> {
+    if path.is_empty() {
+        return Some(value.clone());
+    }
+    match (&path[0], value) {
+        (OwnedValue::String(key), OwnedValue::Object(entries)) => {
+            for (k, v) in entries {
+                if k == key {
+                    return get_value_at_path(v, &path[1..]);
+                }
+            }
+            None
+        }
+        (OwnedValue::Int(idx), OwnedValue::Array(arr)) => {
+            let index = if *idx < 0 {
+                (arr.len() as i64 + *idx) as usize
+            } else {
+                *idx as usize
+            };
+            arr.get(index)
+                .and_then(|v| get_value_at_path(v, &path[1..]))
+        }
+        _ => None,
+    }
+}
+
+/// Helper to collect leaf paths (paths to scalars)
+fn collect_leaf_paths(
+    value: &OwnedValue,
+    current_path: &[OwnedValue],
+    paths: &mut Vec<OwnedValue>,
+) {
+    match value {
+        OwnedValue::Object(entries) => {
+            if entries.is_empty() {
+                // Empty object is a leaf
+                paths.push(OwnedValue::Array(current_path.to_vec()));
+            } else {
+                for (key, val) in entries {
+                    let mut new_path = current_path.to_vec();
+                    new_path.push(OwnedValue::String(key.clone()));
+                    collect_leaf_paths(val, &new_path, paths);
+                }
+            }
+        }
+        OwnedValue::Array(arr) => {
+            if arr.is_empty() {
+                // Empty array is a leaf
+                paths.push(OwnedValue::Array(current_path.to_vec()));
+            } else {
+                for (i, val) in arr.iter().enumerate() {
+                    let mut new_path = current_path.to_vec();
+                    new_path.push(OwnedValue::Int(i as i64));
+                    collect_leaf_paths(val, &new_path, paths);
+                }
+            }
+        }
+        _ => {
+            // Scalar value is a leaf
+            paths.push(OwnedValue::Array(current_path.to_vec()));
+        }
+    }
+}
+
+/// Builtin: leaf_paths - paths to scalar (non-container) values
+fn builtin_leaf_paths<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    let owned = to_owned(&value);
+    let mut paths = Vec::new();
+    collect_leaf_paths(&owned, &[], &mut paths);
+    QueryResult::Owned(OwnedValue::Array(paths))
+}
+
+/// Helper to set a value at a path
+fn set_value_at_path(value: OwnedValue, path: &[OwnedValue], new_val: OwnedValue) -> OwnedValue {
+    #[cfg(not(test))]
+    use alloc::collections::BTreeMap;
+    #[cfg(test)]
+    use std::collections::BTreeMap;
+
+    if path.is_empty() {
+        return new_val;
+    }
+    match &path[0] {
+        OwnedValue::String(key) => match value {
+            OwnedValue::Object(mut entries) => {
+                if entries.contains_key(key) {
+                    let old = entries.remove(key).unwrap_or(OwnedValue::Null);
+                    let new = set_value_at_path(old, &path[1..], new_val);
+                    entries.insert(key.clone(), new);
+                } else {
+                    let val = set_value_at_path(OwnedValue::Null, &path[1..], new_val);
+                    entries.insert(key.clone(), val);
+                }
+                OwnedValue::Object(entries)
+            }
+            _ => {
+                // Create new object
+                let val = set_value_at_path(OwnedValue::Null, &path[1..], new_val);
+                let mut entries = BTreeMap::new();
+                entries.insert(key.clone(), val);
+                OwnedValue::Object(entries)
+            }
+        },
+        OwnedValue::Int(idx) => match value {
+            OwnedValue::Array(mut arr) => {
+                let index = if *idx < 0 {
+                    (arr.len() as i64 + *idx) as usize
+                } else {
+                    *idx as usize
+                };
+                // Extend array if needed
+                while arr.len() <= index {
+                    arr.push(OwnedValue::Null);
+                }
+                let old = arr[index].clone();
+                arr[index] = set_value_at_path(old, &path[1..], new_val);
+                OwnedValue::Array(arr)
+            }
+            _ => {
+                // Create new array
+                let index = if *idx < 0 { 0 } else { *idx as usize };
+                let mut arr = vec![OwnedValue::Null; index + 1];
+                arr[index] = set_value_at_path(OwnedValue::Null, &path[1..], new_val);
+                OwnedValue::Array(arr)
+            }
+        },
+        _ => value,
+    }
+}
+
+/// Builtin: setpath(path; value) - set value at path
+fn builtin_setpath<'a, W: Clone + AsRef<[u64]>>(
+    path_expr: &Expr,
+    val_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate path expression
+    let path_result = eval_single(path_expr, value.clone(), optional);
+    let path_owned = match path_result {
+        QueryResult::One(v) => to_owned(&v),
+        QueryResult::Owned(v) => v,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::new("setpath requires array path")),
+    };
+
+    let path = match path_owned {
+        OwnedValue::Array(p) => p,
+        _ => return QueryResult::Error(EvalError::new("setpath requires array path")),
+    };
+
+    // Evaluate value expression
+    let new_val = match eval_single(val_expr, value.clone(), optional) {
+        QueryResult::One(v) => to_owned(&v),
+        QueryResult::Owned(v) => v,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => OwnedValue::Null,
+    };
+
+    let owned = to_owned(&value);
+    let result = set_value_at_path(owned, &path, new_val);
+    QueryResult::Owned(result)
+}
+
+/// Helper to delete a path from a value
+fn delete_path(value: OwnedValue, path: &[OwnedValue]) -> OwnedValue {
+    if path.is_empty() {
+        return OwnedValue::Null;
+    }
+    if path.len() == 1 {
+        match &path[0] {
+            OwnedValue::String(key) => match value {
+                OwnedValue::Object(mut entries) => {
+                    entries.remove(key);
+                    return OwnedValue::Object(entries);
+                }
+                other => return other,
+            },
+            OwnedValue::Int(idx) => match value {
+                OwnedValue::Array(mut arr) => {
+                    let index = if *idx < 0 {
+                        (arr.len() as i64 + *idx) as usize
+                    } else {
+                        *idx as usize
+                    };
+                    if index < arr.len() {
+                        arr.remove(index);
+                    }
+                    return OwnedValue::Array(arr);
+                }
+                other => return other,
+            },
+            _ => return value,
+        }
+    }
+    match &path[0] {
+        OwnedValue::String(key) => match value {
+            OwnedValue::Object(mut entries) => {
+                if let Some(v) = entries.remove(key) {
+                    let updated = delete_path(v, &path[1..]);
+                    entries.insert(key.clone(), updated);
+                }
+                OwnedValue::Object(entries)
+            }
+            other => other,
+        },
+        OwnedValue::Int(idx) => match value {
+            OwnedValue::Array(mut arr) => {
+                let index = if *idx < 0 {
+                    (arr.len() as i64 + *idx) as usize
+                } else {
+                    *idx as usize
+                };
+                if index < arr.len() {
+                    let old = arr[index].clone();
+                    arr[index] = delete_path(old, &path[1..]);
+                }
+                OwnedValue::Array(arr)
+            }
+            other => other,
+        },
+        _ => value,
+    }
+}
+
+/// Builtin: delpaths(paths) - delete multiple paths
+fn builtin_delpaths<'a, W: Clone + AsRef<[u64]>>(
+    paths_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate paths expression
+    let paths_result = eval_single(paths_expr, value.clone(), optional);
+    let paths_owned = match paths_result {
+        QueryResult::One(v) => to_owned(&v),
+        QueryResult::Owned(v) => v,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::new("delpaths requires array of paths")),
+    };
+
+    let paths = match paths_owned {
+        OwnedValue::Array(p) => p,
+        _ => return QueryResult::Error(EvalError::new("delpaths requires array of paths")),
+    };
+
+    let mut result = to_owned(&value);
+    // Sort paths by length descending to delete deeper paths first
+    let mut sorted_paths: Vec<Vec<OwnedValue>> = paths
+        .into_iter()
+        .filter_map(|p| match p {
+            OwnedValue::Array(arr) => Some(arr),
+            _ => None,
+        })
+        .collect();
+    sorted_paths.sort_by_key(|b| core::cmp::Reverse(b.len()));
+
+    for path in sorted_paths {
+        result = delete_path(result, &path);
+    }
+    QueryResult::Owned(result)
+}
+
+// Phase 10: Math Functions
+
+/// Helper to get float value from input
+fn get_float_value<'a, W: Clone + AsRef<[u64]>>(
+    value: &StandardJson<'a, W>,
+    optional: bool,
+) -> Result<f64, QueryResult<'a, W>> {
+    match value {
+        StandardJson::Number(n) => {
+            if let Ok(f) = n.as_f64() {
+                Ok(f)
+            } else if optional {
+                Err(QueryResult::None)
+            } else {
+                Err(QueryResult::Error(EvalError::new("invalid number")))
+            }
+        }
+        _ if optional => Err(QueryResult::None),
+        _ => Err(QueryResult::Error(EvalError::new(
+            "math function requires number",
+        ))),
+    }
+}
+
+// no_std compatible floor: truncate towards negative infinity
+fn floor_f64(x: f64) -> f64 {
+    let t = x as i64 as f64;
+    if x < t { t - 1.0 } else { t }
+}
+
+// no_std compatible ceil: truncate towards positive infinity
+fn ceil_f64(x: f64) -> f64 {
+    let t = x as i64 as f64;
+    if x > t { t + 1.0 } else { t }
+}
+
+// no_std compatible round: round to nearest integer, half away from zero
+fn round_f64(x: f64) -> f64 {
+    if x >= 0.0 {
+        floor_f64(x + 0.5)
+    } else {
+        ceil_f64(x - 0.5)
+    }
+}
+
+// no_std compatible sqrt using Newton-Raphson
+fn sqrt_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    let mut guess = x / 2.0;
+    for _ in 0..50 {
+        let next = (guess + x / guess) / 2.0;
+        if (next - guess).abs() < 1e-15 * guess.abs() {
+            break;
+        }
+        guess = next;
+    }
+    guess
+}
+
+/// Builtin: floor
+fn builtin_floor<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Int(floor_f64(n) as i64)),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: ceil
+fn builtin_ceil<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Int(ceil_f64(n) as i64)),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: round
+fn builtin_round<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Int(round_f64(n) as i64)),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: sqrt
+fn builtin_sqrt<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(sqrt_f64(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: fabs (absolute value)
+fn builtin_fabs<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::fabs(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: log (natural logarithm)
+fn builtin_log<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::log(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: log10
+fn builtin_log10<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::log10(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: log2
+fn builtin_log2<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::log2(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: exp (e^x)
+fn builtin_exp<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::exp(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: exp10 (10^x)
+fn builtin_exp10<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::pow(10.0, n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: exp2 (2^x)
+fn builtin_exp2<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::exp2(n))),
+        Err(r) => r,
+    }
+}
+
+/// Error type for number extraction
+enum NumberError {
+    None,
+    Error(EvalError),
+}
+
+/// Helper to get number from eval result
+fn get_number_from_result<W: Clone + AsRef<[u64]>>(
+    result: QueryResult<'_, W>,
+    optional: bool,
+) -> Result<f64, NumberError> {
+    match result {
+        QueryResult::Owned(OwnedValue::Int(n)) => Ok(n as f64),
+        QueryResult::Owned(OwnedValue::Float(n)) => Ok(n),
+        QueryResult::One(StandardJson::Number(n)) => n
+            .as_f64()
+            .map_err(|_| NumberError::Error(EvalError::new("invalid number"))),
+        QueryResult::Error(e) => Err(NumberError::Error(e)),
+        _ if optional => Err(NumberError::None),
+        _ => Err(NumberError::Error(EvalError::new("expected number"))),
+    }
+}
+
+/// Builtin: pow(base; exp) - power function
+fn builtin_pow<'a, W: Clone + AsRef<[u64]>>(
+    base_expr: &Expr,
+    exp_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let base =
+        match get_number_from_result(eval_single(base_expr, value.clone(), optional), optional) {
+            Ok(n) => n,
+            Err(NumberError::None) => return QueryResult::None,
+            Err(NumberError::Error(e)) => return QueryResult::Error(e),
+        };
+
+    let exp = match get_number_from_result(eval_single(exp_expr, value, optional), optional) {
+        Ok(n) => n,
+        Err(NumberError::None) => return QueryResult::None,
+        Err(NumberError::Error(e)) => return QueryResult::Error(e),
+    };
+
+    QueryResult::Owned(OwnedValue::Float(libm::pow(base, exp)))
+}
+
+// Trigonometric functions
+
+/// Builtin: sin
+fn builtin_sin<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::sin(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: cos
+fn builtin_cos<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::cos(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: tan
+fn builtin_tan<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::tan(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: asin
+fn builtin_asin<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::asin(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: acos
+fn builtin_acos<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::acos(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: atan
+fn builtin_atan<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::atan(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: atan2(y; x)
+fn builtin_atan2<'a, W: Clone + AsRef<[u64]>>(
+    y_expr: &Expr,
+    x_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let y = match get_number_from_result(eval_single(y_expr, value.clone(), optional), optional) {
+        Ok(n) => n,
+        Err(NumberError::None) => return QueryResult::None,
+        Err(NumberError::Error(e)) => return QueryResult::Error(e),
+    };
+
+    let x = match get_number_from_result(eval_single(x_expr, value, optional), optional) {
+        Ok(n) => n,
+        Err(NumberError::None) => return QueryResult::None,
+        Err(NumberError::Error(e)) => return QueryResult::Error(e),
+    };
+
+    QueryResult::Owned(OwnedValue::Float(libm::atan2(y, x)))
+}
+
+// Hyperbolic functions
+
+/// Builtin: sinh
+fn builtin_sinh<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::sinh(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: cosh
+fn builtin_cosh<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::cosh(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: tanh
+fn builtin_tanh<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::tanh(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: asinh
+fn builtin_asinh<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::asinh(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: acosh
+fn builtin_acosh<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::acosh(n))),
+        Err(r) => r,
+    }
+}
+
+/// Builtin: atanh
+fn builtin_atanh<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Float(libm::atanh(n))),
+        Err(r) => r,
+    }
+}
+
+// Number Classification
+// Note: is_infinite(), is_nan(), is_normal(), is_finite() are available on f64 in no_std
+
+/// Builtin: isinfinite
+fn builtin_isinfinite<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::Number(n) => {
+            if let Ok(f) = n.as_f64() {
+                QueryResult::Owned(OwnedValue::Bool(f.is_infinite()))
+            } else {
+                QueryResult::Owned(OwnedValue::Bool(false))
+            }
+        }
+        _ => QueryResult::Owned(OwnedValue::Bool(false)),
+    }
+}
+
+/// Builtin: isnan
+fn builtin_isnan<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::Number(n) => {
+            if let Ok(f) = n.as_f64() {
+                QueryResult::Owned(OwnedValue::Bool(f.is_nan()))
+            } else {
+                QueryResult::Owned(OwnedValue::Bool(false))
+            }
+        }
+        _ => QueryResult::Owned(OwnedValue::Bool(false)),
+    }
+}
+
+/// Builtin: isnormal
+fn builtin_isnormal<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::Number(n) => {
+            if let Ok(f) = n.as_f64() {
+                QueryResult::Owned(OwnedValue::Bool(f.is_normal()))
+            } else {
+                QueryResult::Owned(OwnedValue::Bool(false))
+            }
+        }
+        _ => QueryResult::Owned(OwnedValue::Bool(false)),
+    }
+}
+
+/// Builtin: isfinite
+fn builtin_isfinite<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match get_float_value(&value, optional) {
+        Ok(n) => QueryResult::Owned(OwnedValue::Bool(n.is_finite())),
+        Err(_) => QueryResult::Owned(OwnedValue::Bool(false)),
+    }
+}
+
+// Debug functions
+
+/// Builtin: debug - output value to stderr, pass through unchanged
+fn builtin_debug<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    // In a library context we don't actually print to stderr
+    // We just pass through the value unchanged
+    QueryResult::Owned(to_owned(&value))
+}
+
+/// Builtin: debug(msg) - output message and value to stderr
+fn builtin_debug_msg<'a, W: Clone + AsRef<[u64]>>(
+    _msg: &Expr,
+    value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    // In a library context we don't actually print to stderr
+    // We just pass through the value unchanged
+    QueryResult::Owned(to_owned(&value))
+}
+
+// Environment functions
+
+/// Builtin: env - object of all environment variables
+fn builtin_env<'a, W: Clone + AsRef<[u64]>>(
+    _value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    // Return empty object in no_std context
+    // In std context, we could use std::env::vars()
+    QueryResult::Owned(OwnedValue::Object(BTreeMap::new()))
+}
+
+/// Builtin: env.VAR or $ENV.VAR - get environment variable
+fn builtin_envvar<'a, W: Clone + AsRef<[u64]>>(
+    _var: &Expr,
+    _value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    // Return null in no_std context
+    QueryResult::Owned(OwnedValue::Null)
+}
+
+// String functions
+
+/// Builtin: trim - remove leading/trailing whitespace
+fn builtin_trim<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::String(s) => {
+            if let Ok(cow) = s.as_str() {
+                QueryResult::Owned(OwnedValue::String(cow.trim().into()))
+            } else {
+                QueryResult::Owned(OwnedValue::String(String::new()))
+            }
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::new("trim requires string")),
+    }
+}
+
+/// Builtin: ltrim - remove leading whitespace
+fn builtin_ltrim<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::String(s) => {
+            if let Ok(cow) = s.as_str() {
+                QueryResult::Owned(OwnedValue::String(cow.trim_start().into()))
+            } else {
+                QueryResult::Owned(OwnedValue::String(String::new()))
+            }
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::new("ltrim requires string")),
+    }
+}
+
+/// Builtin: rtrim - remove trailing whitespace
+fn builtin_rtrim<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::String(s) => {
+            if let Ok(cow) = s.as_str() {
+                QueryResult::Owned(OwnedValue::String(cow.trim_end().into()))
+            } else {
+                QueryResult::Owned(OwnedValue::String(String::new()))
+            }
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::new("rtrim requires string")),
+    }
+}
+
+// Array functions
+
+/// Builtin: transpose - transpose array of arrays
+fn builtin_transpose<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let elements = match value {
+        StandardJson::Array(a) => a,
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::new("transpose requires array")),
+    };
+
+    // Collect all inner arrays
+    let mut inner_arrays: Vec<Vec<OwnedValue>> = Vec::new();
+    for item in elements {
+        match item {
+            StandardJson::Array(inner) => {
+                inner_arrays.push(inner.map(|v| to_owned(&v)).collect());
+            }
+            _ => {
+                // Non-array elements are treated as single-element arrays
+                inner_arrays.push(vec![to_owned(&item)]);
+            }
+        }
+    }
+
+    if inner_arrays.is_empty() {
+        return QueryResult::Owned(OwnedValue::Array(vec![]));
+    }
+
+    // Find max length
+    let max_len = inner_arrays.iter().map(|a| a.len()).max().unwrap_or(0);
+
+    // Build transposed result
+    let mut result = Vec::with_capacity(max_len);
+    for i in 0..max_len {
+        let mut row = Vec::new();
+        for inner in &inner_arrays {
+            if let Some(val) = inner.get(i) {
+                row.push(val.clone());
+            }
+        }
+        result.push(OwnedValue::Array(row));
+    }
+
+    QueryResult::Owned(OwnedValue::Array(result))
+}
+
+/// Helper to compare OwnedValue for binary search
+fn compare_owned_values(a: &OwnedValue, b: &OwnedValue) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    match (a, b) {
+        (OwnedValue::Null, OwnedValue::Null) => Ordering::Equal,
+        (OwnedValue::Bool(x), OwnedValue::Bool(y)) => x.cmp(y),
+        (OwnedValue::Int(x), OwnedValue::Int(y)) => x.cmp(y),
+        (OwnedValue::Float(x), OwnedValue::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (OwnedValue::Int(x), OwnedValue::Float(y)) => {
+            (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)
+        }
+        (OwnedValue::Float(x), OwnedValue::Int(y)) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
+        }
+        (OwnedValue::String(x), OwnedValue::String(y)) => x.cmp(y),
+        // Different types: use a consistent ordering
+        _ => {
+            let type_order = |v: &OwnedValue| match v {
+                OwnedValue::Null => 0,
+                OwnedValue::Bool(_) => 1,
+                OwnedValue::Int(_) | OwnedValue::Float(_) => 2,
+                OwnedValue::String(_) => 3,
+                OwnedValue::Array(_) => 4,
+                OwnedValue::Object(_) => 5,
+            };
+            type_order(a).cmp(&type_order(b))
+        }
+    }
+}
+
+/// Builtin: bsearch(x) - binary search for x in sorted array
+fn builtin_bsearch<'a, W: Clone + AsRef<[u64]>>(
+    x_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let elements_iter = match value.clone() {
+        StandardJson::Array(a) => a,
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::new("bsearch requires array")),
+    };
+
+    // Evaluate search value
+    let x = match eval_single(x_expr, value, optional) {
+        QueryResult::One(v) => to_owned(&v),
+        QueryResult::Owned(v) => v,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::None,
+    };
+
+    // Collect array elements
+    let elements: Vec<OwnedValue> = elements_iter.map(|v| to_owned(&v)).collect();
+
+    // Binary search
+    match elements.binary_search_by(|probe| compare_owned_values(probe, &x)) {
+        Ok(idx) => QueryResult::Owned(OwnedValue::Int(idx as i64)),
+        Err(idx) => {
+            // jq returns an object with "index" field when not found
+            #[cfg(not(test))]
+            use alloc::collections::BTreeMap;
+            #[cfg(test)]
+            use std::collections::BTreeMap;
+
+            let mut obj = BTreeMap::new();
+            obj.insert("index".to_string(), OwnedValue::Int(idx as i64));
+            QueryResult::Owned(OwnedValue::Object(obj))
+        }
+    }
+}
+
+// Object functions
+
+/// Builtin: modulemeta(name) - get module metadata (stub for compatibility)
+fn builtin_modulemeta<'a, W: Clone + AsRef<[u64]>>(
+    _name: &Expr,
+    _value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    // Return null as we don't support modules
+    QueryResult::Owned(OwnedValue::Null)
 }
 
 // ============================================================================
@@ -5446,6 +6606,76 @@ fn expand_func_calls_in_builtin(
         Builtin::IsValid(e) => {
             Builtin::IsValid(Box::new(expand_func_calls(e, func_name, params, body)))
         }
+        // Phase 10 builtins
+        Builtin::Path(e) => Builtin::Path(Box::new(expand_func_calls(e, func_name, params, body))),
+        Builtin::Paths => Builtin::Paths,
+        Builtin::PathsFilter(e) => {
+            Builtin::PathsFilter(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::LeafPaths => Builtin::LeafPaths,
+        Builtin::SetPath(p, v) => Builtin::SetPath(
+            Box::new(expand_func_calls(p, func_name, params, body)),
+            Box::new(expand_func_calls(v, func_name, params, body)),
+        ),
+        Builtin::DelPaths(e) => {
+            Builtin::DelPaths(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::Floor => Builtin::Floor,
+        Builtin::Ceil => Builtin::Ceil,
+        Builtin::Round => Builtin::Round,
+        Builtin::Sqrt => Builtin::Sqrt,
+        Builtin::Fabs => Builtin::Fabs,
+        Builtin::Log => Builtin::Log,
+        Builtin::Log10 => Builtin::Log10,
+        Builtin::Log2 => Builtin::Log2,
+        Builtin::Exp => Builtin::Exp,
+        Builtin::Exp10 => Builtin::Exp10,
+        Builtin::Exp2 => Builtin::Exp2,
+        Builtin::Pow(x, y) => Builtin::Pow(
+            Box::new(expand_func_calls(x, func_name, params, body)),
+            Box::new(expand_func_calls(y, func_name, params, body)),
+        ),
+        Builtin::Sin => Builtin::Sin,
+        Builtin::Cos => Builtin::Cos,
+        Builtin::Tan => Builtin::Tan,
+        Builtin::Asin => Builtin::Asin,
+        Builtin::Acos => Builtin::Acos,
+        Builtin::Atan => Builtin::Atan,
+        Builtin::Atan2(x, y) => Builtin::Atan2(
+            Box::new(expand_func_calls(x, func_name, params, body)),
+            Box::new(expand_func_calls(y, func_name, params, body)),
+        ),
+        Builtin::Sinh => Builtin::Sinh,
+        Builtin::Cosh => Builtin::Cosh,
+        Builtin::Tanh => Builtin::Tanh,
+        Builtin::Asinh => Builtin::Asinh,
+        Builtin::Acosh => Builtin::Acosh,
+        Builtin::Atanh => Builtin::Atanh,
+        Builtin::Infinite => Builtin::Infinite,
+        Builtin::Nan => Builtin::Nan,
+        Builtin::IsInfinite => Builtin::IsInfinite,
+        Builtin::IsNan => Builtin::IsNan,
+        Builtin::IsNormal => Builtin::IsNormal,
+        Builtin::IsFinite => Builtin::IsFinite,
+        Builtin::Debug => Builtin::Debug,
+        Builtin::DebugMsg(e) => {
+            Builtin::DebugMsg(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::Env => Builtin::Env,
+        Builtin::EnvVar(e) => {
+            Builtin::EnvVar(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::NullLit => Builtin::NullLit,
+        Builtin::Trim => Builtin::Trim,
+        Builtin::Ltrim => Builtin::Ltrim,
+        Builtin::Rtrim => Builtin::Rtrim,
+        Builtin::Transpose => Builtin::Transpose,
+        Builtin::BSearch(e) => {
+            Builtin::BSearch(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::ModuleMeta(e) => {
+            Builtin::ModuleMeta(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
     }
 }
 
@@ -5551,6 +6781,68 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         ),
         Builtin::Walk(f) => Builtin::Walk(Box::new(substitute_func_param(f, param, arg))),
         Builtin::IsValid(e) => Builtin::IsValid(Box::new(substitute_func_param(e, param, arg))),
+        // Phase 10 builtins
+        Builtin::Path(e) => Builtin::Path(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::Paths => Builtin::Paths,
+        Builtin::PathsFilter(e) => {
+            Builtin::PathsFilter(Box::new(substitute_func_param(e, param, arg)))
+        }
+        Builtin::LeafPaths => Builtin::LeafPaths,
+        Builtin::SetPath(p, v) => Builtin::SetPath(
+            Box::new(substitute_func_param(p, param, arg)),
+            Box::new(substitute_func_param(v, param, arg)),
+        ),
+        Builtin::DelPaths(e) => Builtin::DelPaths(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::Floor => Builtin::Floor,
+        Builtin::Ceil => Builtin::Ceil,
+        Builtin::Round => Builtin::Round,
+        Builtin::Sqrt => Builtin::Sqrt,
+        Builtin::Fabs => Builtin::Fabs,
+        Builtin::Log => Builtin::Log,
+        Builtin::Log10 => Builtin::Log10,
+        Builtin::Log2 => Builtin::Log2,
+        Builtin::Exp => Builtin::Exp,
+        Builtin::Exp10 => Builtin::Exp10,
+        Builtin::Exp2 => Builtin::Exp2,
+        Builtin::Pow(x, y) => Builtin::Pow(
+            Box::new(substitute_func_param(x, param, arg)),
+            Box::new(substitute_func_param(y, param, arg)),
+        ),
+        Builtin::Sin => Builtin::Sin,
+        Builtin::Cos => Builtin::Cos,
+        Builtin::Tan => Builtin::Tan,
+        Builtin::Asin => Builtin::Asin,
+        Builtin::Acos => Builtin::Acos,
+        Builtin::Atan => Builtin::Atan,
+        Builtin::Atan2(x, y) => Builtin::Atan2(
+            Box::new(substitute_func_param(x, param, arg)),
+            Box::new(substitute_func_param(y, param, arg)),
+        ),
+        Builtin::Sinh => Builtin::Sinh,
+        Builtin::Cosh => Builtin::Cosh,
+        Builtin::Tanh => Builtin::Tanh,
+        Builtin::Asinh => Builtin::Asinh,
+        Builtin::Acosh => Builtin::Acosh,
+        Builtin::Atanh => Builtin::Atanh,
+        Builtin::Infinite => Builtin::Infinite,
+        Builtin::Nan => Builtin::Nan,
+        Builtin::IsInfinite => Builtin::IsInfinite,
+        Builtin::IsNan => Builtin::IsNan,
+        Builtin::IsNormal => Builtin::IsNormal,
+        Builtin::IsFinite => Builtin::IsFinite,
+        Builtin::Debug => Builtin::Debug,
+        Builtin::DebugMsg(e) => Builtin::DebugMsg(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::Env => Builtin::Env,
+        Builtin::EnvVar(e) => Builtin::EnvVar(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::NullLit => Builtin::NullLit,
+        Builtin::Trim => Builtin::Trim,
+        Builtin::Ltrim => Builtin::Ltrim,
+        Builtin::Rtrim => Builtin::Rtrim,
+        Builtin::Transpose => Builtin::Transpose,
+        Builtin::BSearch(e) => Builtin::BSearch(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::ModuleMeta(e) => {
+            Builtin::ModuleMeta(Box::new(substitute_func_param(e, param, arg)))
+        }
     }
 }
 
@@ -7486,5 +8778,220 @@ mod tests {
                 ]);
             }
         );
+    }
+
+    // Phase 10 tests
+
+    #[test]
+    fn test_floor() {
+        query!(b"3.7", "floor", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, 3);
+        });
+        query!(b"-3.2", "floor", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, -4);
+        });
+    }
+
+    #[test]
+    fn test_ceil() {
+        query!(b"3.2", "ceil", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, 4);
+        });
+        query!(b"-3.7", "ceil", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, -3);
+        });
+    }
+
+    #[test]
+    fn test_round() {
+        query!(b"3.4", "round", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, 3);
+        });
+        query!(b"3.5", "round", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, 4);
+        });
+    }
+
+    #[test]
+    fn test_sqrt() {
+        query!(b"9", "sqrt", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 3.0).abs() < f64::EPSILON);
+        });
+        query!(b"2", "sqrt", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - core::f64::consts::SQRT_2).abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_fabs() {
+        query!(b"-5", "fabs", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 5.0).abs() < f64::EPSILON);
+        });
+        query!(b"5", "fabs", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 5.0).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_log() {
+        query!(b"2.718281828459045", "log", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 1.0).abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_exp() {
+        query!(b"1", "exp", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - core::f64::consts::E).abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_pow() {
+        query!(b"2", "pow(.; 3)", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 8.0).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_sin_cos_tan() {
+        query!(b"0", "sin", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < f64::EPSILON);
+        });
+        query!(b"0", "cos", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 1.0).abs() < f64::EPSILON);
+        });
+        query!(b"0", "tan", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_infinite_nan() {
+        query!(b"null", "infinite", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.is_infinite() && n > 0.0);
+        });
+        query!(b"null", "nan", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.is_nan());
+        });
+    }
+
+    #[test]
+    fn test_isinfinite_isnan_isnormal() {
+        query!(b"1.0", "isinfinite", QueryResult::Owned(OwnedValue::Bool(b)) => {
+            assert!(!b);
+        });
+        query!(b"1.0", "isnan", QueryResult::Owned(OwnedValue::Bool(b)) => {
+            assert!(!b);
+        });
+        query!(b"1.0", "isnormal", QueryResult::Owned(OwnedValue::Bool(b)) => {
+            assert!(b);
+        });
+        query!(b"1.0", "isfinite", QueryResult::Owned(OwnedValue::Bool(b)) => {
+            assert!(b);
+        });
+    }
+
+    #[test]
+    fn test_trim() {
+        query!(br#""  hello world  ""#, "trim", QueryResult::Owned(OwnedValue::String(s)) => {
+            assert_eq!(s, "hello world");
+        });
+    }
+
+    #[test]
+    fn test_ltrim() {
+        query!(br#""  hello""#, "ltrim", QueryResult::Owned(OwnedValue::String(s)) => {
+            assert_eq!(s, "hello");
+        });
+    }
+
+    #[test]
+    fn test_rtrim() {
+        query!(br#""hello  ""#, "rtrim", QueryResult::Owned(OwnedValue::String(s)) => {
+            assert_eq!(s, "hello");
+        });
+    }
+
+    #[test]
+    fn test_transpose() {
+        query!(br#"[[1, 2], [3, 4], [5, 6]]"#, "transpose",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[0] {
+                    OwnedValue::Array(inner) => {
+                        assert_eq!(inner.len(), 3);
+                        assert_eq!(inner[0], OwnedValue::Int(1));
+                        assert_eq!(inner[1], OwnedValue::Int(3));
+                        assert_eq!(inner[2], OwnedValue::Int(5));
+                    }
+                    _ => panic!("expected array"),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_bsearch() {
+        // Found case - returns index
+        query!(br#"[1, 2, 3, 4, 5]"#, "bsearch(3)",
+            QueryResult::Owned(OwnedValue::Int(idx)) => {
+                assert_eq!(idx, 2);
+            }
+        );
+        // Not found case - returns object with index
+        query!(br#"[1, 2, 4, 5]"#, "bsearch(3)",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("index"), Some(&OwnedValue::Int(2)));
+            }
+        );
+    }
+
+    #[test]
+    fn test_paths() {
+        query!(br#"{"a": 1, "b": {"c": 2}}"#, "paths",
+            QueryResult::Owned(OwnedValue::Array(paths)) => {
+                // Should have paths: ["a"], ["b"], ["b", "c"]
+                assert_eq!(paths.len(), 3);
+            }
+        );
+    }
+
+    #[test]
+    fn test_leaf_paths() {
+        query!(br#"{"a": 1, "b": {"c": 2}}"#, "leaf_paths",
+            QueryResult::Owned(OwnedValue::Array(paths)) => {
+                // Should have paths: ["a"], ["b", "c"]
+                assert_eq!(paths.len(), 2);
+            }
+        );
+    }
+
+    #[test]
+    fn test_setpath() {
+        query!(br#"{"a": 1}"#, r#"setpath(["b"]; 2)"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("a"), Some(&OwnedValue::Int(1)));
+                assert_eq!(obj.get("b"), Some(&OwnedValue::Int(2)));
+            }
+        );
+    }
+
+    #[test]
+    fn test_delpaths() {
+        query!(br#"{"a": 1, "b": 2}"#, r#"delpaths([["b"]])"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("a"), Some(&OwnedValue::Int(1)));
+                assert_eq!(obj.get("b"), None);
+            }
+        );
+    }
+
+    #[test]
+    fn test_debug() {
+        // debug just passes through the value
+        query!(b"42", "debug", QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, 42);
+        });
     }
 }
