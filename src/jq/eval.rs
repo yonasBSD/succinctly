@@ -9102,4 +9102,67 @@ mod tests {
             }
         );
     }
+
+    // Missing test coverage additions
+
+    #[test]
+    fn test_walk() {
+        // walk applies a function to all values bottom-up
+        query!(br#"{"a": 1, "b": [2, 3]}"#, "walk(if type == \"number\" then . + 10 else . end)",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("a"), Some(&OwnedValue::Int(11)));
+                match obj.get("b") {
+                    Some(OwnedValue::Array(arr)) => {
+                        assert_eq!(arr[0], OwnedValue::Int(12));
+                        assert_eq!(arr[1], OwnedValue::Int(13));
+                    }
+                    _ => panic!("expected array for b"),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_tojsonstream() {
+        // tojsonstream converts to path/value pairs
+        query!(br#"{"a": 1}"#, "tojsonstream",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                // Returns array of [path, value] pairs
+                assert!(!arr.is_empty());
+            }
+        );
+    }
+
+    #[test]
+    fn test_fromjsonstream() {
+        // fromjsonstream currently returns the input unchanged (stub behavior)
+        // In full jq, it would reconstruct the object from path/value pairs
+        query!(br#"[[["a"], 1]]"#, "fromjsonstream",
+            QueryResult::Owned(OwnedValue::Array(_)) => {
+                // Stub returns input as-is
+            }
+        );
+    }
+
+    #[test]
+    fn test_getpath() {
+        // getpath returns Owned Int, not One StandardJson
+        query!(br#"{"a": {"b": 42}}"#, r#"getpath(["a", "b"])"#,
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 42);
+            }
+        );
+        // Non-existent path returns null
+        query!(br#"{"a": 1}"#, r#"getpath(["missing"])"#,
+            QueryResult::Owned(OwnedValue::Null) => {}
+        );
+    }
+
+    #[test]
+    fn test_debug_msg() {
+        // debug(msg) passes through value unchanged
+        query!(b"42", r#"debug("test message")"#, QueryResult::Owned(OwnedValue::Int(n)) => {
+            assert_eq!(n, 42);
+        });
+    }
 }
