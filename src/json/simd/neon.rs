@@ -21,37 +21,10 @@ const COLON: u8 = b':';
 /// Extract a bitmask from the high bit of each byte in a NEON vector.
 /// Returns a u16 where bit i is set if byte i has its high bit set.
 ///
-/// This is the optimized parallel implementation using weighted shifts and
-/// horizontal addition - much faster than the serial loop approach.
+/// Uses optimized parallel implementation with weighted shifts and horizontal add.
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
-    unsafe { neon_movemask_parallel(v) }
-}
-
-/// Serial movemask implementation for benchmarking comparison.
-/// This is the naive approach - kept for performance comparison only.
-#[inline]
-#[target_feature(enable = "neon")]
-#[allow(dead_code)]
-pub(crate) unsafe fn neon_movemask_serial(v: uint8x16_t) -> u16 {
-    unsafe {
-        let mut mask: u16 = 0;
-        let arr: [u8; 16] = core::mem::transmute(v);
-        for (i, &byte) in arr.iter().enumerate() {
-            if byte & 0x80 != 0 {
-                mask |= 1 << i;
-            }
-        }
-        mask
-    }
-}
-
-/// Optimized parallel movemask using weighted shifts and horizontal add.
-/// ~3-5x faster than the serial version on ARM.
-#[inline]
-#[target_feature(enable = "neon")]
-pub(crate) unsafe fn neon_movemask_parallel(v: uint8x16_t) -> u16 {
     unsafe {
         // Shift each byte right by 7 to get just the high bit (0 or 1)
         let high_bits = vshrq_n_u8::<7>(v);
@@ -72,48 +45,6 @@ pub(crate) unsafe fn neon_movemask_parallel(v: uint8x16_t) -> u16 {
         let high_sum = vaddv_u8(high) as u16;
 
         low_sum | (high_sum << 8)
-    }
-}
-
-/// Alternative movemask using multiplication instead of variable shifts.
-/// This approach uses vmul_u8 with pre-computed weights instead of vshlq_u8.
-#[inline]
-#[target_feature(enable = "neon")]
-#[allow(dead_code)]
-pub(crate) unsafe fn neon_movemask_mul(v: uint8x16_t) -> u16 {
-    unsafe {
-        // Split into halves first
-        let v_hi = vget_high_u8(v);
-        let v_lo = vget_low_u8(v);
-
-        // Extract high bits from each byte (shift right by 7)
-        let hi_bits_hi = vshr_n_u8::<7>(v_hi);
-        let hi_bits_lo = vshr_n_u8::<7>(v_lo);
-
-        // Weight by position using multiplication
-        let weights: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
-        let w = vld1_u8(weights.as_ptr());
-
-        let weighted_lo = vmul_u8(hi_bits_lo, w);
-        let weighted_hi = vmul_u8(hi_bits_hi, w);
-
-        let sum_lo = vaddv_u8(weighted_lo) as u16;
-        let sum_hi = vaddv_u8(weighted_hi) as u16;
-
-        sum_lo | (sum_hi << 8)
-    }
-}
-
-/// Movemask using polynomial multiplication approach.
-/// Uses PMULL to efficiently gather bits.
-#[inline]
-#[target_feature(enable = "neon")]
-#[allow(dead_code)]
-pub(crate) unsafe fn neon_movemask_pmul(v: uint8x16_t) -> u16 {
-    unsafe {
-        // The PMULL approach requires additional setup that doesn't pay off
-        // for 16 bytes. Fall back to the parallel approach.
-        neon_movemask_parallel(v)
     }
 }
 
@@ -216,8 +147,11 @@ unsafe fn classify_chars(chunk: uint8x16_t) -> CharClass {
 
 /// Process a 16-byte chunk and update IB/BP writers.
 /// Returns the new state after processing all 16 bytes.
+///
+/// This is the original serial implementation - kept for correctness reference.
 #[inline]
-fn process_chunk_standard(
+#[allow(dead_code)]
+fn process_chunk_standard_serial(
     class: CharClass,
     mut state: State,
     ib: &mut BitWriter,
@@ -293,6 +227,107 @@ fn process_chunk_standard(
                     // state stays InValue
                 } else {
                     // whitespace ends value
+                    ib.write_0();
+                    state = State::InJson;
+                }
+            }
+        }
+    }
+
+    state
+}
+
+/// Process a 16-byte chunk and update IB/BP writers.
+/// Returns the new state after processing all 16 bytes.
+///
+/// Uses the original serial state machine - benchmarks show this is faster
+/// than the branchless lookup table approach due to excellent branch prediction
+/// on modern ARM CPUs.
+#[inline]
+fn process_chunk_standard(
+    class: CharClass,
+    mut state: State,
+    ib: &mut BitWriter,
+    bp: &mut BitWriter,
+    bytes: &[u8],
+) -> State {
+    for i in 0..bytes.len().min(16) {
+        let bit = 1u16 << i;
+
+        // Check character classes using pre-computed SIMD masks
+        let is_quote = (class.quotes & bit) != 0;
+        let is_backslash = (class.backslashes & bit) != 0;
+        let is_open = (class.opens & bit) != 0;
+        let is_close = (class.closes & bit) != 0;
+        let is_value_char = (class.value_chars & bit) != 0;
+
+        match state {
+            State::InJson => {
+                if is_open {
+                    // { or [: write BP=1, IB=1
+                    bp.write_1();
+                    ib.write_1();
+                    // state stays InJson
+                } else if is_close {
+                    // } or ]: write BP=0, IB=0
+                    bp.write_0();
+                    ib.write_0();
+                    // state stays InJson
+                } else if is_quote {
+                    // Start of string value: BP=10, IB=1
+                    bp.write_1();
+                    bp.write_0();
+                    ib.write_1();
+                    state = State::InString;
+                } else if is_value_char {
+                    // Start of non-string value (number, bool, null): BP=10, IB=1
+                    bp.write_1();
+                    bp.write_0();
+                    ib.write_1();
+                    state = State::InValue;
+                } else {
+                    // Whitespace, comma, colon: just IB=0
+                    ib.write_0();
+                }
+            }
+            State::InString => {
+                // Always IB=0 inside strings
+                ib.write_0();
+                if is_quote {
+                    // End of string, but we stay in InJson for structural parsing
+                    state = State::InJson;
+                } else if is_backslash {
+                    state = State::InEscape;
+                }
+            }
+            State::InEscape => {
+                // Escaped character: IB=0, return to InString
+                ib.write_0();
+                state = State::InString;
+            }
+            State::InValue => {
+                // Inside a non-string value (number, bool, null)
+                if is_open {
+                    // This shouldn't happen in valid JSON, but handle it
+                    bp.write_1();
+                    ib.write_1();
+                    state = State::InJson;
+                } else if is_close {
+                    // Value ends, then close bracket
+                    bp.write_0();
+                    ib.write_0();
+                    state = State::InJson;
+                } else if is_quote {
+                    // Value ends, then string starts (shouldn't happen in valid JSON)
+                    bp.write_1();
+                    bp.write_0();
+                    ib.write_1();
+                    state = State::InString;
+                } else if is_value_char {
+                    // Continue value: IB=0
+                    ib.write_0();
+                } else {
+                    // Value ended (whitespace, comma, colon): IB=0
                     ib.write_0();
                     state = State::InJson;
                 }

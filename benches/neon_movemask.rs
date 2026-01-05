@@ -172,35 +172,44 @@ mod aarch64_benches {
 
     /// Benchmark the full semi-index building with different movemask implementations
     pub fn bench_json_indexing_movemask(c: &mut Criterion) {
-        // Check if benchmark data exists
-        let test_file = std::path::Path::new("data/bench/generated/comprehensive/10mb.json");
-        if !test_file.exists() {
-            eprintln!(
-                "Skipping JSON indexing benchmark: {} not found",
-                test_file.display()
-            );
-            eprintln!("Run: ./target/release/succinctly json generate-suite");
-            return;
+        let test_files = [
+            ("10mb", "data/bench/generated/comprehensive/10mb.json"),
+            ("100mb", "data/bench/generated/comprehensive/100mb.json"),
+        ];
+
+        for (name, path) in test_files {
+            let test_file = std::path::Path::new(path);
+            if !test_file.exists() {
+                eprintln!(
+                    "Skipping {} JSON indexing benchmark: {} not found",
+                    name,
+                    test_file.display()
+                );
+                eprintln!("Run: ./target/release/succinctly json generate-suite");
+                continue;
+            }
+
+            let bytes = std::fs::read(test_file).expect("Failed to read test file");
+            let file_size = bytes.len() as u64;
+
+            let mut group = c.benchmark_group(format!("json_indexing_{}", name));
+            group.throughput(Throughput::Bytes(file_size));
+            group.sample_size(if name == "100mb" { 10 } else { 20 });
+
+            // Benchmark with NEON (uses parallel movemask)
+            group.bench_function("NEON_parallel", |b| {
+                b.iter(|| {
+                    succinctly::json::simd::neon::build_semi_index_standard(black_box(&bytes))
+                })
+            });
+
+            // Benchmark with scalar (baseline)
+            group.bench_function("Scalar", |b| {
+                b.iter(|| succinctly::json::standard::build_semi_index(black_box(&bytes)))
+            });
+
+            group.finish();
         }
-
-        let bytes = std::fs::read(test_file).expect("Failed to read test file");
-        let file_size = bytes.len() as u64;
-
-        let mut group = c.benchmark_group("json_indexing_movemask");
-        group.throughput(Throughput::Bytes(file_size));
-        group.sample_size(20);
-
-        // Benchmark with NEON (uses parallel movemask)
-        group.bench_function("NEON_parallel", |b| {
-            b.iter(|| succinctly::json::simd::neon::build_semi_index_standard(black_box(&bytes)))
-        });
-
-        // Benchmark with scalar (baseline)
-        group.bench_function("Scalar", |b| {
-            b.iter(|| succinctly::json::standard::build_semi_index(black_box(&bytes)))
-        });
-
-        group.finish();
     }
 
     /// Correctness test - ensure all implementations produce the same result
