@@ -8994,4 +8994,112 @@ mod tests {
             assert_eq!(n, 42);
         });
     }
+
+    #[test]
+    fn test_log10_log2() {
+        query!(b"100", "log10", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 2.0).abs() < 1e-10);
+        });
+        query!(b"8", "log2", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 3.0).abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_exp10_exp2() {
+        query!(b"2", "exp10", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 100.0).abs() < 1e-10);
+        });
+        query!(b"3", "exp2", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 8.0).abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_asin_acos_atan() {
+        query!(b"0", "asin", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+        query!(b"1", "acos", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+        query!(b"0", "atan", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_atan2() {
+        query!(b"1", "atan2(1; 1)", QueryResult::Owned(OwnedValue::Float(n)) => {
+            // atan2(1, 1) = pi/4
+            assert!((n - core::f64::consts::FRAC_PI_4).abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_sinh_cosh_tanh() {
+        query!(b"0", "sinh", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+        query!(b"0", "cosh", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 1.0).abs() < 1e-10);
+        });
+        query!(b"0", "tanh", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_asinh_acosh_atanh() {
+        query!(b"0", "asinh", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+        query!(b"1", "acosh", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+        query!(b"0", "atanh", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!(n.abs() < 1e-10);
+        });
+    }
+
+    #[test]
+    fn test_env() {
+        // env returns empty object in no_std context
+        query!(b"null", "env", QueryResult::Owned(OwnedValue::Object(obj)) => {
+            assert!(obj.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_null_literal() {
+        query!(b"42", "null", QueryResult::Owned(OwnedValue::Null) => {});
+    }
+
+    #[test]
+    fn test_modulemeta() {
+        // modulemeta returns null (stub)
+        query!(b"null", r#"modulemeta("test")"#, QueryResult::Owned(OwnedValue::Null) => {});
+    }
+
+    #[test]
+    fn test_path_expr() {
+        // path(expr) is a stub that returns empty array
+        // Full implementation would track paths during expression evaluation
+        query!(br#"{"a": 1, "b": 2}"#, "path(.a)",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert!(arr.is_empty()); // Stub returns empty
+            }
+        );
+    }
+
+    #[test]
+    fn test_paths_filter() {
+        // paths(filter) returns paths where values match filter
+        query!(br#"{"a": 1, "b": "hello", "c": 2}"#, "paths(type == \"number\")",
+            QueryResult::Owned(OwnedValue::Array(paths)) => {
+                // Should have paths to "a" and "c" (both numbers)
+                assert_eq!(paths.len(), 2);
+            }
+        );
+    }
 }
