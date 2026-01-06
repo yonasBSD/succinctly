@@ -89,7 +89,6 @@ mod bitvec_serde {
         let words = vec![0xAAAA_AAAA_AAAA_AAAAu64; 16];
         let config = Config {
             select_sample_rate: 64,
-            build_select0: false,
         };
         let bv = BitVec::with_config(words, 1024, config);
 
@@ -256,21 +255,18 @@ mod config_serde {
         let restored: Config = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.select_sample_rate, 256);
-        assert!(!restored.build_select0);
     }
 
     #[test]
     fn test_custom_config() {
         let config = Config {
             select_sample_rate: 64,
-            build_select0: true,
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let restored: Config = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.select_sample_rate, 64);
-        assert!(restored.build_select0);
     }
 }
 

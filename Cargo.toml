@@ -20,9 +20,6 @@ simd = []
 # Use portable bitwise popcount (no intrinsics, good for comparison)
 portable-popcount = []
 
-# Include select0 support (increases index size)
-select0 = []
-
 # Enable serde serialization/deserialization
 serde = ["dep:serde"]
 

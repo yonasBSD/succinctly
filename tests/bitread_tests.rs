@@ -154,40 +154,6 @@ fn test_select1_pattern_32bits() {
 }
 
 // ============================================================================
-// Select0 tests with readable bit patterns
-// ============================================================================
-
-#[test]
-fn test_select0_pattern_10010010() {
-    // "10010010" - zeros at positions 1, 2, 4, 5, 7
-    let bv = bitread("10010010");
-
-    assert_eq!(bv.select0(0), Some(1));
-    assert_eq!(bv.select0(1), Some(2));
-    assert_eq!(bv.select0(2), Some(4));
-    assert_eq!(bv.select0(3), Some(5));
-    assert_eq!(bv.select0(4), Some(7));
-    assert_eq!(bv.select0(5), None);
-}
-
-#[test]
-fn test_select0_all_ones() {
-    let bv = bitread("11111111");
-    assert_eq!(bv.count_zeros(), 0);
-    assert_eq!(bv.select0(0), None);
-}
-
-#[test]
-fn test_select0_all_zeros() {
-    let bv = bitread("00000000");
-    assert_eq!(bv.count_ones(), 0);
-    for i in 0..8 {
-        assert_eq!(bv.select0(i), Some(i));
-    }
-    assert_eq!(bv.select0(8), None);
-}
-
-// ============================================================================
 // Rank/Select roundtrip tests
 // ============================================================================
 
@@ -224,26 +190,6 @@ fn test_roundtrip_various_patterns() {
                 bv.rank1(pos + 1),
                 k + 1,
                 "pattern '{}': rank1(select1({}) + 1) != {} + 1",
-                pattern,
-                k,
-                k
-            );
-        }
-
-        // For every zero bit, verify roundtrip
-        for k in 0..bv.count_zeros() {
-            let pos = bv.select0(k).unwrap();
-            assert!(
-                !bv.get(pos),
-                "pattern '{}': select0({}) = {} but bit is set",
-                pattern,
-                k,
-                pos
-            );
-            assert_eq!(
-                bv.rank0(pos + 1),
-                k + 1,
-                "pattern '{}': rank0(select0({}) + 1) != {} + 1",
                 pattern,
                 k,
                 k
@@ -324,5 +270,4 @@ fn test_single_zero() {
     assert_eq!(bv.rank1(0), 0);
     assert_eq!(bv.rank1(1), 0);
     assert_eq!(bv.select1(0), None);
-    assert_eq!(bv.select0(0), Some(0));
 }

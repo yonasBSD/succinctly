@@ -97,7 +97,7 @@ cargo build --release --features cli
 **RankSelect trait** ([src/lib.rs](src/lib.rs))
 - `rank1(i)`: Count 1-bits in `[0, i)` - O(1)
 - `select1(k)`: Find position of k-th 1-bit - O(log n) with acceleration
-- `rank0(i)` and `select0(k)`: Corresponding operations for 0-bits
+- `rank0(i)`: Count 0-bits in `[0, i)` - O(1) (computed as `i - rank1(i)`)
 
 ### Rank/Select Implementation Details
 
@@ -182,8 +182,6 @@ cargo build --release --features cli
 - `select_sample_rate`: Controls select index density (default: 256)
   - Lower = faster select, more memory
   - Higher = slower select, less memory
-- `build_select0`: Whether to build dedicated select0 index (default: false)
-  - Currently unused; select0 uses linear scan
 
 ## Feature Flags
 
@@ -193,7 +191,6 @@ cargo build --release --features cli
 - `portable-popcount`: Portable bitwise algorithm
 
 **Other features**:
-- `select0`: Enable select0 index (increases memory)
 - `large-tests`: Test with 1GB bitvectors (~125MB RAM)
 - `huge-tests`: Test with 5GB bitvectors (~625MB RAM)
 - `mmap-tests`: Memory-mapped file tests (requires `memmap2` and `tempfile`)

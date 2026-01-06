@@ -29,7 +29,6 @@
 //! - `portable-popcount` - Use portable bitwise algorithm (no intrinsics)
 //!
 //! Other features:
-//! - `select0` - Include select0 index (increases memory usage)
 //! - `serde` - Enable serialization/deserialization support
 
 #![cfg_attr(not(test), no_std)]
@@ -84,11 +83,6 @@ pub trait RankSelect {
     ///
     /// Returns `None` if fewer than `k+1` ones exist.
     fn select1(&self, k: usize) -> Option<usize>;
-
-    /// Find position of the k-th 0-bit (0-indexed).
-    ///
-    /// Returns `None` if fewer than `k+1` zeros exist.
-    fn select0(&self, k: usize) -> Option<usize>;
 }
 
 /// Configuration for building indices.
@@ -97,15 +91,12 @@ pub trait RankSelect {
 pub struct Config {
     /// Sample rate for select acceleration (default: 256)
     pub select_sample_rate: u32,
-    /// Whether to build select0 index (default: false)
-    pub build_select0: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             select_sample_rate: 256,
-            build_select0: false,
         }
     }
 }

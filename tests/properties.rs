@@ -136,7 +136,7 @@ proptest! {
         }
     }
 
-    /// select0 + select1 cover all positions
+    /// select1 returns positions with bits set
     #[test]
     fn prop_select_coverage(
         words in prop::collection::vec(any::<u64>(), 1..20),
@@ -144,19 +144,11 @@ proptest! {
         let len = words.len() * 64;
         let bv = BitVec::from_words(words, len);
         let ones = bv.count_ones();
-        let zeros = bv.count_zeros();
 
         // Every select1 position should have bit set
         for k in 0..ones {
             if let Some(pos) = bv.select1(k) {
                 prop_assert!(bv.get(pos), "select1({}) = {} but bit not set", k, pos);
-            }
-        }
-
-        // Every select0 position should have bit unset
-        for k in 0..zeros {
-            if let Some(pos) = bv.select0(k) {
-                prop_assert!(!bv.get(pos), "select0({}) = {} but bit is set", k, pos);
             }
         }
     }

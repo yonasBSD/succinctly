@@ -106,24 +106,6 @@ proptest! {
         }
     }
 
-    /// select0 returns positions in strictly increasing order
-    #[test]
-    fn select0_is_strictly_increasing(words in prop::collection::vec(0u64..u64::MAX, 1..20)) {
-        let len = words.len() * 64;
-        let bv = BitVec::from_words(words, len);
-        let zeros = bv.count_zeros();
-
-        let mut prev = None;
-        for k in 0..zeros.min(100) {
-            if let Some(pos) = bv.select0(k) {
-                if let Some(p) = prev {
-                    prop_assert!(pos > p, "select0({}) = {} <= select0({}) = {}", k, pos, k - 1, p);
-                }
-                prev = Some(pos);
-            }
-        }
-    }
-
     /// select1(k) returns None iff k >= count_ones
     #[test]
     fn select1_none_iff_k_ge_ones(words in prop::collection::vec(any::<u64>(), 1..20)) {
@@ -447,30 +429,6 @@ fn test_partial_last_word() {
     assert_eq!(bv.rank1(100), 100);
     assert_eq!(bv.select1(99), Some(99));
     assert_eq!(bv.select1(100), None);
-}
-
-#[test]
-fn test_select0_comprehensive() {
-    // Bits: 11110000 pattern repeated
-    let word = 0x0F0F_0F0F_0F0F_0F0Fu64;
-    let bv = BitVec::from_words(vec![word; 4], 256);
-
-    // 32 ones and 32 zeros per word
-    assert_eq!(bv.count_ones(), 128);
-    assert_eq!(bv.count_zeros(), 128);
-
-    // First zero is at position 4
-    assert_eq!(bv.select0(0), Some(4));
-    // Second zero is at position 5
-    assert_eq!(bv.select0(1), Some(5));
-
-    // Verify select0 roundtrip
-    for k in 0..128 {
-        if let Some(pos) = bv.select0(k) {
-            assert!(!bv.get(pos), "select0({}) = {} should be a 0-bit", k, pos);
-            assert_eq!(bv.rank0(pos + 1), k + 1);
-        }
-    }
 }
 
 // ============================================================================

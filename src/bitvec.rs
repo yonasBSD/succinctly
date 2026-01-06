@@ -249,53 +249,6 @@ impl RankSelect for BitVec {
 
         None
     }
-
-    /// Find position of the k-th 0-bit (0-indexed).
-    ///
-    /// Returns `None` if there are fewer than `k+1` zeros.
-    fn select0(&self, k: usize) -> Option<usize> {
-        let zeros = self.count_zeros();
-        if k >= zeros {
-            return None;
-        }
-
-        // Linear scan for select0 (could be optimized with separate index)
-        let mut remaining = k;
-
-        for word_idx in 0..self.words.len() {
-            let word = self.words[word_idx];
-            let inverted = !word;
-
-            // Handle partial last word
-            let valid_bits = if word_idx == self.words.len() - 1 && !self.len.is_multiple_of(64) {
-                self.len % 64
-            } else {
-                64
-            };
-
-            let zeros_in_word = if valid_bits == 64 {
-                popcount_word(inverted) as usize
-            } else {
-                let mask = (1u64 << valid_bits) - 1;
-                popcount_word(inverted & mask) as usize
-            };
-
-            if zeros_in_word > remaining {
-                // Found the target word - find k-th zero (= k-th one in inverted)
-                let search_word = if valid_bits == 64 {
-                    inverted
-                } else {
-                    inverted & ((1u64 << valid_bits) - 1)
-                };
-                let bit_pos = select_in_word(search_word, remaining as u32) as usize;
-                return Some(word_idx * 64 + bit_pos);
-            }
-
-            remaining -= zeros_in_word;
-        }
-
-        None
-    }
 }
 
 #[cfg(test)]
@@ -447,17 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select0_simple() {
-        // Bits: 1 0 1 1 0 0 1 0 (positions 1, 4, 5, 7 have 0s)
-        let bv = BitVec::from_words(vec![0b0100_1101], 8);
-        assert_eq!(bv.select0(0), Some(1)); // 0th zero at position 1
-        assert_eq!(bv.select0(1), Some(4)); // 1st zero at position 4
-        assert_eq!(bv.select0(2), Some(5)); // 2nd zero at position 5
-        assert_eq!(bv.select0(3), Some(7)); // 3rd zero at position 7
-        assert_eq!(bv.select0(4), None); // No 4th zero
-    }
-
-    #[test]
     fn test_rank_select_roundtrip() {
         let bv = BitVec::from_words(vec![0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555], 128);
 
@@ -499,15 +441,12 @@ mod tests {
         assert_eq!(bv.rank1(1), 1);
         assert_eq!(bv.select1(0), Some(0));
         assert_eq!(bv.select1(1), None);
-        assert_eq!(bv.select0(0), None);
 
         // len = 1, single bit unset
         let bv = BitVec::from_words(vec![0u64], 1);
         assert_eq!(bv.count_ones(), 0);
         assert_eq!(bv.count_zeros(), 1);
         assert!(!bv.get(0));
-        assert_eq!(bv.select0(0), Some(0));
-        assert_eq!(bv.select0(1), None);
         assert_eq!(bv.select1(0), None);
     }
 
@@ -521,13 +460,6 @@ mod tests {
         assert_eq!(bv.rank1(63), 63);
         assert_eq!(bv.select1(62), Some(62));
         assert_eq!(bv.select1(63), None);
-
-        // 63 bits all zeros
-        let bv = BitVec::from_words(vec![0u64], 63);
-        assert_eq!(bv.count_ones(), 0);
-        assert_eq!(bv.count_zeros(), 63);
-        assert_eq!(bv.select0(62), Some(62));
-        assert_eq!(bv.select0(63), None);
     }
 
     #[test]
@@ -701,77 +633,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Comprehensive select0 tests
-    // ========================================================================
-
-    #[test]
-    fn test_select0_all_ones() {
-        let bv = BitVec::from_words(vec![u64::MAX; 4], 256);
-        assert_eq!(bv.count_zeros(), 0);
-        assert_eq!(bv.select0(0), None);
-    }
-
-    #[test]
-    fn test_select0_all_zeros() {
-        let bv = BitVec::from_words(vec![0u64; 4], 256);
-        assert_eq!(bv.count_zeros(), 256);
-        for k in 0..256 {
-            assert_eq!(bv.select0(k), Some(k), "select0({}) failed", k);
-        }
-        assert_eq!(bv.select0(256), None);
-    }
-
-    #[test]
-    fn test_select0_sparse_ones() {
-        // Sparse ones: one bit set per word
-        let words: Vec<u64> = (0..8).map(|i| 1u64 << i).collect();
-        let bv = BitVec::from_words(words, 512);
-
-        assert_eq!(bv.count_ones(), 8);
-        assert_eq!(bv.count_zeros(), 504);
-
-        // First zero in word 0 is at position 1 (since bit 0 is set)
-        assert_eq!(bv.select0(0), Some(1));
-        // Zeros at positions 2-63 in word 0
-        assert_eq!(bv.select0(62), Some(63)); // 62 zeros in word 0 (not counting bit 0)
-    }
-
-    #[test]
-    fn test_select0_partial_last_word() {
-        // 100 bits: first 50 are 1s, last 50 are 0s
-        let word0 = (1u64 << 50) - 1; // bits 0-49 are 1
-        let word1 = 0u64;
-        let bv = BitVec::from_words(vec![word0, word1], 100);
-
-        assert_eq!(bv.count_ones(), 50);
-        assert_eq!(bv.count_zeros(), 50);
-
-        // First zero is at position 50
-        assert_eq!(bv.select0(0), Some(50));
-        // Last zero is at position 99
-        assert_eq!(bv.select0(49), Some(99));
-        assert_eq!(bv.select0(50), None);
-    }
-
-    #[test]
-    fn test_select0_word_boundary() {
-        // Zeros only at word boundaries
-        let mut words = vec![u64::MAX; 4];
-        words[0] &= !1u64; // Clear bit 0
-        words[1] &= !(1u64 << 63); // Clear bit 127
-        words[2] &= !1u64; // Clear bit 128
-        words[3] &= !(1u64 << 63); // Clear bit 255
-
-        let bv = BitVec::from_words(words, 256);
-        assert_eq!(bv.count_zeros(), 4);
-        assert_eq!(bv.select0(0), Some(0));
-        assert_eq!(bv.select0(1), Some(127));
-        assert_eq!(bv.select0(2), Some(128));
-        assert_eq!(bv.select0(3), Some(255));
-        assert_eq!(bv.select0(4), None);
-    }
-
-    // ========================================================================
     // Configuration/sample rate tests
     // ========================================================================
 
@@ -780,7 +641,6 @@ mod tests {
         let words: Vec<u64> = vec![0xAAAA_AAAA_AAAA_AAAA; 16];
         let config = Config {
             select_sample_rate: 64,
-            build_select0: false,
         };
         let bv = BitVec::with_config(words, 1024, config);
 
@@ -797,7 +657,6 @@ mod tests {
         let words: Vec<u64> = vec![0xAAAA_AAAA_AAAA_AAAA; 8];
         let config = Config {
             select_sample_rate: 1,
-            build_select0: false,
         };
         let bv = BitVec::with_config(words, 512, config);
 
@@ -814,7 +673,6 @@ mod tests {
         let words: Vec<u64> = vec![1u64; 8]; // 8 ones total
         let config = Config {
             select_sample_rate: 1024,
-            build_select0: false,
         };
         let bv = BitVec::with_config(words, 512, config);
 
@@ -844,7 +702,6 @@ mod tests {
 
         // Select operations
         assert_eq!(bv.select1(0), None);
-        assert_eq!(bv.select0(0), None);
     }
 
     // ========================================================================
@@ -888,26 +745,6 @@ mod tests {
         for k in 0..bv.count_ones() {
             if let Some(pos) = bv.select1(k) {
                 assert_eq!(bv.rank1(pos), k, "rank1(select1({})) should be {}", k, k);
-            }
-        }
-    }
-
-    #[test]
-    fn test_rank_select_consistency_dense() {
-        // Dense: all ones except every 100th position
-        let mut words = vec![u64::MAX; 32]; // 2048 bits
-        for i in 0..20 {
-            let pos = i * 100;
-            if pos < 2048 {
-                words[pos / 64] &= !(1u64 << (pos % 64));
-            }
-        }
-        let bv = BitVec::from_words(words, 2048);
-
-        // Verify rank0(select0(k)) = k for valid k
-        for k in 0..bv.count_zeros().min(20) {
-            if let Some(pos) = bv.select0(k) {
-                assert_eq!(bv.rank0(pos), k, "rank0(select0({})) should be {}", k, k);
             }
         }
     }
