@@ -172,10 +172,55 @@ unsafe fn popcount_64bytes_neon(ptr: *const u8) -> u32 {
     }
 }
 
-/// x86_64 popcount using POPCNT instruction.
+/// AVX-512 VPOPCNTDQ: 8x parallel u64 popcount.
 ///
-/// Uses Rust's `count_ones()` which LLVM compiles to POPCNT when available.
-/// For benchmarking with explicit POPCNT, compile with `-C target-feature=+popcnt`.
+/// Processes 8 u64 words (512 bits) at once using AVX-512 VPOPCNTDQ instruction.
+/// Available on Intel Ice Lake+ (2019) and AMD Zen 4+ (2022).
+#[cfg(all(
+    feature = "simd",
+    target_arch = "x86_64",
+    not(feature = "portable-popcount")
+))]
+#[inline]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn popcount_words_avx512vpopcntdq(words: &[u64]) -> u32 {
+    use core::arch::x86_64::*;
+
+    if words.is_empty() {
+        return 0;
+    }
+
+    let mut total = 0u32;
+    let mut offset = 0;
+
+    // Process 8 u64 words (512 bits) at a time
+    while offset + 8 <= words.len() {
+        unsafe {
+            let ptr = words.as_ptr().add(offset) as *const __m512i;
+            let v = _mm512_loadu_si512(ptr);
+
+            // _mm512_popcnt_epi64: Count bits in each of 8 u64 lanes in parallel
+            let counts = _mm512_popcnt_epi64(v);
+
+            // Sum all 8 counts into a single value
+            total += _mm512_reduce_add_epi64(counts) as u32;
+        }
+        offset += 8;
+    }
+
+    // Handle remaining words (< 8)
+    for &word in &words[offset..] {
+        total += word.count_ones();
+    }
+
+    total
+}
+
+/// x86_64 popcount with runtime dispatch to best available implementation.
+///
+/// Dispatches to:
+/// - AVX-512 VPOPCNTDQ (8x u64 parallel) if available
+/// - Scalar POPCNT otherwise
 #[cfg(all(
     feature = "simd",
     target_arch = "x86_64",
@@ -183,8 +228,15 @@ unsafe fn popcount_64bytes_neon(ptr: *const u8) -> u32 {
 ))]
 #[inline]
 fn popcount_words_x86(words: &[u64]) -> u32 {
-    // count_ones() compiles to POPCNT on x86_64 with appropriate target features.
-    // This is the most portable approach for no_std environments.
+    // Runtime dispatch to AVX-512 VPOPCNTDQ if available (requires std)
+    #[cfg(feature = "std")]
+    {
+        if is_x86_feature_detected!("avx512vpopcntdq") {
+            return unsafe { popcount_words_avx512vpopcntdq(words) };
+        }
+    }
+
+    // Fallback: scalar POPCNT (count_ones compiles to POPCNT on x86_64)
     let mut total = 0u32;
     for &word in words {
         total += word.count_ones();
@@ -240,5 +292,65 @@ mod tests {
                 word
             );
         }
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn test_avx512_vpopcntdq_matches_scalar() {
+        // Test AVX-512 VPOPCNTDQ implementation against scalar
+        if !is_x86_feature_detected!("avx512vpopcntdq") {
+            eprintln!("Skipping AVX-512 VPOPCNTDQ test: CPU doesn't support it");
+            return;
+        }
+
+        // Test various sizes
+        for len in [0, 1, 7, 8, 9, 15, 16, 17, 64, 100, 1000] {
+            let words: Vec<u64> = (0..len)
+                .map(|i: u64| {
+                    // Mix of patterns
+                    match i % 4 {
+                        0 => u64::MAX,
+                        1 => 0,
+                        2 => 0xAAAA_AAAA_AAAA_AAAA,
+                        _ => i.wrapping_mul(0x0123_4567_89AB_CDEF),
+                    }
+                })
+                .collect();
+
+            let expected: u32 = words.iter().map(|w: &u64| w.count_ones()).sum();
+            let avx512_result = unsafe { popcount_words_avx512vpopcntdq(&words) };
+
+            assert_eq!(
+                avx512_result, expected,
+                "AVX-512 VPOPCNTDQ mismatch for {} words",
+                len
+            );
+        }
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn test_avx512_edge_cases() {
+        if !is_x86_feature_detected!("avx512vpopcntdq") {
+            return;
+        }
+
+        // All zeros
+        let zeros = vec![0u64; 100];
+        assert_eq!(unsafe { popcount_words_avx512vpopcntdq(&zeros) }, 0);
+
+        // All ones
+        let ones = vec![u64::MAX; 100];
+        assert_eq!(
+            unsafe { popcount_words_avx512vpopcntdq(&ones) },
+            100 * 64
+        );
+
+        // Alternating pattern
+        let alt = vec![0xAAAA_AAAA_AAAA_AAAA; 100];
+        assert_eq!(
+            unsafe { popcount_words_avx512vpopcntdq(&alt) },
+            100 * 32
+        );
     }
 }

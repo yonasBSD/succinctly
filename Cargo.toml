@@ -83,6 +83,10 @@ harness = false
 name = "json_pipeline"
 harness = false
 
+[[bench]]
+name = "popcount_strategies"
+harness = false
+
 [[bin]]
 name = "succinctly"
 path = "src/bin/succinctly/main.rs"
