@@ -28,7 +28,8 @@ fn bench_popcount_strategies(c: &mut Criterion) {
     ];
 
     // Different data patterns affect popcount performance
-    let patterns: Vec<(&str, fn(u64) -> u64)> = vec![
+    type PatternFn = fn(u64) -> u64;
+    let patterns: [(&str, PatternFn); 6] = [
         ("zeros", |_| 0u64),
         ("ones", |_| u64::MAX),
         ("sparse", |i| i & 0x0001_0001_0001_0001),
@@ -39,7 +40,7 @@ fn bench_popcount_strategies(c: &mut Criterion) {
 
     for (size_name, word_count) in sizes {
         for (pattern_name, pattern_fn) in &patterns {
-            let words: Vec<u64> = (0u64..word_count as u64).map(|i| pattern_fn(i)).collect();
+            let words: Vec<u64> = (0u64..word_count as u64).map(pattern_fn).collect();
 
             #[cfg(feature = "simd")]
             group.bench_with_input(
