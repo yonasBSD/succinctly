@@ -9,6 +9,9 @@ use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use core::alloc::Layout;
+use core::ptr::NonNull;
+
 /// Number of 64-bit words per basic block (512 bits = 8 words).
 const WORDS_PER_BLOCK: usize = 8;
 
@@ -20,7 +23,161 @@ const BITS_PER_BLOCK: usize = WORDS_PER_BLOCK * 64;
 /// L0 stores absolute rank every 2^32 bits = 2^26 words = 2^23 blocks.
 const BLOCKS_PER_SUPERBLOCK: usize = 1 << 23;
 
-/// Poppy-style rank directory.
+/// Cache line size in bytes (64 bytes on most modern CPUs).
+const CACHE_LINE_SIZE: usize = 64;
+
+/// Number of u128 entries that fit in a cache line (64 / 16 = 4).
+#[allow(dead_code)]
+const ENTRIES_PER_CACHE_LINE: usize = CACHE_LINE_SIZE / 16;
+
+/// Cache-aligned storage for L1+L2 entries.
+///
+/// This wrapper ensures that the L1+L2 data is allocated with 64-byte alignment,
+/// reducing cache line crossings during rank queries. Each u128 entry is 16 bytes,
+/// so 4 entries fit per cache line.
+#[derive(Debug)]
+struct CacheAlignedL1L2 {
+    /// Pointer to the cache-aligned allocation.
+    ptr: NonNull<u128>,
+    /// Number of u128 entries.
+    len: usize,
+}
+
+impl CacheAlignedL1L2 {
+    /// Create an empty cache-aligned storage.
+    fn empty() -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            len: 0,
+        }
+    }
+
+    /// Create from a vector, allocating with cache-line alignment.
+    fn from_vec(data: Vec<u128>) -> Self {
+        if data.is_empty() {
+            return Self::empty();
+        }
+
+        let len = data.len();
+        let layout = Layout::from_size_align(len * 16, CACHE_LINE_SIZE).expect("layout error");
+
+        // Safety: layout is valid (non-zero size, power-of-two alignment)
+        let ptr = unsafe { alloc::alloc::alloc(layout) as *mut u128 };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+
+        // Copy data to aligned allocation
+        // Safety: ptr is valid and has enough space for len elements
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
+        }
+
+        Self {
+            ptr: NonNull::new(ptr).unwrap(),
+            len,
+        }
+    }
+
+    /// Get the number of entries.
+    #[inline]
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Check if empty.
+    #[inline]
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Get a reference to the slice.
+    #[inline]
+    fn as_slice(&self) -> &[u128] {
+        if self.len == 0 {
+            &[]
+        } else {
+            // Safety: ptr is valid and points to len elements
+            unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+        }
+    }
+}
+
+impl Clone for CacheAlignedL1L2 {
+    fn clone(&self) -> Self {
+        if self.len == 0 {
+            return Self::empty();
+        }
+
+        let layout = Layout::from_size_align(self.len * 16, CACHE_LINE_SIZE).expect("layout error");
+
+        // Safety: layout is valid
+        let ptr = unsafe { alloc::alloc::alloc(layout) as *mut u128 };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+
+        // Copy data
+        // Safety: both pointers are valid
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.ptr.as_ptr(), ptr, self.len);
+        }
+
+        Self {
+            ptr: NonNull::new(ptr).unwrap(),
+            len: self.len,
+        }
+    }
+}
+
+impl Drop for CacheAlignedL1L2 {
+    fn drop(&mut self) {
+        if self.len > 0 {
+            let layout =
+                Layout::from_size_align(self.len * 16, CACHE_LINE_SIZE).expect("layout error");
+            // Safety: ptr was allocated with this layout
+            unsafe {
+                alloc::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            }
+        }
+    }
+}
+
+impl Default for CacheAlignedL1L2 {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+// Safety: The data is owned and immutable after construction
+unsafe impl Send for CacheAlignedL1L2 {}
+unsafe impl Sync for CacheAlignedL1L2 {}
+
+#[cfg(feature = "serde")]
+impl Serialize for CacheAlignedL1L2 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Serialize as a slice for compatibility
+        self.as_slice().serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for CacheAlignedL1L2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data: Vec<u128> = Vec::deserialize(deserializer)?;
+        Ok(Self::from_vec(data))
+    }
+}
+
+/// Poppy-style rank directory with cache-aligned storage.
 ///
 /// # Structure
 ///
@@ -35,6 +192,10 @@ const BLOCKS_PER_SUPERBLOCK: usize = 1 << 23;
 /// - 63 bits: 7 x 9-bit L2 offsets (one per 64-bit word within block, except first)
 /// - 33 bits: unused/padding
 ///
+/// The L1+L2 data is stored in a cache-aligned wrapper (`#[repr(align(64))]`)
+/// to minimize cache line crossings during queries. Since each entry is 16 bytes,
+/// 4 entries fit per 64-byte cache line.
+///
 /// Total overhead: 128 bits per 512 bits = 25% before optimization.
 /// With packing optimizations: ~3% for typical use cases.
 #[derive(Clone, Debug, Default)]
@@ -47,7 +208,8 @@ pub struct RankDirectory {
     /// L1+L2 combined: One entry per 512-bit block.
     /// Layout: [L1 (32 bits) | L2[0..6] (7 x 9 bits) | unused]
     /// Stored as u128 for easy extraction.
-    l1_l2: Vec<u128>,
+    /// Cache-aligned to 64 bytes for optimal cache utilization.
+    l1_l2: CacheAlignedL1L2,
 }
 
 impl RankDirectory {
@@ -55,7 +217,7 @@ impl RankDirectory {
     pub fn empty() -> Self {
         Self {
             l0: Vec::new(),
-            l1_l2: Vec::new(),
+            l1_l2: CacheAlignedL1L2::default(),
         }
     }
 
@@ -67,7 +229,7 @@ impl RankDirectory {
 
         let num_blocks = words.len().div_ceil(WORDS_PER_BLOCK);
         let mut l0 = Vec::new();
-        let mut l1_l2 = Vec::with_capacity(num_blocks);
+        let mut l1_l2_vec = Vec::with_capacity(num_blocks);
 
         let mut cumulative_rank: u64 = 0;
         let mut l0_base: u64 = 0;
@@ -102,11 +264,14 @@ impl RankDirectory {
                 entry |= (offset as u128) << (32 + i * 9);
             }
 
-            l1_l2.push(entry);
+            l1_l2_vec.push(entry);
             cumulative_rank += block_cumulative as u64;
         }
 
-        Self { l0, l1_l2 }
+        Self {
+            l0,
+            l1_l2: CacheAlignedL1L2::from_vec(l1_l2_vec),
+        }
     }
 
     /// Get the cumulative rank at the start of the given word index.
@@ -114,7 +279,8 @@ impl RankDirectory {
     /// This returns the number of 1-bits in words `[0, word_idx)`.
     #[inline]
     pub fn rank_at_word(&self, word_idx: usize) -> usize {
-        if self.l1_l2.is_empty() {
+        let data = self.l1_l2.as_slice();
+        if data.is_empty() {
             return 0;
         }
 
@@ -122,7 +288,7 @@ impl RankDirectory {
         let word_in_block = word_idx % WORDS_PER_BLOCK;
 
         // Clamp to valid range
-        let block_idx = block_idx.min(self.l1_l2.len() - 1);
+        let block_idx = block_idx.min(data.len() - 1);
 
         // L0 contribution
         let l0_idx = block_idx / BLOCKS_PER_SUPERBLOCK;
@@ -133,7 +299,7 @@ impl RankDirectory {
         };
 
         // L1 contribution
-        let entry = self.l1_l2[block_idx];
+        let entry = data[block_idx];
         let l1_rank = (entry & 0xFFFF_FFFF) as u64;
 
         // L2 contribution
