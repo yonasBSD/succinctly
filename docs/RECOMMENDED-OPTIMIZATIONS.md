@@ -1,8 +1,10 @@
 # Recommended Performance Optimizations
 
-**Date**: 2026-01-06
+**Date**: 2026-01-07 (Updated with AVX-512 results)
 **CPU**: AMD Ryzen 9 7950X (Zen 4, znver4)
 **Architecture**: x86_64
+
+**Status**: AVX-512 optimizations completed - see results below
 
 ---
 
@@ -92,240 +94,200 @@ std = []      # ← Exists but must be explicitly enabled
 
 ---
 
-### 🟠 HIGH PRIORITY: Implement AVX-512 Support (6-8 hours)
+### ✅ COMPLETED: AVX-512 Optimizations
 
-**Why**: Your CPU has AVX-512 - double the SIMD width!
+**Status**: Implemented and benchmarked (2026-01-07)
 
-**Current**: AVX2 processes 32 bytes/iteration
-**Potential**: AVX-512 processes 64 bytes/iteration
+**Results**:
+- ✅ **AVX512-VPOPCNTDQ**: 5.2x speedup (96.8 GiB/s vs 18.5 GiB/s)
+- ❌ **AVX-512 JSON Parser**: 3% slower than AVX2 (590 MiB/s vs 608 MiB/s)
 
-#### Implementation Plan
+**Key Learning**: Wider SIMD ≠ automatically faster. JSON parsing is memory-bound with sequential state machine dependencies.
 
-**1. Create `src/json/simd/avx512.rs`** (copy from avx2.rs, adapt)
-
-Key changes from AVX2:
-```rust
-// Instead of:
-use core::arch::x86_64::__m256i;
-let chunk = _mm256_loadu_si256(...);
-let mask = _mm256_movemask_epi8(...) as u32;  // 32-bit
-
-// Use:
-use core::arch::x86_64::__m512i;
-let chunk = _mm512_loadu_si512(...);
-let mask = _mm512_cmpeq_epi8_mask(...);  // Returns u64 directly!
-```
-
-**2. Update runtime dispatch in `mod.rs`**:
-```rust
-#[cfg(all(target_arch = "x86_64", any(test, feature = "std")))]
-pub fn build_semi_index_standard(json: &[u8]) -> SemiIndex {
-    // NEW: Check AVX-512 first!
-    if is_x86_feature_detected!("avx512bw") {
-        avx512::build_semi_index_standard(json)
-    } else if is_x86_feature_detected!("avx2") {
-        avx2::build_semi_index_standard(json)
-    } else if is_x86_feature_detected!("sse4.2") {
-        sse42::build_semi_index_standard(json)
-    } else {
-        x86::build_semi_index_standard(json)
-    }
-}
-```
-
-**Expected Performance**:
-- Best case: 1.8-2.0x over AVX2 (if memory bandwidth not saturated)
-- Realistic: 1.3-1.5x over AVX2 (state machine still bottleneck)
-- **Total: 2.5-3.0x over SSE2 baseline**
-
-**Caveats**:
-- AVX-512 may reduce CPU frequency slightly (thermal limits)
-- Ryzen 7950X handles this well - negligible impact
-- Larger code size (~500 lines)
+**Documentation**:
+- [AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md)
+- [AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md)
+- [PERFORMANCE-OUTCOMES-SUMMARY.md](PERFORMANCE-OUTCOMES-SUMMARY.md)
 
 ---
 
-### 🟠 HIGH PRIORITY: AVX512-VPOPCNTDQ for Rank (3-4 hours)
+### 🟢 NEW PRIORITY: BMI1/BMI2 Bit Manipulation (Based on AVX-512 Learnings)
 
-**Why**: Your CPU has this rare feature - 8x parallel u64 popcount!
+**Why**: AVX-512 taught us that JSON parsing bottleneck is mask processing and branches, not SIMD width.
 
-**Current**: `src/popcount.rs` uses scalar `count_ones()` or NEON
+**Your CPU Status**:
+- ✅ BMI1: Fast on all CPUs
+- ✅ BMI2: **Fast on Zen 4** (3 cycles) - Intel-class performance
+- ⚠️ BMI2 on Zen 1/2: Slow (18 cycles microcode) - must detect and avoid
 
-**Add AVX512-VPOPCNTDQ implementation**:
+**Target**: The actual bottleneck identified by AVX-512 benchmarks
 
+#### 🔴 Priority 1: BMI1 JSON Mask Processing (2-3 hours)
+
+**Problem Identified by AVX-512 Benchmarks**:
+- JSON state machine processes masks bit-by-bit
+- Current: Loop through all 32 positions, check each mask
+- Bottleneck: Branch-heavy, checks many zero bits
+
+**Solution - TZCNT + BLSR**:
 ```rust
-// src/popcount.rs
+// Current AVX2 approach (src/json/simd/avx2.rs)
+fn process_chunk(class: CharClass, state: State, ...) {
+    for i in 0..32 {
+        let bit = 1u32 << i;
+        let is_quote = (class.quotes & bit) != 0;  // Check every position
+        let is_open = (class.opens & bit) != 0;
+        // ... 5 more mask checks per byte
+    }
+}
 
-#[cfg(all(
-    feature = "simd",
-    target_arch = "x86_64",
-    not(feature = "portable-popcount")
-))]
-#[inline]
-fn popcount_words_avx512vpopcntdq(words: &[u64]) -> u32 {
+// BMI1-optimized approach
+#[target_feature(enable = "bmi1")]
+unsafe fn process_chunk_bmi1(class: CharClass, state: State, ...) {
     use core::arch::x86_64::*;
 
-    if words.is_empty() {
-        return 0;
+    let mut combined_mask = class.quotes | class.opens | class.closes |
+                            class.delims | class.value_chars;
+
+    while combined_mask != 0 {
+        let pos = _tzcnt_u32(combined_mask);        // Find next structural char
+        combined_mask = _blsr_u32(combined_mask);   // Clear this bit
+
+        // Determine character type and process (reduced branches)
+        let is_quote = (class.quotes >> pos) & 1;
+        let is_open = (class.opens >> pos) & 1;
+        // ... process based on position
     }
-
-    let mut total = 0u32;
-    let mut offset = 0;
-
-    // Process 8 u64 words (512 bits) at a time
-    unsafe {
-        while offset + 8 <= words.len() {
-            let ptr = words.as_ptr().add(offset) as *const __m512i;
-            let v = _mm512_loadu_si512(ptr);
-            let counts = _mm512_popcnt_epi64(v);  // ⭐ 8x parallel popcount!
-            total += _mm512_reduce_add_epi64(counts) as u32;
-            offset += 8;
-        }
-    }
-
-    // Handle remaining words
-    for &word in &words[offset..] {
-        total += word.count_ones();
-    }
-
-    total
-}
-
-// Runtime dispatch
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[inline]
-fn popcount_words_x86(words: &[u64]) -> u32 {
-    #[cfg(feature = "std")]
-    {
-        if is_x86_feature_detected!("avx512vpopcntdq") {
-            return unsafe { popcount_words_avx512vpopcntdq(words) };
-        }
-    }
-
-    // Fallback to scalar
-    let mut total = 0u32;
-    for &word in words {
-        total += word.count_ones();
-    }
-    total
 }
 ```
 
-**Expected Performance**:
-- **2-4x speedup** for rank operations on large bitvectors
-- Especially impactful for:
-  - Building rank directories
-  - Rank queries on huge datasets
-  - Select index construction
+**Expected Impact**: 5-10% JSON parsing speedup
+- Fewer branches (only process structural characters)
+- Better branch prediction
+- Simpler control flow
 
-**Use Cases**:
-- Rank/select operations on multi-GB bitvectors
-- Balanced parentheses excess calculations
-- Any operation counting bits in large arrays
+**Effort**: 2-3 hours
+**Risk**: Low (BMI1 fast on all CPUs)
 
 ---
 
-### 🟡 MEDIUM PRIORITY: BMI2 Optimization (4-6 hours)
+#### 🟡 Priority 2: BMI2 Advanced Mask Processing (4-6 hours)
 
-**Why**: Zen 4 has **fast BMI2** (3-cycle PDEP/PEXT, not 18-cycle like Zen 1/2)
+**Problem**: Select operations need k-th set bit, mask manipulation is complex
 
-**Target**: Bit packing in `BitWriter` and state machine
-
-**Current**: Bits written one at a time
+**Solution - PDEP/PEXT**:
 ```rust
-for i in 0..32 {
-    if (mask >> i) & 1 != 0 {
-        writer.write_1();
-    } else {
-        writer.write_0();
-    }
+// PEXT: Extract set bits to contiguous positions
+// PDEP: Deposit bits to sparse positions
+
+// Select optimization
+#[target_feature(enable = "bmi2")]
+unsafe fn select_bmi2(words: &[u64], k: usize) -> Option<usize> {
+    // Use PDEP to create mask with k-th bit set
+    // Combine with broadword tricks for faster search
+}
+
+// JSON mask parallelization
+#[target_feature(enable = "bmi2")]
+unsafe fn process_masks_parallel(masks: &CharClass) {
+    // Use PDEP/PEXT to rearrange bits for parallel processing
+    // Build lookup tables for fast state transitions
 }
 ```
 
-**With BMI2 PDEP**:
+**Expected Impact**: 10-15% JSON parsing (on Zen 3+/Intel)
+
+**Critical**: Must detect Zen 1/2 and avoid:
 ```rust
-#[cfg(target_feature = "bmi2")]
-unsafe fn write_mask_fast(writer: &mut BitWriter, mask: u32) {
-    use core::arch::x86_64::_pdep_u64;
-    // Pack mask bits efficiently using PDEP
-    // 10-30% faster for dense structural characters
+fn should_use_bmi2() -> bool {
+    if !is_x86_feature_detected!("bmi2") {
+        return false;
+    }
+
+    // Check AMD family/model via CPUID
+    // Zen 1/2: Family 17h - avoid BMI2
+    // Zen 3+: Family 19h+ - use BMI2
+    if is_amd_zen1_or_zen2() {
+        return false;  // 18-cycle microcode
+    }
+
+    true
 }
 ```
 
-**Expected Performance**: 10-30% improvement for JSON parsing
-
-**Complexity**: Medium (need careful bit manipulation)
-
----
-
-### 🟢 LOW PRIORITY: SIMD Prefix Sum State Machine (20-40 hours)
-
-**Why**: Remove scalar bottleneck in state transitions
-
-**Current**: After SIMD classification, process byte-by-byte
-**Goal**: Use SIMD prefix sums to process states in parallel
-
-**Status**: Complex, requires research (simdjson approach)
-
-**Expected Performance**: 1.5-2x additional improvement
-
-**Recommendation**: Implement quick wins first, then revisit this
+**Effort**: 4-6 hours (including CPU detection)
+**Risk**: Medium (complex, must handle Zen 1/2)
 
 ---
 
-## Implementation Roadmap
+#### Comparison: Why BMI1/BMI2 vs AVX-512?
 
-### Week 1: Quick Wins (Total: ~3 hours)
+**AVX-512 Failed Because**:
+- Targeted SIMD width (classification)
+- But classification wasn't the bottleneck
+- Mask processing and state machine dominated
+- Wider SIMD added overhead
 
-1. **Make `std` default feature** (2 min)
-   - Edit `Cargo.toml` line 12
-   - Test: `cargo test`
-   - Impact: All users get 1.8x speedup
+**BMI1/BMI2 Should Succeed Because**:
+- Targets actual bottleneck (mask iteration, branches)
+- Scalar optimizations for scalar work
+- TZCNT/BLSR reduce branch mispredictions
+- PDEP/PEXT enable better algorithms
+- Works with bottleneck, not against it
 
-2. **Implement AVX512-VPOPCNTDQ** (3-4 hours)
-   - Add to `src/popcount.rs`
-   - Add runtime dispatch
-   - Test: `cargo test --features simd`
-   - Benchmark: `cargo bench --bench rank_select`
-   - Impact: 2-4x for rank operations
-
-### Week 2: AVX-512 JSON Parser (6-8 hours)
-
-3. **Create AVX-512 implementation**
-   - Copy `src/json/simd/avx2.rs` → `avx512.rs`
-   - Replace 256-bit ops with 512-bit
-   - Update runtime dispatch
-   - Test: `cargo test --test simd_level_tests`
-   - Benchmark: `cargo bench --bench json_simd`
-   - Impact: 2.5-3.0x over SSE2 baseline
-
-### Week 3: BMI2 Integration (Optional, 4-6 hours)
-
-4. **Add BMI2 bit packing**
-   - Enhance `BitWriter` with PDEP
-   - Add runtime detection
-   - Benchmark: `cargo bench --bench json_simd`
-   - Impact: 10-30% additional improvement
+**Expected Results**:
+- BMI1: 5-10% speedup (likely)
+- BMI1 + BMI2: 15-20% speedup (on Zen 3+/Intel)
+- vs AVX-512: -3% (tried wrong approach)
 
 ---
 
-## Expected Total Performance Gain
+### ✅ COMPLETED: AVX512-VPOPCNTDQ for Popcount
 
-### Current Performance (SSE2 baseline)
-- JSON parsing: ~5 GB/s
-- Rank operations: ~1 GB/s
+**Status**: Implemented in `src/popcount.rs` (2026-01-07)
 
-### After Quick Wins (std + AVX512-VPOPCNTDQ)
-- JSON parsing: ~9 GB/s (1.8x) - AVX2 dispatch enabled
-- Rank operations: ~4 GB/s (4x) - AVX512-VPOPCNTDQ
+**Result**: 5.2x speedup (96.8 GiB/s vs 18.5 GiB/s)
 
-### After AVX-512 Implementation
-- JSON parsing: ~15 GB/s (3x) - AVX-512 for JSON
-- Rank operations: ~4 GB/s (4x) - Already optimized
+**Real-world Impact**: Minimal (~1% overall) - popcount is only 1.6% of BitVec construction time
 
-### After BMI2 (Optional)
-- JSON parsing: ~18 GB/s (3.6x total)
-- Rank operations: ~4 GB/s (4x)
+**Why Limited**: Amdahl's Law - optimizing 1.6% of work yields ~1% overall improvement
+
+**Documentation**: See [AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md)
+
+---
+
+## Updated Implementation Roadmap (Post-AVX-512 Work)
+
+### ✅ Completed (2026-01-07)
+
+1. **✅ Make `std` default feature** - Done
+   - Impact: 1.8x JSON parsing speedup via AVX2 runtime dispatch
+
+2. **✅ Implement AVX512-VPOPCNTDQ** - Done
+   - Impact: 5.2x popcount throughput (minimal end-to-end due to Amdahl's Law)
+
+3. **✅ Implement AVX-512 JSON Parser** - Done (but not recommended for production)
+   - Result: 3% slower than AVX2 (memory-bound, sequential dependencies)
+   - Learning: Wider SIMD doesn't help memory-bound workloads
+
+### 🟢 Next Priority: BMI1/BMI2 (Based on Learnings)
+
+4. **BMI1 JSON Mask Processing** (2-3 hours)
+   - Target: Actual bottleneck (mask iteration, branches)
+   - Expected: 5-10% JSON parsing speedup
+   - Risk: Low (BMI1 fast on all CPUs)
+
+5. **BMI2 Advanced Optimizations** (4-6 hours)
+   - Requires: CPU detection for Zen 1/2 avoidance
+   - Expected: 10-15% JSON parsing (on Zen 3+/Intel)
+   - Risk: Medium (complex, must handle slow BMI2 CPUs)
+
+### 🔵 Lower Priority
+
+6. **Fix AVX-512 dispatch priority** (30 minutes)
+   - Change runtime dispatch to prefer AVX2 over AVX-512 for JSON
+   - Current: AVX-512 first (slower)
+   - Recommended: AVX2 first (faster)
 
 **Total potential improvement: 3-4x across the board**
 
