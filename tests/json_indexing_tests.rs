@@ -468,9 +468,9 @@ mod simd_comparison {
         // Try to create escapes at various positions relative to 16-byte chunks
         for padding in 0..20 {
             let mut json = Vec::new();
-            json.extend_from_slice(br#"{"#);
+            json.extend_from_slice(br#"{""#); // {"
             json.extend(std::iter::repeat_n(b'x', padding));
-            json.extend_from_slice(br#"":"a\"b"}"#);
+            json.extend_from_slice(br#"":"a\"b"}"#); // ":"a\"b"}
             compare_results(&json);
         }
     }
