@@ -9,10 +9,11 @@ keywords = ["succinct", "bitvector", "rank", "select", "data-structures"]
 categories = ["data-structures", "algorithms"]
 
 [features]
-default = []
+default = ["std"]
 
 # Enable std library (required for runtime CPU detection on x86_64)
 # When enabled, JSON indexing automatically uses AVX2 on supported CPUs
+# Users needing no_std can disable: default-features = false
 std = []
 
 # Popcount implementation strategies (mutually exclusive for benchmarking)
