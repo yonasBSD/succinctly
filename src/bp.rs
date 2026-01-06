@@ -1454,8 +1454,8 @@ impl<W: AsRef<[u64]>> BalancedParensV2<W> {
         let bit_idx = p % 64;
 
         let mut count = 0usize;
-        for i in 0..word_idx {
-            count += words[i].count_ones() as usize;
+        for word in words.iter().take(word_idx) {
+            count += word.count_ones() as usize;
         }
         if bit_idx > 0 && word_idx < words.len() {
             let mask = (1u64 << bit_idx) - 1;
@@ -2643,13 +2643,9 @@ mod tests {
         let mut words = Vec::with_capacity(64);
 
         // First 32 words: all opens (1s)
-        for _ in 0..32 {
-            words.push(u64::MAX);
-        }
+        words.extend(std::iter::repeat_n(u64::MAX, 32));
         // Next 32 words: all closes (0s)
-        for _ in 0..32 {
-            words.push(0u64);
-        }
+        words.extend(std::iter::repeat_n(0u64, 32));
 
         let len = 64 * 64; // 4096 bits
         let v1 = BalancedParens::new(words.clone(), len);

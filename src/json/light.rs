@@ -285,6 +285,19 @@ impl<'a, W: AsRef<[u64]>> JsonCursor<'a, W> {
         self.bp_pos
     }
 
+    /// Check if this cursor points to a container (array or object).
+    ///
+    /// This is a **fast** operation that only uses the BP structure -
+    /// no text_position lookup is needed. Containers have children in
+    /// the BP tree; leaves (strings, numbers, bools, null) don't.
+    ///
+    /// Use this when you only need to distinguish containers from leaves
+    /// without reading the actual value content.
+    #[inline]
+    pub fn is_container(&self) -> bool {
+        self.index.bp().first_child(self.bp_pos).is_some()
+    }
+
     /// Get the byte position in the JSON text.
     ///
     /// This uses select1 on the IB to find the text position corresponding
@@ -345,6 +358,10 @@ impl<'a, W: AsRef<[u64]>> JsonCursor<'a, W> {
     }
 
     /// Get the JSON value at this cursor position.
+    ///
+    /// This calls `text_position()` to determine the value type.
+    /// For traversal where you only need to distinguish containers from
+    /// leaves, use [`value_lazy()`](Self::value_lazy) instead for better performance.
     pub fn value(&self) -> StandardJson<'a, W> {
         let Some(text_pos) = self.text_position() else {
             return StandardJson::Error("invalid cursor position");
@@ -384,6 +401,53 @@ impl<'a, W: AsRef<[u64]>> JsonCursor<'a, W> {
             }),
             _ => StandardJson::Error("unexpected character"),
         }
+    }
+
+    /// Get children of this cursor for traversal.
+    ///
+    /// **Key optimization**: This method uses only BP structure operations
+    /// (`first_child`, `next_sibling`) - no expensive `text_position()` calls.
+    /// Use this for efficient traversal when you don't need to read values.
+    ///
+    /// Returns an iterator over child cursors.
+    #[inline]
+    pub fn children(&self) -> JsonChildren<'a, W> {
+        JsonChildren {
+            current: self.first_child(),
+        }
+    }
+}
+
+// ============================================================================
+// JsonChildren: Fast traversal iterator (BP-only operations)
+// ============================================================================
+
+/// Iterator over child cursors using only BP operations.
+///
+/// This is the fastest way to traverse the JSON structure when you
+/// don't need to read the actual values - it uses only `first_child`
+/// and `next_sibling` operations without any `text_position()` calls.
+#[derive(Debug)]
+pub struct JsonChildren<'a, W = Vec<u64>> {
+    current: Option<JsonCursor<'a, W>>,
+}
+
+impl<'a, W> Clone for JsonChildren<'a, W> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, W> Copy for JsonChildren<'a, W> {}
+
+impl<'a, W: AsRef<[u64]>> Iterator for JsonChildren<'a, W> {
+    type Item = JsonCursor<'a, W>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let cursor = self.current?;
+        self.current = cursor.next_sibling();
+        Some(cursor)
     }
 }
 
@@ -1674,5 +1738,139 @@ mod tests {
             JsonError::InvalidUnicodeEscape.to_string(),
             "invalid unicode escape sequence"
         );
+    }
+
+    // ========================================================================
+    // Fast traversal tests (is_container, children)
+    // ========================================================================
+
+    #[test]
+    fn test_is_container_object() {
+        let json = br#"{"a": 1}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        assert!(root.is_container());
+    }
+
+    #[test]
+    fn test_is_container_array() {
+        let json = br#"[1, 2, 3]"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        assert!(root.is_container());
+    }
+
+    #[test]
+    fn test_is_container_empty_object() {
+        let json = br#"{}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        // Empty containers have no children, so is_container returns false
+        assert!(!root.is_container());
+    }
+
+    #[test]
+    fn test_is_container_empty_array() {
+        let json = br#"[]"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+        // Empty containers have no children, so is_container returns false
+        assert!(!root.is_container());
+    }
+
+    #[test]
+    fn test_is_container_leaf_values() {
+        // String
+        let json = br#""hello""#;
+        let index = JsonIndex::build(json);
+        assert!(!index.root(json).is_container());
+
+        // Number
+        let json = b"42";
+        let index = JsonIndex::build(json);
+        assert!(!index.root(json).is_container());
+
+        // Boolean
+        let json = b"true";
+        let index = JsonIndex::build(json);
+        assert!(!index.root(json).is_container());
+
+        // Null
+        let json = b"null";
+        let index = JsonIndex::build(json);
+        assert!(!index.root(json).is_container());
+    }
+
+    #[test]
+    fn test_children_array() {
+        let json = br#"[1, 2, 3]"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+
+        // Count children using the fast iterator
+        let count: usize = root.children().count();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_children_object() {
+        let json = br#"{"a": 1, "b": 2}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+
+        // Object children include both keys and values
+        // {"a": 1, "b": 2} -> children are: "a", 1, "b", 2
+        let count: usize = root.children().count();
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn test_children_nested() {
+        let json = br#"{"arr": [1, 2]}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+
+        // Root's direct children: "arr", [1, 2]
+        let direct_children: Vec<_> = root.children().collect();
+        assert_eq!(direct_children.len(), 2);
+
+        // The array has 2 children: 1, 2
+        let array_cursor = direct_children[1]; // [1, 2]
+        assert!(array_cursor.is_container());
+        assert_eq!(array_cursor.children().count(), 2);
+    }
+
+    #[test]
+    fn test_children_empty() {
+        let json = br#"[]"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+
+        assert_eq!(root.children().count(), 0);
+    }
+
+    #[test]
+    fn test_children_recursive_count() {
+        // Test that recursive counting works correctly
+        let json = br#"{"a": [1, 2], "b": {"c": 3}}"#;
+        let index = JsonIndex::build(json);
+        let root = index.root(json);
+
+        fn count_all(cursor: super::JsonCursor) -> usize {
+            1 + cursor.children().map(count_all).sum::<usize>()
+        }
+
+        // Structure (BP nodes):
+        // root object (1)
+        //   "a" key (1)
+        //   [1, 2] value (1)
+        //     1 (1)
+        //     2 (1)
+        //   "b" key (1)
+        //   {"c": 3} value (1)
+        //     "c" key (1)
+        //     3 value (1)
+        // Total: 9 nodes
+        assert_eq!(count_all(root), 9);
     }
 }

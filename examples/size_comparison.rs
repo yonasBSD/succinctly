@@ -1,7 +1,7 @@
 //! Quick benchmark comparing succinctly vs serde_json at different file sizes
 
 use std::time::Instant;
-use succinctly::json::light::{JsonIndex, StandardJson};
+use succinctly::json::light::{JsonCursor, JsonIndex, StandardJson};
 
 fn main() {
     let sizes = [
@@ -37,11 +37,17 @@ fn main() {
         let index = JsonIndex::build(&bytes);
         let succ_index = start.elapsed();
 
-        // succinctly traverse
+        // succinctly traverse (with text_position on every node - old/slow)
         let start = Instant::now();
         let root = index.root(&bytes);
         let succ_count = count_succinctly(root.value());
         let succ_traverse = start.elapsed();
+
+        // succinctly traverse (using children() - optimized API)
+        let start = Instant::now();
+        let root = index.root(&bytes);
+        let succ_fast_count = count_succinctly_fast(root);
+        let succ_fast_traverse = start.elapsed();
 
         println!(
             "serde_json:  parse={:>7.1}ms  traverse={:>7.1}ms  total={:>7.1}ms  nodes={}",
@@ -51,19 +57,43 @@ fn main() {
             serde_count
         );
         println!(
-            "succinctly:  index={:>7.1}ms  traverse={:>7.1}ms  total={:>7.1}ms  nodes={}",
+            "succ(old):   index={:>7.1}ms  traverse={:>7.1}ms  total={:>7.1}ms  nodes={}",
             succ_index.as_secs_f64() * 1000.0,
             succ_traverse.as_secs_f64() * 1000.0,
             (succ_index + succ_traverse).as_secs_f64() * 1000.0,
             succ_count
         );
+        println!(
+            "succ(fast):  index={:>7.1}ms  traverse={:>7.1}ms  total={:>7.1}ms  nodes={}",
+            succ_index.as_secs_f64() * 1000.0,
+            succ_fast_traverse.as_secs_f64() * 1000.0,
+            (succ_index + succ_fast_traverse).as_secs_f64() * 1000.0,
+            succ_fast_count
+        );
 
-        let speedup = (serde_parse + serde_traverse).as_secs_f64()
-            / (succ_index + succ_traverse).as_secs_f64();
-        if speedup > 1.0 {
-            println!("succinctly is {:.2}x faster", speedup);
+        // Compare old vs new succinctly
+        let old_total = (succ_index + succ_traverse).as_secs_f64();
+        let new_total = (succ_index + succ_fast_traverse).as_secs_f64();
+        let traverse_speedup = succ_traverse.as_secs_f64() / succ_fast_traverse.as_secs_f64();
+        println!(
+            "Traverse speedup: {:.1}x ({:.1}ms -> {:.1}ms)",
+            traverse_speedup,
+            succ_traverse.as_secs_f64() * 1000.0,
+            succ_fast_traverse.as_secs_f64() * 1000.0
+        );
+
+        // Compare with serde_json
+        let serde_total = (serde_parse + serde_traverse).as_secs_f64();
+        if new_total < serde_total {
+            println!(
+                "succinctly(fast) is {:.2}x faster than serde_json",
+                serde_total / new_total
+            );
         } else {
-            println!("serde_json is {:.2}x faster", 1.0 / speedup);
+            println!(
+                "serde_json is {:.2}x faster than succinctly(fast)",
+                new_total / serde_total
+            );
         }
     }
 }
@@ -94,4 +124,13 @@ fn count_succinctly(v: StandardJson) -> usize {
         }
         _ => 1,
     }
+}
+
+/// Count nodes using the optimized children() API - no text_position() calls
+fn count_succinctly_fast(cursor: JsonCursor) -> usize {
+    let mut count = 1; // Count this node
+    for child in cursor.children() {
+        count += count_succinctly_fast(child);
+    }
+    count
 }
