@@ -72,31 +72,37 @@ const FLAG_BACKSLASH: u8 = 0x10;
 /// Extract a bitmask from the high bit of each byte in a NEON vector.
 /// Returns a u16 where bit i is set if byte i has its high bit set.
 ///
-/// Uses optimized parallel implementation with weighted shifts and horizontal add.
+/// Uses optimized fixed-shift approach that avoids slow variable shifts.
+/// The key insight: variable shifts (vshlq_u8 with vector amounts) are slow on M1,
+/// while fixed shifts and pairwise adds are fast.
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
-    unsafe {
-        // Shift each byte right by 7 to get just the high bit (0 or 1)
-        let high_bits = vshrq_n_u8::<7>(v);
+    // Input: bytes with 0x00 or 0xFF (from comparison results)
+    // We need to extract the high bit of each byte into a u16 bitmask.
+    //
+    // Strategy: Extract to scalar and use multiplication trick.
+    // This is fast on M1 due to efficient NEON<->scalar transfer.
+    //
+    // Step 1: Shift right by 7 to get 0 or 1 in each byte
+    let high_bits = vshrq_n_u8::<7>(v);
 
-        // Create shift amounts: [0,1,2,3,4,5,6,7, 0,1,2,3,4,5,6,7]
-        let shift_amounts: [i8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7];
-        let shifts = vld1q_s8(shift_amounts.as_ptr());
+    // Step 2: Extract the 16 bytes as two u64 values
+    let low_u64 = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(high_bits));
+    let high_u64 = vgetq_lane_u64::<1>(vreinterpretq_u64_u8(high_bits));
 
-        // Shift each byte left by its lane index (multiply by 2^i)
-        let shifted = vshlq_u8(high_bits, shifts);
+    // Step 3: Pack 8 bytes into 8 bits using multiplication trick
+    // Multiply by magic number that positions each byte at the right bit
+    // 0x0102040810204080 positions bytes 0-7 at bits 0-7 in the high byte
+    const MAGIC: u64 = 0x0102040810204080;
 
-        // Split into low and high halves
-        let low = vget_low_u8(shifted);
-        let high = vget_high_u8(shifted);
+    // Each byte in high_bits is 0 or 1
+    // Multiply spreads them to different bit positions
+    // The high byte contains all 8 bits packed
+    let low_packed = (low_u64.wrapping_mul(MAGIC) >> 56) as u8;
+    let high_packed = (high_u64.wrapping_mul(MAGIC) >> 56) as u8;
 
-        // Horizontal add within each half to get a single byte
-        let low_sum = vaddv_u8(low) as u16;
-        let high_sum = vaddv_u8(high) as u16;
-
-        low_sum | (high_sum << 8)
-    }
+    (low_packed as u16) | ((high_packed as u16) << 8)
 }
 
 /// Character classification results for a 16-byte chunk.
