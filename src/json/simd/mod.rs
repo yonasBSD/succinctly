@@ -53,9 +53,9 @@ pub use neon::build_semi_index_standard;
 // x86_64 exports with optional runtime dispatch (requires std)
 // ============================================================================
 
-// Runtime dispatch (requires std, available in tests only)
+// Runtime dispatch when std is available (test mode or std feature)
 // Priority: AVX2 > SSE4.2 > SSE2
-#[cfg(all(target_arch = "x86_64", test))]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "std")))]
 pub fn build_semi_index_standard(json: &[u8]) -> crate::json::standard::SemiIndex {
     if is_x86_feature_detected!("avx2") {
         avx2::build_semi_index_standard(json)
@@ -66,7 +66,7 @@ pub fn build_semi_index_standard(json: &[u8]) -> crate::json::standard::SemiInde
     }
 }
 
-#[cfg(all(target_arch = "x86_64", test))]
+#[cfg(all(target_arch = "x86_64", any(test, feature = "std")))]
 pub fn build_semi_index_simple(json: &[u8]) -> crate::json::simple::SemiIndex {
     if is_x86_feature_detected!("avx2") {
         avx2::build_semi_index_simple(json)
@@ -77,12 +77,12 @@ pub fn build_semi_index_simple(json: &[u8]) -> crate::json::simple::SemiIndex {
     }
 }
 
-// Outside of tests, default to SSE2 (universally available)
+// Without std feature, default to SSE2 (universally available on x86_64)
 // Users can explicitly use avx2:: or sse42:: modules if they know CPU capabilities
-#[cfg(all(target_arch = "x86_64", not(test)))]
+#[cfg(all(target_arch = "x86_64", not(any(test, feature = "std"))))]
 pub use x86::build_semi_index_simple;
 
-#[cfg(all(target_arch = "x86_64", not(test)))]
+#[cfg(all(target_arch = "x86_64", not(any(test, feature = "std"))))]
 pub use x86::build_semi_index_standard;
 
 // ============================================================================

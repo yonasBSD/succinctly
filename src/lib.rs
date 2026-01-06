@@ -31,10 +31,16 @@
 //! Other features:
 //! - `serde` - Enable serialization/deserialization support
 
-#![cfg_attr(not(test), no_std)]
+// Use no_std unless std feature is enabled or we're in test mode
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 
-#[cfg(not(test))]
+// When using no_std, we need to explicitly link the alloc crate
+#[cfg(not(any(test, feature = "std")))]
 extern crate alloc;
+
+// When using std, re-export alloc types from std for compatibility
+#[cfg(any(test, feature = "std"))]
+extern crate std as alloc;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
