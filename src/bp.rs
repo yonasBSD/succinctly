@@ -84,6 +84,147 @@ const BYTE_TOTAL_EXCESS: [i8; 256] = {
     table
 };
 
+/// Lookup table to find position where excess drops to target within a byte.
+/// Index: byte_value * 16 + initial_excess (initial_excess 1-16 mapped to 0-15)
+/// Value: bit position (0-7) where excess reaches 0, or 8 if not found in this byte.
+///
+/// This enables O(1) find_close within a byte instead of bit-by-bit scanning.
+const BYTE_FIND_CLOSE: [[u8; 16]; 256] = {
+    let mut table = [[8u8; 16]; 256];
+    let mut byte_val: usize = 0;
+    while byte_val < 256 {
+        // For each possible initial excess (1-16)
+        let mut init_excess: usize = 0;
+        while init_excess < 16 {
+            let starting_excess = (init_excess + 1) as i8; // Map 0-15 to 1-16
+            let mut excess = starting_excess;
+            let mut bit = 0;
+            while bit < 8 {
+                if (byte_val >> bit) & 1 == 1 {
+                    excess += 1;
+                } else {
+                    excess -= 1;
+                    if excess == 0 {
+                        table[byte_val][init_excess] = bit as u8;
+                        break;
+                    }
+                }
+                bit += 1;
+            }
+            // If we didn't find a match, table stays at 8
+            init_excess += 1;
+        }
+        byte_val += 1;
+    }
+    table
+};
+
+/// Fast byte-level scan to find where excess drops to 0.
+///
+/// Given a word starting at `start_bit`, scans bytes using lookup tables
+/// to find where excess first reaches 0.
+///
+/// Returns `Some(bit_position)` if found within valid bits, or `None` if not found.
+///
+/// # Arguments
+/// * `word` - The 64-bit word to scan
+/// * `start_bit` - Starting bit position within the word (0-63)
+/// * `initial_excess` - The excess value before scanning (must be >= 1)
+/// * `valid_bits` - Number of valid bits in the word (for partial words)
+#[inline]
+fn find_close_in_word_fast(
+    word: u64,
+    start_bit: usize,
+    initial_excess: i32,
+    valid_bits: usize,
+) -> Option<usize> {
+    if start_bit >= valid_bits || initial_excess <= 0 {
+        return None;
+    }
+
+    let bytes = word.to_le_bytes();
+    let mut pos = start_bit;
+    let mut excess = initial_excess;
+
+    // Handle partial first byte if not byte-aligned
+    let first_byte_idx = pos / 8;
+    let bit_in_byte = pos % 8;
+
+    if bit_in_byte != 0 {
+        // Scan remaining bits in first partial byte
+        let byte_val = bytes[first_byte_idx];
+        let end_bit = (8.min(valid_bits - first_byte_idx * 8)) as usize;
+
+        for bit in bit_in_byte..end_bit {
+            if (byte_val >> bit) & 1 == 1 {
+                excess += 1;
+            } else {
+                excess -= 1;
+                if excess == 0 {
+                    return Some(first_byte_idx * 8 + bit);
+                }
+            }
+        }
+        pos = (first_byte_idx + 1) * 8;
+    }
+
+    // Process full bytes using lookup table
+    while pos + 8 <= valid_bits && excess > 0 {
+        let byte_idx = pos / 8;
+        let byte_val = bytes[byte_idx] as usize;
+
+        // Check if excess can drop to 0 in this byte
+        let min_excess_in_byte = BYTE_MIN_EXCESS[byte_val] as i32;
+        if excess + min_excess_in_byte <= 0 {
+            // Match is in this byte - use lookup table
+            if excess <= 16 {
+                let lookup_idx = (excess - 1) as usize;
+                let match_pos = BYTE_FIND_CLOSE[byte_val][lookup_idx];
+                if match_pos < 8 {
+                    return Some(pos + match_pos as usize);
+                }
+            }
+            // Fallback: bit-by-bit scan for this byte (excess > 16 or lookup failed)
+            let mut e = excess;
+            for bit in 0..8 {
+                if (byte_val >> bit) & 1 == 1 {
+                    e += 1;
+                } else {
+                    e -= 1;
+                    if e == 0 {
+                        return Some(pos + bit);
+                    }
+                }
+            }
+        }
+
+        excess += BYTE_TOTAL_EXCESS[byte_val] as i32;
+        pos += 8;
+    }
+
+    // Handle remaining bits in last partial byte
+    if pos < valid_bits && excess > 0 {
+        let byte_idx = pos / 8;
+        if byte_idx < 8 {
+            let byte_val = bytes[byte_idx];
+            let end_bit = valid_bits - pos;
+
+            for bit in 0..end_bit {
+                if (byte_val >> bit) & 1 == 1 {
+                    excess += 1;
+                } else {
+                    excess -= 1;
+                    if excess == 0 {
+                        return Some(pos + bit);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ============================================================================
 // Phase 1: Word-Level Operations
 // ============================================================================
@@ -924,6 +1065,8 @@ impl<W: AsRef<[u64]>> BalancedParens<W> {
     }
 
     /// Internal: find position where excess drops to 0.
+    ///
+    /// Uses byte-level lookup tables for fast scanning instead of bit-by-bit.
     fn find_close_from(&self, start_pos: usize, initial_excess: i32) -> Option<usize> {
         if start_pos >= self.len {
             return None;
@@ -931,7 +1074,7 @@ impl<W: AsRef<[u64]>> BalancedParens<W> {
 
         #[derive(Clone, Copy, Debug)]
         enum State {
-            ScanBit,
+            ScanWord,
             CheckL0,
             CheckL1,
             CheckL2,
@@ -940,31 +1083,48 @@ impl<W: AsRef<[u64]>> BalancedParens<W> {
             FromL2,
         }
 
+        let words = self.words.as_ref();
         let mut state = State::FromL0;
         let mut excess = initial_excess;
         let mut pos = start_pos;
 
         loop {
             match state {
-                State::ScanBit => {
+                State::ScanWord => {
+                    // Fast path: scan current word using byte-level lookup tables
                     if pos >= self.len {
                         return None;
                     }
 
-                    let words = self.words.as_ref();
                     let word_idx = pos / 64;
                     let bit_idx = pos % 64;
-                    let bit = (words[word_idx] >> bit_idx) & 1;
+                    let word = words[word_idx];
 
-                    if bit == 0 {
-                        excess -= 1;
-                        if excess == 0 {
-                            return Some(pos);
-                        }
+                    // Calculate valid bits in this word
+                    let valid_bits = if word_idx * 64 + 64 <= self.len {
+                        64
                     } else {
-                        excess += 1;
+                        self.len - word_idx * 64
+                    };
+
+                    // Use fast byte-level scan
+                    if let Some(match_bit) = find_close_in_word_fast(word, bit_idx, excess, valid_bits) {
+                        return Some(word_idx * 64 + match_bit);
                     }
-                    pos += 1;
+
+                    // No match in this word - compute excess change and move to next word
+                    // We need to compute excess change from bit_idx to end of valid bits
+                    let remaining_word = word >> bit_idx;
+                    let remaining_bits = valid_bits - bit_idx;
+                    let ones = if remaining_bits == 64 {
+                        remaining_word.count_ones() as i32
+                    } else {
+                        (remaining_word & ((1u64 << remaining_bits) - 1)).count_ones() as i32
+                    };
+                    excess += 2 * ones - remaining_bits as i32;
+
+                    // Move to start of next word
+                    pos = (word_idx + 1) * 64;
                     state = State::FromL0;
                 }
 
@@ -978,11 +1138,10 @@ impl<W: AsRef<[u64]>> BalancedParens<W> {
 
                     let min_e = self.l0_min_excess[word_idx] as i32;
                     if excess + min_e <= 0 {
-                        state = State::ScanBit;
+                        // Match is in this word - scan it
+                        state = State::ScanWord;
                     } else {
-                        if pos < self.len && self.is_close(pos) && excess <= 1 {
-                            return Some(pos);
-                        }
+                        // Skip this word entirely
                         let word_excess = self.l0_word_excess[word_idx] as i32;
                         excess += word_excess;
                         pos += 64;
@@ -1040,7 +1199,7 @@ impl<W: AsRef<[u64]>> BalancedParens<W> {
                     if pos.is_multiple_of(64) {
                         state = State::FromL1;
                     } else if pos < self.len {
-                        state = State::ScanBit;
+                        state = State::ScanWord;
                     } else {
                         return None;
                     }
