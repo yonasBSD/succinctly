@@ -53,6 +53,45 @@ impl BitWriter {
         self.write_bit(true);
     }
 
+    /// Write multiple zero bits efficiently.
+    ///
+    /// This is faster than calling `write_0()` in a loop because it can
+    /// skip full words and only update the bit position.
+    #[inline]
+    pub fn write_zeros(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        let mut remaining = count;
+
+        // First, fill up the current word if we're mid-word
+        if self.bit_position > 0 {
+            let space_in_word = 64 - self.bit_position as usize;
+            if remaining < space_in_word {
+                // All zeros fit in current word - just advance position
+                self.bit_position += remaining as u32;
+                return;
+            }
+            // Fill rest of current word and flush
+            self.words.push(self.current_word);
+            self.current_word = 0;
+            remaining -= space_in_word;
+            self.bit_position = 0;
+        }
+
+        // Push full words of zeros
+        let full_words = remaining / 64;
+        for _ in 0..full_words {
+            self.words.push(0);
+        }
+
+        // Handle remaining bits in new word
+        let leftover = remaining % 64;
+        self.bit_position = leftover as u32;
+        // current_word is already 0, so no need to clear
+    }
+
     /// Finalize and return the completed bit vector.
     ///
     /// Any partial word is included with remaining bits set to 0.
@@ -149,5 +188,61 @@ mod tests {
         assert_eq!(writer.len(), 64);
         writer.write_1();
         assert_eq!(writer.len(), 65);
+    }
+
+    #[test]
+    fn test_write_zeros_small() {
+        let mut writer = BitWriter::new();
+        writer.write_1();
+        writer.write_zeros(5);
+        writer.write_1();
+        let words = writer.finish();
+        assert_eq!(words.len(), 1);
+        // Position 0: 1, positions 1-5: 0, position 6: 1
+        assert_eq!(words[0], 0b1000001);
+    }
+
+    #[test]
+    fn test_write_zeros_cross_word() {
+        let mut writer = BitWriter::new();
+        writer.write_1();
+        writer.write_zeros(64); // Should push one word and leave position at 1
+        writer.write_1();
+        let words = writer.finish();
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0], 1); // Just the first 1 at bit 0
+        assert_eq!(words[1], 2); // 1 at bit 1 (after 64 zeros, we're at position 1)
+    }
+
+    #[test]
+    fn test_write_zeros_multiple_words() {
+        let mut writer = BitWriter::new();
+        writer.write_zeros(128);
+        writer.write_1();
+        let words = writer.finish();
+        // 128 zeros + 1 bit = 129 bits, needs ceil(129/64) = 3 words
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0], 0);
+        assert_eq!(words[1], 0);
+        // Bit 128 is at word 2, bit position 0 (128 % 64 = 0)
+        assert_eq!(words[2], 1);
+    }
+
+    #[test]
+    fn test_write_zeros_matches_loop() {
+        // Verify write_zeros produces same result as loop
+        let mut writer1 = BitWriter::new();
+        writer1.write_1();
+        for _ in 0..100 {
+            writer1.write_0();
+        }
+        writer1.write_1();
+
+        let mut writer2 = BitWriter::new();
+        writer2.write_1();
+        writer2.write_zeros(100);
+        writer2.write_1();
+
+        assert_eq!(writer1.finish(), writer2.finish());
     }
 }

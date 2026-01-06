@@ -63,6 +63,8 @@ struct CharClass {
     delims: u16,
     /// Mask of bytes that could start/continue a value (alphanumeric, ., -, +)
     value_chars: u16,
+    /// Combined mask of quotes OR backslashes (for quick InString scanning)
+    string_special: u16,
 }
 
 /// Classify 16 bytes at once using NEON.
@@ -134,13 +136,17 @@ unsafe fn classify_chars(chunk: uint8x16_t) -> CharClass {
         let punct = vorrq_u8(vorrq_u8(eq_period, eq_minus), eq_plus);
         let value_chars = vorrq_u8(alnum, punct);
 
+        let quotes = neon_movemask(eq_quote);
+        let backslashes = neon_movemask(eq_backslash);
+
         CharClass {
-            quotes: neon_movemask(eq_quote),
-            backslashes: neon_movemask(eq_backslash),
+            quotes,
+            backslashes,
             opens: neon_movemask(opens),
             closes: neon_movemask(closes),
             delims: neon_movemask(delims),
             value_chars: neon_movemask(value_chars),
+            string_special: quotes | backslashes,
         }
     }
 }
@@ -240,9 +246,9 @@ fn process_chunk_standard_serial(
 /// Process a 16-byte chunk and update IB/BP writers.
 /// Returns the new state after processing all 16 bytes.
 ///
-/// Uses the original serial state machine - benchmarks show this is faster
-/// than the branchless lookup table approach due to excellent branch prediction
-/// on modern ARM CPUs.
+/// Uses optimized scanning with fast-path for string content:
+/// - When inside a string with no quotes/backslashes, batch-write zeros
+/// - Uses trailing_zeros to skip to next interesting character
 #[inline]
 fn process_chunk_standard(
     class: CharClass,
@@ -251,86 +257,106 @@ fn process_chunk_standard(
     bp: &mut BitWriter,
     bytes: &[u8],
 ) -> State {
-    for i in 0..bytes.len().min(16) {
-        let bit = 1u16 << i;
+    let len = bytes.len().min(16);
+    let mut i = 0;
 
-        // Check character classes using pre-computed SIMD masks
-        let is_quote = (class.quotes & bit) != 0;
-        let is_backslash = (class.backslashes & bit) != 0;
-        let is_open = (class.opens & bit) != 0;
-        let is_close = (class.closes & bit) != 0;
-        let is_value_char = (class.value_chars & bit) != 0;
+    while i < len {
+        let remaining_mask = !((1u16 << i) - 1); // Mask of positions >= i
 
         match state {
             State::InJson => {
+                let bit = 1u16 << i;
+                let is_open = (class.opens & bit) != 0;
+                let is_close = (class.closes & bit) != 0;
+                let is_quote = (class.quotes & bit) != 0;
+                let is_value_char = (class.value_chars & bit) != 0;
+
                 if is_open {
-                    // { or [: write BP=1, IB=1
                     bp.write_1();
                     ib.write_1();
-                    // state stays InJson
                 } else if is_close {
-                    // } or ]: write BP=0, IB=0
                     bp.write_0();
                     ib.write_0();
-                    // state stays InJson
                 } else if is_quote {
-                    // Start of string value: BP=10, IB=1
                     bp.write_1();
                     bp.write_0();
                     ib.write_1();
                     state = State::InString;
                 } else if is_value_char {
-                    // Start of non-string value (number, bool, null): BP=10, IB=1
                     bp.write_1();
                     bp.write_0();
                     ib.write_1();
                     state = State::InValue;
                 } else {
-                    // Whitespace, comma, colon: just IB=0
                     ib.write_0();
                 }
+                i += 1;
             }
             State::InString => {
-                // Always IB=0 inside strings
+                // Fast path: find the next quote or backslash
+                let special_remaining = class.string_special & remaining_mask;
+
+                if special_remaining == 0 {
+                    // No more quotes or backslashes in this chunk - write zeros for rest
+                    let zeros_to_write = len - i;
+                    ib.write_zeros(zeros_to_write);
+                    return State::InString;
+                }
+
+                // Find the next special character
+                let next_special = special_remaining.trailing_zeros() as usize;
+
+                // Write zeros up to (but not including) the special char
+                if next_special > i {
+                    let zeros = next_special - i;
+                    ib.write_zeros(zeros);
+                    i = next_special;
+                }
+
+                // Now process the special character at position i
+                let bit = 1u16 << i;
                 ib.write_0();
-                if is_quote {
-                    // End of string, but we stay in InJson for structural parsing
+
+                if (class.quotes & bit) != 0 {
                     state = State::InJson;
-                } else if is_backslash {
+                } else {
+                    // It's a backslash
                     state = State::InEscape;
                 }
+                i += 1;
             }
             State::InEscape => {
-                // Escaped character: IB=0, return to InString
                 ib.write_0();
                 state = State::InString;
+                i += 1;
             }
             State::InValue => {
-                // Inside a non-string value (number, bool, null)
+                let bit = 1u16 << i;
+                let is_open = (class.opens & bit) != 0;
+                let is_close = (class.closes & bit) != 0;
+                let is_quote = (class.quotes & bit) != 0;
+                let is_value_char = (class.value_chars & bit) != 0;
+
                 if is_open {
-                    // This shouldn't happen in valid JSON, but handle it
                     bp.write_1();
                     ib.write_1();
                     state = State::InJson;
                 } else if is_close {
-                    // Value ends, then close bracket
                     bp.write_0();
                     ib.write_0();
                     state = State::InJson;
                 } else if is_quote {
-                    // Value ends, then string starts (shouldn't happen in valid JSON)
                     bp.write_1();
                     bp.write_0();
                     ib.write_1();
                     state = State::InString;
                 } else if is_value_char {
-                    // Continue value: IB=0
                     ib.write_0();
                 } else {
-                    // Value ended (whitespace, comma, colon): IB=0
                     ib.write_0();
                     state = State::InJson;
                 }
+                i += 1;
             }
         }
     }
