@@ -171,23 +171,69 @@ impl<W: AsRef<[u64]>> JsonIndex<W> {
         }
     }
 
-    /// Perform select1 on the IB (find position of k-th 1-bit).
+    /// Perform select1 with a hint for the starting word index.
     ///
-    /// Uses binary search on the cumulative popcount index for O(log n) performance.
-    fn ib_select1(&self, k: usize) -> Option<usize> {
+    /// Uses exponential search (galloping) from the hint, which is optimal for
+    /// sequential access patterns. When iterating through elements, the next
+    /// select is typically near the previous one, so starting from the hint
+    /// gives O(log d) where d is the distance, instead of O(log n).
+    #[inline]
+    fn ib_select1_from(&self, k: usize, hint: usize) -> Option<usize> {
         let words = self.ib.as_ref();
         if words.is_empty() {
             return None;
         }
 
-        // Binary search to find the word containing the k-th 1-bit
-        // ib_rank[i] = total 1-bits in words [0, i)
-        // We want the smallest i such that ib_rank[i+1] > k
         let k32 = k as u32;
+        let n = words.len();
 
-        // Binary search: find first word where cumulative count exceeds k
-        let mut lo = 0usize;
-        let mut hi = words.len();
+        // Clamp hint to valid range
+        let hint = hint.min(n.saturating_sub(1));
+
+        // Check if hint is already past k
+        let hint_rank = self.ib_rank[hint + 1];
+        let lo;
+        let hi;
+
+        if hint_rank <= k32 {
+            // k is at or after hint - search forward with exponential expansion
+            let mut bound = 1usize;
+            let mut prev = hint;
+
+            // Gallop forward: double the step size until we overshoot
+            loop {
+                let next = (hint + bound).min(n);
+                if next >= n || self.ib_rank[next + 1] > k32 {
+                    // Found the range: [prev, next]
+                    lo = prev;
+                    hi = next;
+                    break;
+                }
+                prev = next;
+                bound *= 2;
+            }
+        } else {
+            // k is before hint - search backward with exponential expansion
+            let mut bound = 1usize;
+            let mut prev = hint;
+
+            // Gallop backward
+            loop {
+                let next = hint.saturating_sub(bound);
+                if next == 0 || self.ib_rank[next + 1] <= k32 {
+                    // Found the range: [next, prev]
+                    lo = next;
+                    hi = prev;
+                    break;
+                }
+                prev = next;
+                bound *= 2;
+            }
+        }
+
+        // Binary search within [lo, hi]
+        let mut lo = lo;
+        let mut hi = hi;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if self.ib_rank[mid + 1] <= k32 {
@@ -197,7 +243,7 @@ impl<W: AsRef<[u64]>> JsonIndex<W> {
             }
         }
 
-        if lo >= words.len() {
+        if lo >= n {
             return None;
         }
 
@@ -314,8 +360,13 @@ impl<'a, W: AsRef<[u64]>> JsonCursor<'a, W> {
         // Use BP's O(1) rank1 function instead of linear scan
         let rank = self.index.bp().rank1(self.bp_pos);
 
-        // Now select1(rank) in IB gives us the text position
-        self.index.ib_select1(rank)
+        // Use rank / 8 as a hint for where to start searching in IB.
+        // JSON typically has ~7-8 structural characters per 64 bytes,
+        // so rank / 8 is a reasonable estimate of the word index.
+        // For sequential traversal, this gives O(log d) instead of O(log n)
+        // where d is the distance from the hint.
+        let hint = rank / 8;
+        self.index.ib_select1_from(rank, hint)
     }
 
     /// Navigate to the first child.

@@ -1108,7 +1108,9 @@ impl<W: AsRef<[u64]>> BalancedParens<W> {
                     };
 
                     // Use fast byte-level scan
-                    if let Some(match_bit) = find_close_in_word_fast(word, bit_idx, excess, valid_bits) {
+                    if let Some(match_bit) =
+                        find_close_in_word_fast(word, bit_idx, excess, valid_bits)
+                    {
                         return Some(word_idx * 64 + match_bit);
                     }
 

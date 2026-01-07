@@ -556,6 +556,214 @@ fn bench_v1_vs_v2_full_traverse(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark sequential vs random select access patterns.
+/// This demonstrates the benefit of exponential search over binary search.
+fn bench_select_patterns(c: &mut Criterion) {
+    let Some(bytes) = load_test_file() else {
+        return;
+    };
+
+    // Build index
+    let index = JsonIndex::build(&bytes);
+
+    // Get total IB 1-bits for query generation
+    let ib = index.ib();
+    let total_ones: u32 = ib.iter().map(|w| w.count_ones()).sum();
+    if total_ones == 0 {
+        return;
+    }
+
+    // Pre-build ib_rank (we'll reuse this in the benchmark helper)
+    let ib_rank: Vec<u32> = {
+        let mut rank = Vec::with_capacity(ib.len() + 1);
+        let mut cumulative: u32 = 0;
+        rank.push(0);
+        for &word in ib {
+            cumulative += word.count_ones();
+            rank.push(cumulative);
+        }
+        rank
+    };
+
+    // Generate sequential queries (0, 1, 2, ..., N-1)
+    let sequential_queries: Vec<usize> = (0..10_000.min(total_ones as usize)).collect();
+
+    // Generate random queries
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let random_queries: Vec<usize> = (0..10_000)
+        .map(|_| rng.gen_range(0..total_ones as usize))
+        .collect();
+
+    let mut group = c.benchmark_group("select_patterns");
+    group.throughput(criterion::Throughput::Elements(10_000));
+    group.sample_size(50);
+
+    // Benchmark sequential access WITH hints (exponential search benefit)
+    group.bench_function("sequential_with_hint", |b| {
+        b.iter(|| {
+            let mut sum = 0usize;
+            let mut hint = 0usize;
+            for &k in &sequential_queries {
+                if let Some(pos) = select_with_hint(ib, &ib_rank, k, hint) {
+                    sum += pos;
+                    hint = pos / 64; // Update hint for next iteration
+                }
+            }
+            sum
+        })
+    });
+
+    // Benchmark sequential access WITHOUT hints (pure binary search)
+    group.bench_function("sequential_no_hint", |b| {
+        b.iter(|| {
+            let mut sum = 0usize;
+            for &k in &sequential_queries {
+                if let Some(pos) = select_binary_search(ib, &ib_rank, k) {
+                    sum += pos;
+                }
+            }
+            sum
+        })
+    });
+
+    // Benchmark random access WITH hints (hint doesn't help much)
+    group.bench_function("random_with_hint", |b| {
+        b.iter(|| {
+            let mut sum = 0usize;
+            let mut hint = 0usize;
+            for &k in &random_queries {
+                if let Some(pos) = select_with_hint(ib, &ib_rank, k, hint) {
+                    sum += pos;
+                    hint = pos / 64;
+                }
+            }
+            sum
+        })
+    });
+
+    // Benchmark random access WITHOUT hints (pure binary search)
+    group.bench_function("random_no_hint", |b| {
+        b.iter(|| {
+            let mut sum = 0usize;
+            for &k in &random_queries {
+                if let Some(pos) = select_binary_search(ib, &ib_rank, k) {
+                    sum += pos;
+                }
+            }
+            sum
+        })
+    });
+
+    group.finish();
+}
+
+/// Pure binary search select (the old algorithm)
+fn select_binary_search(ib: &[u64], ib_rank: &[u32], k: usize) -> Option<usize> {
+    if ib.is_empty() {
+        return None;
+    }
+
+    let k32 = k as u32;
+    let n = ib.len();
+
+    // Full binary search over all words
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if ib_rank[mid + 1] <= k32 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if lo >= n {
+        return None;
+    }
+
+    let remaining = k - ib_rank[lo] as usize;
+    let word = ib[lo];
+    let bit_pos = select_in_word(word, remaining as u32) as usize;
+    Some(lo * 64 + bit_pos)
+}
+
+/// Exponential search select with hint (the new algorithm)
+fn select_with_hint(ib: &[u64], ib_rank: &[u32], k: usize, hint: usize) -> Option<usize> {
+    if ib.is_empty() {
+        return None;
+    }
+
+    let k32 = k as u32;
+    let n = ib.len();
+
+    // Clamp hint to valid range
+    let hint = hint.min(n.saturating_sub(1));
+
+    // Check if hint is already past k
+    let hint_rank = ib_rank[hint + 1];
+    let lo;
+    let hi;
+
+    if hint_rank <= k32 {
+        // k is at or after hint - search forward with exponential expansion
+        let mut bound = 1usize;
+        let mut prev = hint;
+
+        // Gallop forward: double the step size until we overshoot
+        loop {
+            let next = (hint + bound).min(n);
+            if next >= n || ib_rank[next + 1] > k32 {
+                lo = prev;
+                hi = next;
+                break;
+            }
+            prev = next;
+            bound *= 2;
+        }
+    } else {
+        // k is before hint - search backward with exponential expansion
+        let mut bound = 1usize;
+        let mut prev = hint;
+
+        // Gallop backward
+        loop {
+            let next = hint.saturating_sub(bound);
+            if next == 0 || ib_rank[next + 1] <= k32 {
+                lo = next;
+                hi = prev;
+                break;
+            }
+            prev = next;
+            bound *= 2;
+        }
+    }
+
+    // Binary search within [lo, hi]
+    let mut lo = lo;
+    let mut hi = hi;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if ib_rank[mid + 1] <= k32 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if lo >= n {
+        return None;
+    }
+
+    // Now lo is the word index, and ib_rank[lo] is count before this word
+    let remaining = k - ib_rank[lo] as usize;
+    let word = ib[lo];
+    let bit_pos = select_in_word(word, remaining as u32) as usize;
+    Some(lo * 64 + bit_pos)
+}
+
 criterion_group!(
     benches,
     bench_indexing,
@@ -564,5 +772,6 @@ criterion_group!(
     bench_full_pipeline,
     bench_v1_vs_v2_text_position,
     bench_v1_vs_v2_full_traverse,
+    bench_select_patterns,
 );
 criterion_main!(benches);

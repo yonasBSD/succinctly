@@ -34,7 +34,13 @@ fn bench_popcount_strategies(c: &mut Criterion) {
         ("ones", |_| u64::MAX),
         ("sparse", |i| i & 0x0001_0001_0001_0001),
         ("dense", |i| i | 0xF0F0_F0F0_F0F0_F0F0),
-        ("alternating", |i| if i % 2 == 0 { 0xAAAA_AAAA_AAAA_AAAA } else { 0x5555_5555_5555_5555 }),
+        ("alternating", |i| {
+            if i % 2 == 0 {
+                0xAAAA_AAAA_AAAA_AAAA
+            } else {
+                0x5555_5555_5555_5555
+            }
+        }),
         ("random", |i| i.wrapping_mul(0x1234_5678_9ABC_DEF0)),
     ];
 
@@ -46,9 +52,7 @@ fn bench_popcount_strategies(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(format!("{}/{}", size_name, pattern_name), "simd"),
                 &words,
-                |b, words| {
-                    b.iter(|| popcount_words(black_box(words)))
-                },
+                |b, words| b.iter(|| popcount_words(black_box(words))),
             );
 
             // Always benchmark scalar as baseline
@@ -87,14 +91,14 @@ fn bench_avx512_alignment(c: &mut Criterion) {
 
     // Test alignment-specific cases
     let test_cases = [
-        ("aligned_8", 8),      // Exactly 8 words - one AVX512 load
-        ("aligned_16", 16),    // 16 words - two AVX512 loads
-        ("aligned_64", 64),    // 64 words - eight AVX512 loads
-        ("aligned_512", 512),  // 512 words - 64 AVX512 loads
-        ("unaligned_7", 7),    // 7 words - no AVX512, fallback
-        ("unaligned_9", 9),    // 9 words - one AVX512 + 1 scalar
-        ("unaligned_15", 15),  // 15 words - one AVX512 + 7 scalar
-        ("unaligned_17", 17),  // 17 words - two AVX512 + 1 scalar
+        ("aligned_8", 8),     // Exactly 8 words - one AVX512 load
+        ("aligned_16", 16),   // 16 words - two AVX512 loads
+        ("aligned_64", 64),   // 64 words - eight AVX512 loads
+        ("aligned_512", 512), // 512 words - 64 AVX512 loads
+        ("unaligned_7", 7),   // 7 words - no AVX512, fallback
+        ("unaligned_9", 9),   // 9 words - one AVX512 + 1 scalar
+        ("unaligned_15", 15), // 15 words - one AVX512 + 7 scalar
+        ("unaligned_17", 17), // 17 words - two AVX512 + 1 scalar
     ];
 
     for (name, count) in test_cases {
@@ -102,13 +106,9 @@ fn bench_avx512_alignment(c: &mut Criterion) {
             .map(|i| i.wrapping_mul(0x1234_5678_9ABC_DEF0))
             .collect();
 
-        group.bench_with_input(
-            BenchmarkId::new(name, ""),
-            &words,
-            |b, words| {
-                b.iter(|| popcount_words(black_box(words)))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new(name, ""), &words, |b, words| {
+            b.iter(|| popcount_words(black_box(words)))
+        });
     }
 
     group.finish();
@@ -127,9 +127,7 @@ fn bench_throughput(c: &mut Criterion) {
         .collect();
 
     #[cfg(feature = "simd")]
-    group.bench_function("simd_1MB", |b| {
-        b.iter(|| popcount_words(black_box(&words)))
-    });
+    group.bench_function("simd_1MB", |b| b.iter(|| popcount_words(black_box(&words))));
 
     group.bench_function("scalar_1MB", |b| {
         b.iter(|| {
@@ -153,10 +151,6 @@ criterion_group!(
 );
 
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-criterion_group!(
-    benches,
-    bench_popcount_strategies,
-    bench_throughput
-);
+criterion_group!(benches, bench_popcount_strategies, bench_throughput);
 
 criterion_main!(benches);

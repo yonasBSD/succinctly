@@ -382,12 +382,64 @@ fn test_sse2_matches_scalar() {
 
 ---
 
-## Not Implemented (See performance-analysis.md)
+### 5.2 Exponential Search for Sequential Select
+
+**File:** [src/json/light.rs](../src/json/light.rs)
+
+When iterating through JSON elements (`.users[]`, `.items[].name`), select queries access sequential positions. Exponential search (galloping) exploits this locality:
+
+```rust
+/// Perform select1 with a hint for the starting word index.
+///
+/// Uses exponential search (galloping) from the hint, which is optimal for
+/// sequential access patterns. When iterating through elements, the next
+/// select is typically near the previous one, so starting from the hint
+/// gives O(log d) where d is the distance, instead of O(log n).
+fn ib_select1_from(&self, k: usize, hint: usize) -> Option<usize> {
+    // Clamp hint to valid range
+    let hint = hint.min(n.saturating_sub(1));
+
+    // Check direction from hint
+    if ib_rank[hint + 1] <= k {
+        // Gallop forward: 1, 2, 4, 8, ... until overshoot
+        let mut bound = 1;
+        while hint + bound < n && ib_rank[hint + bound + 1] <= k {
+            bound *= 2;
+        }
+        // Binary search within [hint + bound/2, hint + bound]
+    } else {
+        // Gallop backward similarly
+    }
+}
+
+// Hint is estimated from rank / 8 (typical JSON density)
+let hint = rank / 8;
+self.index.ib_select1_from(rank, hint)
+```
+
+**Results:**
+
+| Benchmark | Binary Search | Exponential Search | Improvement |
+|-----------|---------------|-------------------|-------------|
+| Sequential select (microbench) | 335 µs | 102 µs | **3.3x faster** |
+| count_all_leaves (8MB) | 106 ms | 92 ms | **13% faster** |
+| extract_all_strings (8MB) | 131 ms | 117 ms | **11% faster** |
+
+**Trade-off:** Random access is ~37% slower due to galloping overhead when hints are wrong. This is acceptable because:
+1. Real JSON queries (`.[]`) are sequential
+2. Random access patterns are rare in practice
+3. Overall query performance still exceeds jq by 2-8x
+
+**Future improvement:** For use cases requiring fast random access, add a separate `ib_select1_binary(k)` method that uses pure binary search. See [.claude/skills/bit-optimization.md](../.claude/skills/bit-optimization.md) for details.
+
+---
+
+## Not Implemented (See optimization-opportunities.md)
 
 The following optimizations are documented but not yet implemented:
 
 - NEON nibble lookup tables (`vqtbl1q_u8`)
 - Optimized movemask for NEON
 - BP find_close state machine unrolling
-- Select exponential search
 - AVX2 escape sequence preprocessing
+- Separate binary search select for random access patterns

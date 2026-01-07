@@ -202,9 +202,7 @@ fn bench_simple_cursor_files(c: &mut Criterion) {
         // AVX-512 (if available)
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
             group.bench_with_input(BenchmarkId::new("AVX512", name), &bytes, |b, bytes| {
-                b.iter(|| {
-                    succinctly::json::simd::avx512::build_semi_index_simple(black_box(bytes))
-                })
+                b.iter(|| succinctly::json::simd::avx512::build_semi_index_simple(black_box(bytes)))
             });
         }
 

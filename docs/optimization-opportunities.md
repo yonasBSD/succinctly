@@ -530,6 +530,49 @@ RUSTFLAGS="-C target-feature=+avx2,+bmi2" cargo build --release
 
 ---
 
+## 9. Dual Select Methods for Access Pattern Optimization (LOW PRIORITY)
+
+### Current State
+Select uses exponential search with a hint, optimized for sequential access (`.users[]`).
+Random access (`.items[42]`) is ~37% slower due to galloping overhead.
+
+### Opportunity
+Provide separate methods for each access pattern:
+
+```rust
+impl JsonIndex {
+    /// Fast for sequential access (iteration like .users[])
+    /// Uses exponential search from hint - O(log d) where d = distance from hint
+    fn ib_select1_from(&self, k: usize, hint: usize) -> Option<usize>;
+
+    /// Fast for random access (indexed lookup like .[42])
+    /// Uses pure binary search - O(log n) but no hint overhead
+    fn ib_select1_binary(&self, k: usize) -> Option<usize>;
+}
+```
+
+### When to Use Each
+- **Sequential** (`ib_select1_from`): Iteration, streaming results
+- **Random** (`ib_select1_binary`): Direct index access, slice operations
+
+### Implementation
+The `ib_select1_binary` method already exists in the benchmark code. To productionize:
+
+1. Add `ib_select1_binary()` to `JsonIndex` (copy from benchmark)
+2. Update jq evaluator to detect access pattern:
+   - `.[]` iteration → use `ib_select1_from` with hints
+   - `.[n]` direct access → use `ib_select1_binary`
+
+### Expected Improvement
+- Random access: 37% faster (back to baseline)
+- Sequential access: No change (already optimized)
+
+**Priority**: ⭐ LOW (random access is rare in practice)
+**Effort**: 🔧 Trivial (code exists in benchmarks)
+**Risk**: None (additive optimization)
+
+---
+
 ## Implementation Roadmap
 
 ### Phase 1: Quick Wins (Week 1)

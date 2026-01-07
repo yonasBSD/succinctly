@@ -84,6 +84,92 @@ fn select1(&self, k: usize) -> Option<usize> {
 
 627x speedup (2.76s → 4.4ms) when select is called per result.
 
+## Exponential Search for Sequential Select
+
+**When to use**: Select queries during iteration (`.users[]`) access sequential positions.
+
+### Pattern: Galloping from Hint
+
+```rust
+fn select_with_hint(ib_rank: &[u32], k: usize, hint: usize) -> Option<usize> {
+    let k32 = k as u32;
+    let n = ib_rank.len() - 1;
+    let hint = hint.min(n.saturating_sub(1));
+
+    // Check direction from hint
+    let (lo, hi) = if ib_rank[hint + 1] <= k32 {
+        // Gallop forward: 1, 2, 4, 8, ... until overshoot
+        let mut bound = 1;
+        let mut prev = hint;
+        loop {
+            let next = (hint + bound).min(n);
+            if next >= n || ib_rank[next + 1] > k32 {
+                break (prev, next);
+            }
+            prev = next;
+            bound *= 2;
+        }
+    } else {
+        // Gallop backward: 1, 2, 4, 8, ... until undershoot
+        let mut bound = 1;
+        let mut prev = hint;
+        loop {
+            let next = hint.saturating_sub(bound);
+            if next == 0 || ib_rank[next + 1] <= k32 {
+                break (next, prev);
+            }
+            prev = next;
+            bound *= 2;
+        }
+    };
+
+    // Binary search within narrowed range [lo, hi]
+    // ...
+}
+```
+
+### Key Insights
+
+1. **Hint estimation**: Use `rank / density` where density ≈ ones per word (e.g., `rank / 8` for JSON)
+2. **O(log d) vs O(log n)**: When hint is close, d << n, so exponential search wins
+3. **Bidirectional galloping**: Handle both forward and backward cases
+
+### Results
+
+| Access Pattern | Binary Search | Exponential Search | Speedup |
+|----------------|---------------|-------------------|---------|
+| Sequential | 335 µs | 102 µs | **3.3x** |
+| Random | 780 µs | 1.07 ms | **0.7x** (regression) |
+
+### Trade-off: Random Access Regression
+
+Exponential search adds overhead (~37% slower) for random access because:
+- Galloping expands in wrong direction before binary search
+- Extra comparisons at hint position
+
+**Future improvement**: Provide two select methods:
+
+```rust
+impl JsonIndex {
+    /// Fast for sequential access (iteration)
+    fn ib_select1_from(&self, k: usize, hint: usize) -> Option<usize>;
+
+    /// Fast for random access (indexed lookup like .[42])
+    fn ib_select1_binary(&self, k: usize) -> Option<usize>;
+}
+
+// Usage in iteration:
+for k in 0..n {
+    let pos = index.ib_select1_from(k, prev_word_idx);
+    prev_word_idx = pos / 64;
+}
+
+// Usage in random access:
+let pos = index.ib_select1_binary(random_k);
+```
+
+This gives optimal performance for both patterns without runtime branching.
+
 ## Hierarchical Skip Pattern
 
 When searching for a position in a bitvector:

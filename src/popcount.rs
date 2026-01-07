@@ -341,16 +341,10 @@ mod tests {
 
         // All ones
         let ones = vec![u64::MAX; 100];
-        assert_eq!(
-            unsafe { popcount_words_avx512vpopcntdq(&ones) },
-            100 * 64
-        );
+        assert_eq!(unsafe { popcount_words_avx512vpopcntdq(&ones) }, 100 * 64);
 
         // Alternating pattern
         let alt = vec![0xAAAA_AAAA_AAAA_AAAA; 100];
-        assert_eq!(
-            unsafe { popcount_words_avx512vpopcntdq(&alt) },
-            100 * 32
-        );
+        assert_eq!(unsafe { popcount_words_avx512vpopcntdq(&alt) }, 100 * 32);
     }
 }

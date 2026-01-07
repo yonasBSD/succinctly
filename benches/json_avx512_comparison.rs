@@ -3,9 +3,14 @@
 //! This benchmark uses synthetic JSON data to quickly measure the
 //! performance difference between SIMD implementations.
 
+#[cfg(target_arch = "x86_64")]
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
+#[cfg(not(target_arch = "x86_64"))]
+use criterion::{Criterion, criterion_group, criterion_main};
+
 /// Generate synthetic JSON of a given size.
+#[cfg(target_arch = "x86_64")]
 fn generate_json(size_bytes: usize) -> Vec<u8> {
     let mut json = Vec::new();
     json.push(b'[');
@@ -59,9 +64,7 @@ fn bench_simd_levels(c: &mut Criterion) {
         // AVX2 (if available)
         if is_x86_feature_detected!("avx2") {
             group.bench_function("AVX2", |b| {
-                b.iter(|| {
-                    succinctly::json::simd::avx2::build_semi_index_standard(black_box(&json))
-                })
+                b.iter(|| succinctly::json::simd::avx2::build_semi_index_standard(black_box(&json)))
             });
         }
 
@@ -76,9 +79,7 @@ fn bench_simd_levels(c: &mut Criterion) {
 
         // SSE2 (always available)
         group.bench_function("SSE2", |b| {
-            b.iter(|| {
-                succinctly::json::simd::x86::build_semi_index_standard(black_box(&json))
-            })
+            b.iter(|| succinctly::json::simd::x86::build_semi_index_standard(black_box(&json)))
         });
 
         // Scalar baseline
@@ -117,9 +118,7 @@ fn bench_avx512_alignment(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(actual_size));
 
         group.bench_function(name, |b| {
-            b.iter(|| {
-                succinctly::json::simd::avx512::build_semi_index_standard(black_box(&json))
-            })
+            b.iter(|| succinctly::json::simd::avx512::build_semi_index_standard(black_box(&json)))
         });
     }
 
@@ -131,11 +130,26 @@ fn bench_avx512_alignment(c: &mut Criterion) {
 fn bench_json_patterns(c: &mut Criterion) {
     // Different JSON structures
     let patterns = [
-        ("flat_object", br#"{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"j":10}"#.to_vec()),
-        ("nested_objects", br#"{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":{"j":1}}}}}}}}}}"#.to_vec()),
-        ("array_numbers", br#"[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]"#.to_vec()),
-        ("array_strings", br#"["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p"]"#.to_vec()),
-        ("mixed", br#"{"nums":[1,2,3],"strs":["a","b"],"bool":true,"null":null}"#.to_vec()),
+        (
+            "flat_object",
+            br#"{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"j":10}"#.to_vec(),
+        ),
+        (
+            "nested_objects",
+            br#"{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":{"j":1}}}}}}}}}}"#.to_vec(),
+        ),
+        (
+            "array_numbers",
+            br#"[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]"#.to_vec(),
+        ),
+        (
+            "array_strings",
+            br#"["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p"]"#.to_vec(),
+        ),
+        (
+            "mixed",
+            br#"{"nums":[1,2,3],"strs":["a","b"],"bool":true,"null":null}"#.to_vec(),
+        ),
     ];
 
     for (pattern_name, json) in patterns {
@@ -159,7 +173,9 @@ fn bench_json_patterns(c: &mut Criterion) {
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
             group.bench_function("AVX512", |b| {
                 b.iter(|| {
-                    succinctly::json::simd::avx512::build_semi_index_standard(black_box(&large_json))
+                    succinctly::json::simd::avx512::build_semi_index_standard(black_box(
+                        &large_json,
+                    ))
                 })
             });
         }
@@ -186,6 +202,11 @@ criterion_group!(
 );
 
 #[cfg(not(target_arch = "x86_64"))]
-criterion_group!(benches,);
+fn bench_noop(_c: &mut Criterion) {
+    // No AVX-512 benchmarks on non-x86_64
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+criterion_group!(benches, bench_noop);
 
 criterion_main!(benches);
