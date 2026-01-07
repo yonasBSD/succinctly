@@ -187,23 +187,75 @@ let eq_open_brace = _mm256_cmpeq_epi8(chunk, open_brace_vec);
 let structural_mask = _mm256_movemask_epi8(combined) as u32;
 ```
 
-### 3.3 NEON Custom Movemask
+### 3.3 NEON Nibble Lookup Tables (simdjson technique)
 
 **File:** [src/json/simd/neon.rs](../src/json/simd/neon.rs)
 
-ARM NEON lacks a direct movemask instruction, so we emulate it:
+Character classification using nibble lookup replaces ~12 comparisons + ~8 ORs with just 2 lookups + 1 AND:
+
+```rust
+// Nibble tables encode character classes in bit flags
+const LO_NIBBLE_TABLE: [u8; 16] = [
+    0x00, 0x00, 0x08, 0x00,  // 0-3: bit 3 for quote (lo=2)
+    0x00, 0x00, 0x00, 0x00,  // 4-7
+    0x00, 0x00, 0x04, 0x01,  // 8-B: colon (A), opens (B)
+    0x14, 0x02, 0x00, 0x00,  // C-F: comma/backslash (C), closes (D)
+];
+const HI_NIBBLE_TABLE: [u8; 16] = [
+    0x00, 0x00, 0x0C, 0x04,  // hi=2: comma,quote; hi=3: colon
+    0x00, 0x13, 0x00, 0x03,  // hi=5: []\; hi=7: {}
+    // ...
+];
+
+// Classification: split byte into nibbles, lookup both, AND results
+let lo_nibble = vandq_u8(chunk, vdupq_n_u8(0x0F));
+let hi_nibble = vshrq_n_u8::<4>(chunk);
+let lo_result = vqtbl1q_u8(lo_table, lo_nibble);  // NEON table lookup
+let hi_result = vqtbl1q_u8(hi_table, hi_nibble);
+let classified = vandq_u8(lo_result, hi_result);   // AND gives final flags
+```
+
+**Why it works:** Each ASCII character is uniquely identified by (lo_nibble, hi_nibble). The tables are designed so the AND of both lookups produces the correct class bits.
+
+**Performance:** 2 `vqtbl1q_u8` + 1 `vandq_u8` vs 8+ `vceqq_u8` + 4+ `vorrq_u8` in the comparison approach.
+
+**Benchmark Results (Apple M1):**
+
+| Pattern | Size | NEON (nibble) | Scalar | Speedup |
+|---------|------|---------------|--------|---------|
+| comprehensive | 1MB | 1.62 ms (500 MiB/s) | 2.04 ms (395 MiB/s) | **1.26x** |
+| comprehensive | 10MB | 15.9 ms (503 MiB/s) | 20.1 ms (398 MiB/s) | **1.26x** |
+| strings | 1MB | 481 µs (1.78 GiB/s) | 1.46 ms (601 MiB/s) | **3.0x** |
+
+The 3x speedup on string-heavy JSON comes from the combination of nibble lookup + fast-path string scanning.
+
+### 3.4 NEON Custom Movemask (Optimized)
+
+**File:** [src/json/simd/neon.rs](../src/json/simd/neon.rs)
+
+ARM NEON lacks a direct movemask instruction. Uses multiplication trick instead of slow variable shifts:
 
 ```rust
 unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
-    let high_bits = vshrq_n_u8::<7>(v);      // Extract high bit of each byte
-    let shifted = vshlq_u8(high_bits, shifts); // Weight by position
-    let low_sum = vaddv_u8(vget_low_u8(shifted));
-    let high_sum = vaddv_u8(vget_high_u8(shifted));
-    low_sum as u16 | ((high_sum as u16) << 8)
+    // Shift right by 7 to get 0 or 1 in each byte
+    let high_bits = vshrq_n_u8::<7>(v);
+
+    // Extract as two u64 values
+    let low_u64 = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(high_bits));
+    let high_u64 = vgetq_lane_u64::<1>(vreinterpretq_u64_u8(high_bits));
+
+    // Multiplication trick: magic number positions each byte at the right bit
+    const MAGIC: u64 = 0x0102040810204080;
+    let low_packed = (low_u64.wrapping_mul(MAGIC) >> 56) as u8;
+    let high_packed = (high_u64.wrapping_mul(MAGIC) >> 56) as u8;
+
+    (low_packed as u16) | ((high_packed as u16) << 8)
 }
 ```
 
-### 3.4 Fast-Path String Scanning
+**Why:** Variable shifts (`vshlq_u8` with vector amounts) are slow on M1/M2, while fixed shifts and scalar multiplications are fast.
+
+### 3.5 Fast-Path String Scanning
 
 **File:** [src/json/simd/neon.rs](../src/json/simd/neon.rs)
 
@@ -378,9 +430,12 @@ fn test_sse2_matches_scalar() {
 | BP RangeMin | 3-level excess index | O(1) find_close | ~11x vs linear scan |
 | BP byte lookup | BYTE_FIND_CLOSE tables | O(1) per byte | ~4x vs bit-by-bit |
 | JSON SIMD | Multi-level dispatch | O(n) | 2-4x vs scalar |
+| NEON nibble lookup | vqtbl1q_u8 tables | O(n) | Replaces 12+ ops with 3 |
+| NEON movemask | Multiplication trick | O(1) | Avoids slow variable shifts |
 | String fast-path | Batch zero writing | O(n) | 2.5-8x on strings |
 | Cumulative index | Binary search select | O(log n) | 627x on queries |
 | Exponential search | Galloping from hint | O(log d) | 3.3x for sequential |
+| Dual select methods | Binary + exponential | O(log n) / O(log d) | 39% faster random access |
 
 ---
 
@@ -501,7 +556,12 @@ The RangeMin implementation combines the hierarchical skip structure (L0/L1/L2 b
 
 The following optimizations are documented but not yet implemented:
 
-- NEON nibble lookup tables (`vqtbl1q_u8`)
-- Optimized movemask for NEON
 - AVX2 escape sequence preprocessing
-- Separate binary search select for random access patterns
+
+## Recently Implemented
+
+The following were marked as "not implemented" but are now complete:
+
+- ✅ NEON nibble lookup tables (`vqtbl1q_u8`) - implemented in [src/json/simd/neon.rs](../src/json/simd/neon.rs)
+- ✅ Optimized movemask for NEON - uses multiplication trick instead of slow variable shifts
+- ✅ Separate binary search select for random access patterns - `ib_select1()` method
