@@ -723,6 +723,71 @@ cargo test --test properties
 
 ---
 
+## Rejected Optimizations
+
+This section documents optimizations that were investigated but found to be ineffective or counterproductive.
+
+### R1. NEON Batched Popcount for Cumulative Index (REJECTED)
+
+**Date Investigated**: January 2026
+
+**Hypothesis**: Use NEON `vcntq_u8` to batch popcount 8 words at once, then build prefix sum.
+
+**Implementation Approach**:
+```rust
+#[cfg(target_arch = "aarch64")]
+fn build_ib_rank_neon(words: &[u64]) -> Vec<u32> {
+    use std::arch::aarch64::*;
+
+    // Process 8 words (64 bytes) at a time using NEON
+    while i + 8 <= words.len() {
+        unsafe {
+            // Load and popcount 64 bytes
+            let v0 = vld1q_u8(ptr);  // ...
+            let c0 = vcntq_u8(v0);   // Per-byte popcount
+            // Sum to per-word counts via vpaddlq_*
+            let octo0 = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(c0)));
+
+            // Extract 8 individual word counts
+            let counts: [u32; 8] = [
+                vgetq_lane_u64(octo0, 0) as u32,  // 14 lane extractions!
+                // ...
+            ];
+
+            // Still need sequential prefix sum
+            for c in counts {
+                cumulative += c;
+                rank.push(cumulative);
+            }
+        }
+    }
+}
+```
+
+**Benchmark Results** (Apple M1, 1M words = 8MB):
+
+| Implementation | Time | Relative |
+|----------------|------|----------|
+| Scalar (`count_ones()`) | 542 µs | 1.00x |
+| NEON batched | 722 µs | **0.75x (25% slower!)** |
+
+**Why It Failed**:
+1. **Extraction overhead**: 14 `vgetq_lane` calls per 8 words to extract individual counts
+2. **Sequential dependency**: Prefix sum still requires cumulative += count for each word
+3. **LLVM optimization**: `count_ones()` already compiles to efficient `CNT` instruction on ARM64
+4. **Memory pressure**: Additional register shuffling for lane extraction
+
+**Lesson Learned**: SIMD batching helps for *total* sums but not for *prefix* sums where each output depends on all previous values. The bottleneck is the data dependency chain, not the popcount operation itself.
+
+**Alternative Considered**: Parallel prefix sum using SIMD, but:
+- Adds significant complexity
+- Would require 64 words minimum to amortize overhead
+- The cumulative index is only built once during construction
+
+**Conclusion**: Keep the simple scalar implementation in `build_ib_rank()`. LLVM's auto-vectorization is already near-optimal for this use case.
+
+---
+
 ## Conclusion
 
 The Ryzen 9 7950X provides exceptional SIMD capabilities that are currently underutilized. The most impactful optimizations are:
