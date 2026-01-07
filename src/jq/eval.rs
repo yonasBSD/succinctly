@@ -3540,18 +3540,21 @@ fn find_field<'a, W: Clone + AsRef<[u64]>>(
 }
 
 /// Get element at index (supports negative indexing).
+///
+/// Uses `get_fast` for O(n) BP operations + O(log n) IB select,
+/// instead of `get` which does O(n) IB selects.
 fn get_element_at_index<'a, W: Clone + AsRef<[u64]>>(
     elements: JsonElements<'a, W>,
     idx: i64,
 ) -> Option<StandardJson<'a, W>> {
     if idx >= 0 {
-        elements.get(idx as usize)
+        elements.get_fast(idx as usize)
     } else {
         // Negative index: count from end
         let len = count_elements(elements);
         let positive_idx = len as i64 + idx;
         if positive_idx >= 0 {
-            elements.get(positive_idx as usize)
+            elements.get_fast(positive_idx as usize)
         } else {
             None
         }

@@ -647,6 +647,131 @@ fn bench_select_patterns(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark array indexing: get() vs get_fast().
+/// This directly measures the optimization where get_fast() uses only BP operations
+/// for navigation and only calls text_position once at the target element.
+fn bench_array_indexing(c: &mut Criterion) {
+    let Some(bytes) = load_test_file() else {
+        return;
+    };
+
+    // Build index
+    let index = JsonIndex::build(&bytes);
+    let root = index.root(&bytes);
+
+    // Find an array to work with
+    let StandardJson::Object(fields) = root.value() else {
+        eprintln!("Root is not an object, skipping array indexing benchmark");
+        return;
+    };
+
+    // Find any field that contains a decent-sized array
+    let mut test_array = None;
+    let mut field_iter = fields;
+    while let Some((field, rest)) = field_iter.uncons() {
+        if let StandardJson::Array(elements) = field.value() {
+            let count = elements.count();
+            if count >= 100 {
+                test_array = Some((field.value(), count));
+                break;
+            }
+        }
+        field_iter = rest;
+    }
+
+    let Some((array_value, array_len)) = test_array else {
+        eprintln!("No suitable array found, skipping array indexing benchmark");
+        return;
+    };
+
+    let StandardJson::Array(elements) = array_value else {
+        unreachable!()
+    };
+
+    println!(
+        "Using array with {} elements for indexing benchmark",
+        array_len
+    );
+
+    let mut group = c.benchmark_group("array_indexing");
+    group.sample_size(100);
+
+    // Test accessing element at various positions
+    let positions = [0, 10, 50, 100.min(array_len - 1)];
+
+    for &idx in &positions {
+        if idx >= array_len {
+            continue;
+        }
+
+        // Benchmark get() - O(n) IB selects
+        group.bench_function(format!("get_{}", idx), |b| {
+            b.iter(|| black_box(elements.get(black_box(idx))))
+        });
+
+        // Benchmark get_fast() - O(n) BP ops + O(log n) IB select
+        group.bench_function(format!("get_fast_{}", idx), |b| {
+            b.iter(|| black_box(elements.get_fast(black_box(idx))))
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark jq evaluation with array indexing.
+/// This tests the actual jq evaluator to measure end-to-end impact.
+fn bench_jq_array_index(c: &mut Criterion) {
+    use succinctly::jq;
+
+    let Some(bytes) = load_test_file() else {
+        return;
+    };
+
+    // Build index
+    let index = JsonIndex::build(&bytes);
+
+    // Parse a jq expression that accesses array elements by index
+    // Typical pattern: .[50] or .items[50]
+    let expr = jq::parse(".[50]").expect("Failed to parse jq expression");
+
+    let mut group = c.benchmark_group("jq_array_index");
+    group.sample_size(100);
+
+    group.bench_function("jq_root_array_index", |b| {
+        b.iter(|| {
+            let cursor = index.root(black_box(&bytes));
+            let result = jq::eval(&expr, cursor);
+            black_box(result)
+        })
+    });
+
+    // Try field access + array index pattern
+    if let Ok(field_expr) = jq::parse(".users[50]") {
+        group.bench_function("jq_field_array_index", |b| {
+            b.iter(|| {
+                let cursor = index.root(black_box(&bytes));
+                let result = jq::eval(&field_expr, cursor);
+                black_box(result)
+            })
+        });
+    }
+
+    // Compare with iteration (should be slower due to multiple text_positions)
+    let iter_expr = jq::parse(".[]").expect("Failed to parse iterate expression");
+
+    group.bench_function("jq_iterate_to_50", |b| {
+        b.iter(|| {
+            let cursor = index.root(black_box(&bytes));
+            let result = jq::eval_lenient(&iter_expr, cursor);
+            // Only look at first 51 elements
+            let first_51: Vec<_> = result.into_iter().take(51).collect();
+            black_box(first_51)
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_indexing,
@@ -656,5 +781,7 @@ criterion_group!(
     bench_v1_vs_v2_text_position,
     bench_v1_vs_v2_full_traverse,
     bench_select_patterns,
+    bench_array_indexing,
+    bench_jq_array_index,
 );
 criterion_main!(benches);

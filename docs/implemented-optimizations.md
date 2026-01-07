@@ -381,6 +381,47 @@ fn ib_select1(&self, k: usize) -> Option<usize> {
 
 **Result:** `.unicode[]` on 10MB file: 2.76s → 4.4ms (627x faster, now 5x faster than jq)
 
+### 5.2 Fast Random Access for Array Indexing (get_fast)
+
+**Files:** [src/json/light.rs](../src/json/light.rs), [src/jq/eval.rs](../src/jq/eval.rs)
+
+**Problem:** Array indexing via `JsonElements::get(n)` was calling `value()` (which triggers `text_position()` and IB select) for every intermediate element. Accessing element 100 required 101 IB select operations.
+
+**Solution:** Added `get_fast()` method that navigates using only BP operations (`next_sibling()`) for intermediate elements:
+
+```rust
+/// Get element by index (fast path for random access).
+pub fn get_fast(&self, index: usize) -> Option<StandardJson<'a, W>> {
+    let mut cursor = self.element_cursor?;
+
+    // Navigate using O(1) BP operations only
+    for _ in 0..index {
+        cursor = cursor.next_sibling()?;
+    }
+
+    // Only call value() (which uses text_position/ib_select) at the target
+    Some(cursor.value())
+}
+```
+
+**Complexity comparison:**
+- `get()`: O(n) IB select operations
+- `get_fast()`: O(n) BP `next_sibling` operations + O(log N) IB select for target
+
+**Benchmark results (10MB JSON, 60K element array):**
+
+| Index | get() | get_fast() | Speedup |
+|-------|-------|------------|---------|
+| 10 | 535 ns | 115 ns | 4.7x |
+| 50 | 2.51 µs | 351 ns | 7.2x |
+| 100 | 5.04 µs | 637 ns | 7.9x |
+| 1000 | 48 µs | 5.7 µs | 8.4x |
+| 10000 | 506 µs | 58 µs | 8.7x |
+
+**Impact on jq evaluator:**
+- Updated `get_element_at_index()` to use `get_fast()` for all array index operations (`.[n]`, `.field[n]`)
+- No regressions detected in iteration benchmarks (which still use `uncons()`)
+
 ---
 
 ## 6. Zero-Copy Output

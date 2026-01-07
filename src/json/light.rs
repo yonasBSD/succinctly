@@ -775,9 +775,13 @@ impl<'a, W: AsRef<[u64]>> JsonElements<'a, W> {
         Some((value, rest))
     }
 
-    /// Get element by index.
+    /// Get element by index (slow path).
     ///
-    /// Note: This is O(n) as it iterates through elements.
+    /// Note: This is O(n) as it iterates through elements, calling `value()`
+    /// for each intermediate element.
+    ///
+    /// For better performance with random access, use [`get_fast`] which
+    /// only calls `value()` on the target element.
     pub fn get(&self, index: usize) -> Option<StandardJson<'a, W>> {
         let mut elements = *self;
         for _ in 0..index {
@@ -785,6 +789,27 @@ impl<'a, W: AsRef<[u64]>> JsonElements<'a, W> {
             elements = rest;
         }
         elements.uncons().map(|(elem, _)| elem)
+    }
+
+    /// Get element by index (fast path for random access).
+    ///
+    /// This method navigates to the target element using only BP operations
+    /// (`next_sibling`), avoiding expensive `text_position()` calls for
+    /// intermediate elements.
+    ///
+    /// Complexity: O(n) BP operations + O(log n) IB select for final element.
+    /// This is faster than `get()` which does O(n) IB selects.
+    #[inline]
+    pub fn get_fast(&self, index: usize) -> Option<StandardJson<'a, W>> {
+        let mut cursor = self.element_cursor?;
+
+        // Navigate to the target element using only BP operations
+        for _ in 0..index {
+            cursor = cursor.next_sibling()?;
+        }
+
+        // Only call value() (which uses text_position/ib_select) on the target
+        Some(cursor.value())
     }
 }
 
