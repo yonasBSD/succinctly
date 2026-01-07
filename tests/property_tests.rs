@@ -83,8 +83,10 @@ proptest! {
         let i = (i_frac * len as f64).max(1.0) as usize;
 
         let rank = bv.rank1(i);
-        if rank > 0 && let Some(sel) = bv.select1(rank - 1) {
-            prop_assert!(sel < i, "select1({}) = {} >= i = {}", rank - 1, sel, i);
+        if rank > 0 {
+            if let Some(sel) = bv.select1(rank - 1) {
+                prop_assert!(sel < i, "select1({}) = {} >= i = {}", rank - 1, sel, i);
+            }
         }
     }
 
@@ -609,10 +611,12 @@ proptest! {
         let bp = BalancedParens::new(words, len);
 
         for p in 0..len {
-            if bp.is_open(p) && let Some(close) = bp.find_close(p) {
-                let open = bp.find_open(close);
-                prop_assert_eq!(open, Some(p),
-                    "find_open(find_close({})) != {} at len={}", p, p, len);
+            if bp.is_open(p) {
+                if let Some(close) = bp.find_close(p) {
+                    let open = bp.find_open(close);
+                    prop_assert_eq!(open, Some(p),
+                        "find_open(find_close({})) != {} at len={}", p, p, len);
+                }
             }
         }
     }

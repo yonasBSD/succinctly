@@ -1,4 +1,4 @@
-///! End-to-end benchmark: PFSM vs existing implementations across all JSON patterns
+//! End-to-end benchmark: PFSM vs existing implementations across all JSON patterns
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::fs;
 use std::path::PathBuf;

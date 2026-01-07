@@ -20,6 +20,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(clippy::enum_variant_names)]
 enum State {
     InJson = 0,
     InString = 1,
@@ -29,11 +30,11 @@ enum State {
 
 /// Character classification functions matching haskellworks implementation
 fn is_alphabetic(c: u8) -> bool {
-    (c >= b'A' && c <= b'Z') || (c >= b'a' && c <= b'z')
+    c.is_ascii_alphabetic()
 }
 
 fn is_digit(c: u8) -> bool {
-    c >= b'0' && c <= b'9'
+    c.is_ascii_digit()
 }
 
 fn is_period(c: u8) -> bool {

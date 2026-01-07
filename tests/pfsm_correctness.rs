@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 /// Correctness tests: Verify PFSM produces identical output to standard implementations
 use succinctly::json::{pfsm, pfsm_tables::PfsmState, standard, BitWriter};
 
@@ -33,6 +34,13 @@ fn test_pfsm_vs_standard_arrays() {
 }
 
 fn verify_pfsm_correctness(path: &str) {
+    // Skip test if generated benchmark data doesn't exist
+    // Run `cargo run --release --features cli -- json generate-suite` to generate
+    if !Path::new(path).exists() {
+        eprintln!("Skipping {}: file not found (run `cargo run --release --features cli -- json generate-suite` to generate)", path);
+        return;
+    }
+
     let json = fs::read(path).expect("Failed to read test file");
 
     // Generate PFSM output

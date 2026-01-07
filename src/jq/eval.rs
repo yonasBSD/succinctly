@@ -123,10 +123,10 @@ fn to_owned<W: Clone + AsRef<[u64]>>(value: &StandardJson<'_, W>) -> OwnedValue 
             let mut map = BTreeMap::new();
             for field in *fields {
                 // Get the key as a string
-                if let StandardJson::String(key_str_val) = field.key()
-                    && let Ok(cow) = key_str_val.as_str()
-                {
-                    map.insert(cow.into_owned(), to_owned(&field.value()));
+                if let StandardJson::String(key_str_val) = field.key() {
+                    if let Ok(cow) = key_str_val.as_str() {
+                        map.insert(cow.into_owned(), to_owned(&field.value()));
+                    }
                 }
             }
             OwnedValue::Object(map)
@@ -1185,10 +1185,10 @@ fn builtin_keys<'a, W: Clone + AsRef<[u64]>>(
         StandardJson::Object(fields) => {
             let mut keys: Vec<String> = Vec::new();
             for field in fields {
-                if let StandardJson::String(k) = field.key()
-                    && let Ok(cow) = k.as_str()
-                {
-                    keys.push(cow.into_owned());
+                if let StandardJson::String(k) = field.key() {
+                    if let Ok(cow) = k.as_str() {
+                        keys.push(cow.into_owned());
+                    }
                 }
             }
             if sorted {
@@ -1225,10 +1225,10 @@ fn builtin_has<'a, W: Clone + AsRef<[u64]>>(
         // Object has string key
         (StandardJson::Object(fields), OwnedValue::String(key)) => {
             let found = (*fields).clone().any(|f| {
-                if let StandardJson::String(k) = f.key()
-                    && let Ok(cow) = k.as_str()
-                {
-                    return cow.as_ref() == key;
+                if let StandardJson::String(k) = f.key() {
+                    if let Ok(cow) = k.as_str() {
+                        return cow.as_ref() == key;
+                    }
                 }
                 false
             });
@@ -1285,10 +1285,10 @@ fn builtin_in<'a, W: Clone + AsRef<[u64]>>(
     match (&key_owned, &obj) {
         (OwnedValue::String(key), StandardJson::Object(fields)) => {
             let found = (*fields).clone().any(|f| {
-                if let StandardJson::String(k) = f.key()
-                    && let Ok(cow) = k.as_str()
-                {
-                    return cow.as_ref() == key;
+                if let StandardJson::String(k) = f.key() {
+                    if let Ok(cow) = k.as_str() {
+                        return cow.as_ref() == key;
+                    }
                 }
                 false
             });
@@ -2225,10 +2225,12 @@ fn builtin_to_entries<'a, W: Clone + AsRef<[u64]>>(
         StandardJson::Object(fields) => {
             let mut entries: Vec<OwnedValue> = Vec::new();
             for field in fields {
-                let key = if let StandardJson::String(k) = field.key()
-                    && let Ok(cow) = k.as_str()
-                {
-                    cow.into_owned()
+                let key = if let StandardJson::String(k) = field.key() {
+                    if let Ok(cow) = k.as_str() {
+                        cow.into_owned()
+                    } else {
+                        continue;
+                    }
                 } else {
                     continue;
                 };
@@ -2298,10 +2300,12 @@ fn builtin_with_entries<'a, W: Clone + AsRef<[u64]>>(
             // Convert to entries
             let mut entries: Vec<OwnedValue> = Vec::new();
             for field in fields {
-                let key = if let StandardJson::String(k) = field.key()
-                    && let Ok(cow) = k.as_str()
-                {
-                    cow.into_owned()
+                let key = if let StandardJson::String(k) = field.key() {
+                    if let Ok(cow) = k.as_str() {
+                        cow.into_owned()
+                    } else {
+                        continue;
+                    }
                 } else {
                     continue;
                 };
@@ -2758,18 +2762,18 @@ fn builtin_implode<'a, W: Clone + AsRef<[u64]>>(
         StandardJson::Array(elements) => {
             let mut result = String::new();
             for elem in *elements {
-                if let StandardJson::Number(n) = elem
-                    && let Ok(codepoint) = n.as_i64()
-                {
-                    if let Some(c) = char::from_u32(codepoint as u32) {
-                        result.push(c);
-                    } else if optional {
-                        continue;
-                    } else {
-                        return QueryResult::Error(EvalError::new(format!(
-                            "invalid codepoint: {}",
-                            codepoint
-                        )));
+                if let StandardJson::Number(n) = elem {
+                    if let Ok(codepoint) = n.as_i64() {
+                        if let Some(c) = char::from_u32(codepoint as u32) {
+                            result.push(c);
+                        } else if optional {
+                            continue;
+                        } else {
+                            return QueryResult::Error(EvalError::new(format!(
+                                "invalid codepoint: {}",
+                                codepoint
+                            )));
+                        }
                     }
                 }
             }

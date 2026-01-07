@@ -624,18 +624,18 @@ mod inverse_tests {
             let bp = BalancedParens::new(words, len);
 
             for p in 0..len {
-                if bp.is_open(p)
-                    && let Some(close) = bp.find_close(p)
-                {
-                    let open = bp.find_open(close);
-                    assert_eq!(
-                        open,
-                        Some(p),
-                        "find_open(find_close({})) != {} for close={}",
-                        p,
-                        p,
-                        close
-                    );
+                if bp.is_open(p) {
+                    if let Some(close) = bp.find_close(p) {
+                        let open = bp.find_open(close);
+                        assert_eq!(
+                            open,
+                            Some(p),
+                            "find_open(find_close({})) != {} for close={}",
+                            p,
+                            p,
+                            close
+                        );
+                    }
                 }
             }
         }
@@ -668,15 +668,15 @@ mod inverse_tests {
         let bp = BalancedParens::new(vec![0b001011], 6);
 
         for p in 0..6 {
-            if bp.is_open(p)
-                && let (Some(size), Some(close)) = (bp.subtree_size(p), bp.find_close(p))
-            {
-                assert_eq!(
-                    size,
-                    (close - p) / 2,
-                    "subtree_size formula failed at {}",
-                    p
-                );
+            if bp.is_open(p) {
+                if let (Some(size), Some(close)) = (bp.subtree_size(p), bp.find_close(p)) {
+                    assert_eq!(
+                        size,
+                        (close - p) / 2,
+                        "subtree_size formula failed at {}",
+                        p
+                    );
+                }
             }
         }
     }

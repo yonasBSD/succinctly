@@ -661,10 +661,10 @@ impl<'a, W: AsRef<[u64]>> JsonFields<'a, W> {
     pub fn find(&self, name: &str) -> Option<StandardJson<'a, W>> {
         let mut fields = *self;
         while let Some((field, rest)) = fields.uncons() {
-            if let StandardJson::String(key) = field.key()
-                && key.as_str().ok()? == name
-            {
-                return Some(field.value());
+            if let StandardJson::String(key) = field.key() {
+                if key.as_str().ok()? == name {
+                    return Some(field.value());
+                }
             }
             fields = rest;
         }
