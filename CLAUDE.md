@@ -311,9 +311,15 @@ cargo bench --bench json_simd
 
 ### Key Takeaways for Future Optimizations
 
-1. **Profile first, optimize second** - Don't assume wider SIMD is better
+1. **Profile first, optimize second** - Don't assume wider/smarter is better
 2. **Understand bottlenecks** - Memory-bound vs compute-bound matters
 3. **Measure end-to-end** - Micro-benchmarks can be misleading
 4. **Consider architecture** - Zen 4 splits AVX-512, future Zen 5 may not
 5. **Amdahl's Law always wins** - Optimize what matters (the slow 80%), not what's easy (the fast 20%)
-6. **Remove failed optimizations** - Slower code creates technical debt (AVX-512 JSON removed after benchmarking)
+6. **Remove failed optimizations** - Slower code creates technical debt
+
+### Failed Optimizations
+
+See [docs/FAILED-OPTIMIZATIONS.md](docs/FAILED-OPTIMIZATIONS.md) for detailed analysis:
+- **AVX-512 JSON parser**: -7-17% slower (removed 2026-01-07)
+- **BMI1 mask iteration**: -25-31% slower (reverted 2026-01-07)
