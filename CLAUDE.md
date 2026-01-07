@@ -394,3 +394,6 @@ See [docs/FAILED-OPTIMIZATIONS.md](docs/FAILED-OPTIMIZATIONS.md) for detailed an
 - **AVX-512 JSON parser**: -7-17% slower (removed 2026-01-07)
 - **BMI1 mask iteration**: -25-31% slower (reverted 2026-01-07)
 - **BMI2 PDEP in BitWriter**: -71% slower (reverted 2026-01-07)
+- **PFSM Batched** (`pfsm_simd.rs`): -25% slower than production `pfsm_optimized` (2026-01-08)
+  - Was 40% faster than basic `pfsm.rs`, but `pfsm_optimized.rs` already solves this better
+  - Lesson: Always benchmark against production code, not just reference implementations

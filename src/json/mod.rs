@@ -15,8 +15,7 @@
 
 mod bit_writer;
 pub mod light;
-pub mod pfsm;
-pub mod pfsm_optimized;
+mod pfsm_optimized;
 pub mod pfsm_tables;
 pub mod simple;
 pub mod simple_light;

@@ -181,3 +181,53 @@ When searching for a position in a bitvector:
 5. **Bits**: Final scan within byte
 
 Each level has precomputed statistics enabling O(1) skip decision.
+
+## Critical Lesson: Benchmark Against Production
+
+**Problem** (2026-01-08): PFSM batched processing appeared to be a 40% improvement, but was actually 25% slower than production.
+
+### What Happened
+
+| Implementation | Throughput | Role |
+|----------------|------------|------|
+| `pfsm_optimized.rs` | 516-578 MiB/s | **Production** (deployed) |
+| `pfsm_simd.rs` (batched) | 398-461 MiB/s | New attempt |
+| `pfsm.rs` (basic) | 282-344 MiB/s | Reference implementation |
+
+The batched approach was benchmarked against `pfsm.rs` (basic reference), showing a 40% improvement. But `pfsm_optimized.rs` was already deployed and was 25% faster than the "optimization".
+
+### Why This Happened
+
+1. **Wrong baseline**: Compared against reference implementation, not production code
+2. **Batching overhead**: Array packing, bounds checks, manual state chain computation
+3. **Compiler already optimal**: Simple loops in `pfsm_optimized.rs` are perfectly optimized by LLVM
+4. **Solved wrong problem**: The "slow" path was already fixed by a different approach
+
+### The Rule
+
+**ALWAYS benchmark new optimizations against ALL existing implementations:**
+
+```rust
+// WRONG: Only compare against one baseline
+// Shows: batched is 40% faster than basic ✓
+group.bench_function("basic", |b| b.iter(|| pfsm::process(json)));
+group.bench_function("batched", |b| b.iter(|| pfsm_simd::process(json)));
+
+// RIGHT: Compare against everything, including production
+// Reveals: batched is 25% slower than production ✗
+group.bench_function("basic", |b| b.iter(|| pfsm::process(json)));
+group.bench_function("batched", |b| b.iter(|| pfsm_simd::process(json)));
+group.bench_function("production", |b| b.iter(|| pfsm_optimized::process(json)));
+```
+
+### Checklist Before Declaring "Optimization Success"
+
+- [ ] Benchmark includes current production implementation
+- [ ] New code is faster than production, not just faster than a reference
+- [ ] Multiple input sizes tested (small, medium, large)
+- [ ] Multiple patterns tested (if applicable)
+- [ ] End-to-end benchmark confirms improvement carries through
+
+### Result
+
+The "optimization" was marked as failed and not deployed. Production continues using `pfsm_optimized.rs`.

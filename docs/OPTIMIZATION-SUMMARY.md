@@ -503,7 +503,90 @@ self.current_word |= _pdep_u64(bits, shifted_mask);
 
 ---
 
-### 4. NEON Batched Popcount for Cumulative Index (ARM)
+### 4. PFSM Batched Processing (Portable)
+
+**Status**: ❌ SLOWER THAN PRODUCTION
+**File**: [src/json/pfsm_simd.rs](../src/json/pfsm_simd.rs)
+**Date**: 2026-01-08
+
+**Technique**: Process 4 bytes at a time with batched table lookups and direct bit writing.
+
+**Performance Results**:
+
+| Implementation | Throughput | vs Production |
+|----------------|------------|---------------|
+| `pfsm_optimized` (production) | 516-578 MiB/s | baseline |
+| `pfsm_simd` (batched) | 398-461 MiB/s | **-25% slower** |
+| `pfsm` (basic reference) | 282-344 MiB/s | -45% slower |
+
+**The Misleading Result**:
+- Batched was 40% faster than basic `pfsm.rs` ✓
+- But `pfsm_optimized.rs` was already deployed and is 25% faster than batched ✗
+
+**Why it failed**:
+1. **Wrong baseline**: Benchmarked against `pfsm.rs` (reference), not `pfsm_optimized.rs` (production)
+2. **Batching overhead**: Array packing, bounds checks, and manual state chain computation add latency
+3. **Compiler already optimal**: The simple loop in `pfsm_optimized.rs` is perfectly optimized by LLVM
+4. **No actual improvement**: The "optimization" solved a problem that was already solved better
+
+**Lesson**: Always benchmark against **production code**, not reference implementations. A 40% improvement over a slow baseline is worthless if production is already faster.
+
+**Action taken**: Marked as failed; production continues using `pfsm_optimized.rs`
+
+---
+
+### 5. NEON PFSM Shuffle Composition (ARM)
+
+**Status**: ❌ REVERTED
+**Date**: 2026-01-08
+
+**Technique**: Use NEON `vqtbl1q_u8` shuffle instruction to compose 4-state FSM transitions in parallel.
+
+**Implementation**:
+```rust
+// Pack 4 transition vectors into SIMD register
+let t_vec = vld1q_u8([t0, t1, t2, t3].as_ptr() as *const u8);
+
+// Attempt parallel state composition using shuffle
+// T01 = t0 ∘ t1 using vqtbl1q_u8
+// T0123 = T01 ∘ T23
+```
+
+**Performance Results**:
+
+| Implementation | Throughput | Result |
+|----------------|------------|--------|
+| Scalar PFSM | 343 MiB/s | baseline |
+| NEON Shuffle | 182 MiB/s | **-47% slower** |
+
+**Average Penalty**: **-47% (1.9x slower)**
+
+**Why it failed**:
+
+1. **Sequential phi extraction negates parallel gains**: After computing composed state transitions in parallel, phi values must still be extracted sequentially:
+   ```rust
+   // Even with parallel T composition, this loop is still sequential:
+   for i in 0..16 {
+       let state = states[i];  // Depends on previous iteration
+       phi_out[i] = PHI_TABLE[bytes[i]][state];
+   }
+   ```
+
+2. **Data dependency chain**: Each state depends on the previous state, creating a critical path that SIMD cannot break.
+
+3. **Overhead from SIMD setup**: Loading data into SIMD registers, performing shuffles, and extracting results adds latency.
+
+4. **Wrong optimization target**: The bottleneck is the sequential state chain, not the table lookups.
+
+**What Actually Worked**: The successful batched approach (see #12) eliminated the intermediate phi vector entirely and wrote bits directly, achieving +40% speedup without any SIMD instructions.
+
+**Lesson**: Parallel computation is useless if the results must be consumed sequentially. The dependency is inherent in the FSM structure - state[i] always depends on state[i-1].
+
+**Action taken**: Reverted NEON shuffle implementation, kept portable batched approach
+
+---
+
+### 6. NEON Batched Popcount for Cumulative Index (ARM)
 
 **Status**: ❌ REJECTED
 **Date**: January 2026
@@ -533,7 +616,7 @@ self.current_word |= _pdep_u64(bits, shifted_mask);
 
 ---
 
-### 4. NEON Movemask Call Reduction (ARM)
+### 7. NEON Movemask Call Reduction (ARM)
 
 **Status**: ❌ REJECTED
 **Date**: January 2026
@@ -567,7 +650,7 @@ self.current_word |= _pdep_u64(bits, shifted_mask);
 
 ---
 
-### 5. NEON Prefetching (ARM)
+### 8. NEON Prefetching (ARM)
 
 **Status**: ❌ REJECTED
 **Date**: January 2026
@@ -631,14 +714,16 @@ self.current_word |= _pdep_u64(bits, shifted_mask);
 | AVX-512 JSON Parser | **-10%** (avg) | x86_64 | ❌ Removed |
 | BMI1 Mask Iteration | **-26%** (avg) | x86_64 | ❌ Reverted |
 | BMI2 PDEP BitWriter | **-71%** (3.4x slower!) | x86_64 | ❌ Reverted |
+| PFSM Batched | **-25%** (vs production) | All | ❌ Not deployed |
+| NEON PFSM Shuffle | **-47%** | ARM | ❌ Reverted |
 | NEON Batched Popcount | **-25%** | ARM | ❌ Rejected |
 | NEON Movemask Batching | **0%** (no effect) | ARM | ❌ Rejected |
 | NEON Prefetching | **0%** (no effect) | ARM | ❌ Rejected |
 
-**Total Failed**: 6 attempts
-**Average Penalty**: -22% (for those with negative impact)
+**Total Failed**: 8 attempts
+**Average Penalty**: -26% (for those with negative impact)
 **Worst Failure**: BMI2 PDEP (-71%, 3.4x slower)
-**Lines Removed**: ~800 lines (AVX-512 JSON + BMI1 + BMI2)
+**Most Instructive**: PFSM Batched - benchmarked wrong baseline, appeared successful but wasn't
 
 ### Overall Impact
 
@@ -774,17 +859,19 @@ Before implementing an optimization, ask:
 
 ## Conclusion
 
-**Success Rate**: 9/14 attempted optimizations (64%)
+**Success Rate**: 10/18 attempted optimizations (56%)
 
 **Key Insight**: The most successful optimizations were algorithmic (cumulative index: 627x, RangeMin: 40x) rather than micro-optimizations. SIMD acceleration works best when:
 1. Targeting actual bottlenecks (AVX2 JSON: 78%)
 2. Compute-bound workloads (AVX512-VPOPCNTDQ: 5.2x)
 3. Simple, regular patterns that don't fight the compiler
 
+**Critical Lesson (PFSM Batched)**: Always benchmark against **production code**, not reference implementations. The batched PFSM showed a 40% improvement over the basic reference implementation, but was 25% slower than the already-deployed `pfsm_optimized`. This wasted effort could have been avoided by including the production implementation in the initial benchmarks.
+
 **The best optimization is often choosing the right algorithm, not the fanciest SIMD instructions.**
 
 ---
 
-**Last Updated**: 2026-01-07
+**Last Updated**: 2026-01-08
 **Maintained By**: Succinctly development team
 **Status**: All production optimizations deployed and tested

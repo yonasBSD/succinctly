@@ -2,7 +2,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::fs;
 use std::path::PathBuf;
-use succinctly::json::{pfsm, pfsm_tables::PfsmState, BitWriter};
 
 fn discover_json_files() -> Vec<(String, PathBuf, u64)> {
     let base_dir = PathBuf::from("data/bench/generated");
@@ -66,17 +65,7 @@ fn bench_end_to_end(c: &mut Criterion) {
         let mut group = c.benchmark_group("pfsm_end_to_end");
         group.throughput(Throughput::Bytes(file_size));
 
-        // Benchmark PFSM (with BMI2/AVX2 auto-dispatch)
-        group.bench_with_input(BenchmarkId::new("pfsm_auto", &name), json, |b, json| {
-            b.iter(|| {
-                let mut ib = BitWriter::new();
-                let mut bp = BitWriter::new();
-                pfsm::pfsm_process_chunk(black_box(json), PfsmState::InJson, &mut ib, &mut bp);
-                (ib.finish(), bp.finish())
-            });
-        });
-
-        // Benchmark standard scalar
+        // Benchmark standard scalar (uses pfsm_optimized internally)
         group.bench_with_input(
             BenchmarkId::new("standard_scalar", &name),
             json,
