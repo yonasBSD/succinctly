@@ -294,7 +294,11 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "simd",
+        target_arch = "x86_64",
+        not(feature = "portable-popcount")
+    ))]
     #[test]
     fn test_avx512_vpopcntdq_matches_scalar() {
         // Test AVX-512 VPOPCNTDQ implementation against scalar
@@ -328,7 +332,11 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "simd",
+        target_arch = "x86_64",
+        not(feature = "portable-popcount")
+    ))]
     #[test]
     fn test_avx512_edge_cases() {
         if !is_x86_feature_detected!("avx512vpopcntdq") {
