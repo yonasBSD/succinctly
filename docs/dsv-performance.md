@@ -30,10 +30,45 @@ Benchmarks measure:
 
 For a breakdown of where time is spent, see [DSV Profiling Analysis](dsv-profiling-analysis.md).
 
-Run with:
+## Running Benchmarks
+
+**End-to-end jq pipeline** (the results below):
 ```bash
+# Full row output (default)
 ./target/release/succinctly dev bench dsv
+
+# Single column selection (faster, less output)
+./target/release/succinctly dev bench dsv --query '.[0]'
+
+# Custom jq query
+./target/release/succinctly dev bench dsv --query 'select(.[0] | tonumber > 100) | .[1]'
 ```
+
+**Library API benchmarks** (direct DSV parsing/iteration):
+```bash
+# Build with native CPU optimizations
+RUSTFLAGS="-C target-cpu=native" cargo build --release --examples
+
+# Sequential iteration (full dataset scan)
+./target/release/examples/dsv_end_to_end_bench
+
+# Random access (single field per 100 rows)
+./target/release/examples/dsv_single_field_bench
+
+# Correctness validation
+./target/release/examples/dsv_correctness_test
+```
+
+**Library benchmark results** (AMD Ryzen 9 7950X, 10MB files):
+- **Sequential iteration**: 85-1676 MiB/s (varies by field density)
+- **Random access**: 5.8-10.7M ops/sec (93-173ns per field)
+- **Parse speed**: 1.3-3.7 GB/s (SIMD with BMI2+AVX2)
+
+**CLI benchmark: Query comparison** (strings 10MB):
+- **Full output** (`--query '.'`): 80.2ms (124.7 MiB/s)
+- **Single column** (`--query '.[0]'`): 62.4ms (160.3 MiB/s) - **1.29x faster**
+
+Single column selection is faster due to reduced JSON serialization overhead, while still including full DSV parsing and iteration.
 
 ---
 

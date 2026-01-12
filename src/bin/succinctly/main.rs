@@ -153,6 +153,10 @@ struct BenchDsvArgs {
     /// Delimiter character for DSV files (default: comma)
     #[arg(long, default_value = ",")]
     delimiter: char,
+
+    /// Query to run (default: "." for full output, or ".[0]" for first column)
+    #[arg(long, default_value = ".")]
+    query: String,
 }
 
 /// Generate synthetic JSON files for benchmarking and testing
@@ -725,6 +729,7 @@ fn run_dsv_benchmark(args: BenchDsvArgs) -> Result<()> {
         warmup_runs: args.warmup,
         benchmark_runs: args.runs,
         delimiter: args.delimiter,
+        query: args.query,
     };
 
     // Use default output paths if not specified

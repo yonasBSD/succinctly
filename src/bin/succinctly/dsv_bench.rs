@@ -41,6 +41,7 @@ pub struct BenchConfig {
     pub warmup_runs: usize,
     pub benchmark_runs: usize,
     pub delimiter: char,
+    pub query: String,
 }
 
 impl Default for BenchConfig {
@@ -71,6 +72,7 @@ impl Default for BenchConfig {
             warmup_runs: 1,
             benchmark_runs: 3,
             delimiter: ',',
+            query: ".".into(),
         }
     }
 }
@@ -208,7 +210,12 @@ fn benchmark_file(file_path: &Path, config: &BenchConfig) -> Result<BenchmarkRes
 
     // Warmup runs
     for _ in 0..config.warmup_runs {
-        let _ = run_succinctly(file_path, &config.succinctly_binary, config.delimiter);
+        let _ = run_succinctly(
+            file_path,
+            &config.succinctly_binary,
+            config.delimiter,
+            &config.query,
+        );
     }
 
     // Benchmark runs for succinctly
@@ -218,6 +225,7 @@ fn benchmark_file(file_path: &Path, config: &BenchConfig) -> Result<BenchmarkRes
             file_path,
             &config.succinctly_binary,
             config.delimiter,
+            &config.query,
         )?);
     }
 
@@ -244,7 +252,12 @@ fn select_median(mut results: Vec<ToolResult>) -> ToolResult {
 }
 
 /// Run succinctly jq with DSV input and measure
-fn run_succinctly(file_path: &Path, binary: &Path, delimiter: char) -> Result<ToolResult> {
+fn run_succinctly(
+    file_path: &Path,
+    binary: &Path,
+    delimiter: char,
+    query: &str,
+) -> Result<ToolResult> {
     let delimiter_str = delimiter.to_string();
     run_command_with_timing(
         binary.to_str().unwrap(),
@@ -252,7 +265,7 @@ fn run_succinctly(file_path: &Path, binary: &Path, delimiter: char) -> Result<To
             "jq",
             "--input-dsv",
             &delimiter_str,
-            ".",
+            query,
             file_path.to_str().unwrap(),
         ],
     )

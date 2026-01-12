@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::fs;
-use succinctly::dsv::{build_index, DsvConfig, DsvRows};
+use succinctly::dsv::{build_index, Dsv, DsvConfig, DsvRows};
 
 fn profile_dsv_parsing(c: &mut Criterion) {
     let sizes = vec![
@@ -63,5 +63,61 @@ fn profile_dsv_parsing(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, profile_dsv_parsing);
+fn profile_dsv_random_access(c: &mut Criterion) {
+    let sizes = vec![
+        ("1mb", "data/bench/generated/dsv/strings/1mb.csv"),
+        ("10mb", "data/bench/generated/dsv/strings/10mb.csv"),
+    ];
+
+    let config = DsvConfig::csv();
+
+    for (name, path) in sizes {
+        if let Ok(data) = fs::read(path) {
+            let dsv = Dsv::parse_with_config(&data, &config);
+            let row_count = dsv.row_count();
+
+            // Sample every 100th row
+            let sample_rows: Vec<usize> = (0..row_count).step_by(100).collect();
+            let sample_count = sample_rows.len();
+
+            let mut group = c.benchmark_group(format!("dsv_random_access_{}", name));
+            group.throughput(Throughput::Elements(sample_count as u64));
+
+            // Benchmark: Random access to first field of sampled rows
+            group.bench_function("goto_row_get_field", |b| {
+                b.iter(|| {
+                    let mut total_bytes = 0;
+                    for &row_idx in &sample_rows {
+                        if let Some(row) = black_box(&dsv).row(black_box(row_idx)) {
+                            if let Some(field) = row.get(0) {
+                                total_bytes += black_box(field).len();
+                            }
+                        }
+                    }
+                    black_box(total_bytes)
+                })
+            });
+
+            // Benchmark: Random access with field iteration
+            group.bench_function("goto_row_iterate_fields", |b| {
+                b.iter(|| {
+                    let mut total_fields = 0;
+                    for &row_idx in &sample_rows {
+                        if let Some(row) = black_box(&dsv).row(black_box(row_idx)) {
+                            for field in row.fields() {
+                                black_box(field);
+                                total_fields += 1;
+                            }
+                        }
+                    }
+                    black_box(total_fields)
+                })
+            });
+
+            group.finish();
+        }
+    }
+}
+
+criterion_group!(benches, profile_dsv_parsing, profile_dsv_random_access);
 criterion_main!(benches);

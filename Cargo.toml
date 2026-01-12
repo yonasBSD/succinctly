@@ -117,3 +117,7 @@ harness = false
 [[bench]]
 name = "jq_comparison"
 harness = false
+
+[[bench]]
+name = "dsv_profile"
+harness = false
