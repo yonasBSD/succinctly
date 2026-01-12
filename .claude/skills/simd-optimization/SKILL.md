@@ -7,6 +7,8 @@ description: SIMD optimization patterns and learnings for x86_64 and ARM. Use wh
 
 Patterns and learnings from SIMD optimization in this codebase.
 
+**Comprehensive documentation**: See [docs/optimisations/simd.md](../../../docs/optimisations/simd.md) for full details on SIMD techniques.
+
 ## Key Insight: Wider SIMD != Automatically Faster
 
 Two AVX-512 optimizations implemented with dramatically different results:
@@ -171,3 +173,10 @@ cargo bench --bench json_simd
 4. **Consider architecture** - Zen 4 splits AVX-512, future Zen 5 may not
 5. **Amdahl's Law always wins** - Optimize what matters (the slow 80%)
 6. **Remove failed optimizations** - Slower code creates technical debt
+
+## See Also
+
+- [docs/optimisations/simd.md](../../../docs/optimisations/simd.md) - Comprehensive SIMD techniques reference
+- [docs/optimisations/cache-memory.md](../../../docs/optimisations/cache-memory.md) - Memory-bound vs compute-bound analysis
+- [docs/optimisations/branchless.md](../../../docs/optimisations/branchless.md) - SIMD masking techniques
+- [docs/archive/OPTIMIZATION-SUMMARY.md](../../../docs/archive/OPTIMIZATION-SUMMARY.md) - Historical optimization record

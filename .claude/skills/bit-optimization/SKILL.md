@@ -7,6 +7,11 @@ description: Bit-level optimization patterns for succinct data structures. Use w
 
 Learnings from optimizing succinct data structure operations.
 
+**Comprehensive documentation**: See [docs/optimisations/](../../../docs/optimisations/) for full technique reference:
+- [bit-manipulation.md](../../../docs/optimisations/bit-manipulation.md) - Popcount, CTZ, PDEP/PEXT
+- [lookup-tables.md](../../../docs/optimisations/lookup-tables.md) - Byte-level lookup tables
+- [hierarchical-structures.md](../../../docs/optimisations/hierarchical-structures.md) - Rank/select indices
+
 ## Byte-Level Lookup Tables
 
 **When to use**: Scanning bits one-at-a-time is slow (64 iterations per word). Use 256-entry lookup tables to process 8 bits at once.
@@ -180,3 +185,11 @@ group.bench_function("production", |b| b.iter(|| pfsm_optimized::process(json)))
 - [ ] Multiple input sizes tested (small, medium, large)
 - [ ] Multiple patterns tested (if applicable)
 - [ ] End-to-end benchmark confirms improvement carries through
+
+## See Also
+
+- [docs/optimisations/bit-manipulation.md](../../../docs/optimisations/bit-manipulation.md) - Bit manipulation techniques
+- [docs/optimisations/lookup-tables.md](../../../docs/optimisations/lookup-tables.md) - Lookup table patterns
+- [docs/optimisations/hierarchical-structures.md](../../../docs/optimisations/hierarchical-structures.md) - Rank/select structures
+- [docs/optimisations/access-patterns.md](../../../docs/optimisations/access-patterns.md) - Sequential vs random access
+- [docs/archive/OPTIMIZATION-SUMMARY.md](../../../docs/archive/OPTIMIZATION-SUMMARY.md) - Historical optimization record

@@ -145,12 +145,12 @@ cargo test
 
 ## Key Documentation
 
-| Document                                                      | Purpose                              |
-|---------------------------------------------------------------|--------------------------------------|
-| [RELEASE.md](RELEASE.md)                                      | Release process and checklist        |
-| [docs/optimization-summary.md](docs/optimization-summary.md)  | Complete optimization record         |
-| [docs/jq-comparison.md](docs/jq-comparison.md)                | JSON jq benchmark results            |
-| [docs/dsv-performance.md](docs/dsv-performance.md)            | DSV input performance benchmarks     |
+| Document                                                          | Purpose                              |
+|-------------------------------------------------------------------|--------------------------------------|
+| [RELEASE.md](RELEASE.md)                                          | Release process and checklist        |
+| [docs/optimisations/](docs/optimisations/)                        | Optimisation techniques reference    |
+| [docs/jq-comparison.md](docs/jq-comparison.md)                    | JSON jq benchmark results            |
+| [docs/dsv-performance.md](docs/dsv-performance.md)                | DSV input performance benchmarks     |
 
 ## Performance Summary
 
@@ -164,23 +164,19 @@ cargo test
 
 To regenerate: `./target/release/succinctly dev bench jq`
 
-### Key Optimization Learnings
+### Optimisation Techniques
 
-**What worked:**
-- PFSM table-driven JSON parser: 40-77% faster than scalar
-- AVX-512 VPOPCNTDQ: 5.2x faster (compute-bound)
-- Byte-level lookup tables: 50-90% speedup for BP operations
-- **DSV lightweight index: 5-9x faster iteration** (792-1331 MiB/s vs 145-150 MiB/s)
-  - Replaced full BitVec (3-level RankDirectory + SelectIndex) with simple cumulative rank arrays
-  - Better cache behavior, same memory overhead (~3-4%)
+For detailed documentation on optimisation techniques used in this project, see [docs/optimisations/](docs/optimisations/):
 
-**What failed:**
-- AVX-512 JSON parser: 7-17% slower (memory-bound) - removed
-- BMI2 PDEP in BitWriter: 71% slower - reverted
-- PFSM batched: 25% slower than production - not deployed
+| Category | Document | Key Techniques |
+|----------|----------|----------------|
+| Bit-level | [bit-manipulation.md](docs/optimisations/bit-manipulation.md) | Popcount, CTZ, PDEP/PEXT |
+| SIMD | [simd.md](docs/optimisations/simd.md) | AVX2, AVX-512, NEON |
+| Memory | [cache-memory.md](docs/optimisations/cache-memory.md) | Alignment, prefetching |
+| Data structures | [hierarchical-structures.md](docs/optimisations/hierarchical-structures.md) | Rank/select indices |
+| Parsing | [state-machines.md](docs/optimisations/state-machines.md) | PFSM, lookup tables |
 
-**Key insights**:
-- Wider SIMD != automatically faster. Profile on target hardware, benchmark against production code.
-- Simpler data structures often outperform complex ones due to cache behavior.
-
-See `.claude/skills/simd-optimization/SKILL.md` and `.claude/skills/bit-optimization/SKILL.md` for details.
+**Key insights** (see [docs/optimisations/README.md](docs/optimisations/README.md) for full details):
+- Wider SIMD != automatically faster (AVX-512 JSON was 10% slower than AVX2)
+- Algorithmic improvements beat micro-optimisations (cumulative index: 627x speedup)
+- Simpler data structures often outperform complex ones due to cache behaviour

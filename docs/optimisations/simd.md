@@ -1,0 +1,344 @@
+# SIMD (Single Instruction, Multiple Data)
+
+SIMD enables parallel processing of multiple data elements with a single instruction. Modern CPUs provide various SIMD extensions with different vector widths and capabilities.
+
+## Overview
+
+| Extension    | Width   | Platform | Key Instructions           | Best For              |
+|--------------|---------|----------|----------------------------|-----------------------|
+| SSE2         | 128-bit | x86_64   | Basic vector ops           | Baseline              |
+| SSE4.2       | 128-bit | x86_64   | PCMPISTRI, POPCNT          | String matching       |
+| AVX2         | 256-bit | x86_64   | Wide vectors, gather       | Memory-bound work     |
+| AVX-512      | 512-bit | x86_64   | VPOPCNTDQ, masked ops      | Compute-bound only    |
+| BMI2         | 64-bit  | x86_64   | PDEP, PEXT                 | Bit manipulation      |
+| NEON         | 128-bit | ARM64    | TBL, CNT, parallel ops     | ARM baseline          |
+
+---
+
+## x86_64 SIMD Hierarchy
+
+### SSE2 (Baseline)
+
+Available on all x86_64 CPUs. 128-bit vectors (16 bytes).
+
+```rust
+use core::arch::x86_64::*;
+
+unsafe fn classify_sse2(data: &[u8; 16]) -> u16 {
+    let chunk = _mm_loadu_si128(data.as_ptr() as *const __m128i);
+
+    // Compare for specific characters
+    let quotes = _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'"' as i8));
+    let backslash = _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\\' as i8));
+
+    // Extract to bitmask
+    let mask = _mm_or_si128(quotes, backslash);
+    _mm_movemask_epi8(mask) as u16
+}
+```
+
+**Key instructions**:
+- `_mm_cmpeq_epi8`: Compare 16 bytes in parallel
+- `_mm_movemask_epi8`: Extract comparison results to 16-bit mask
+- `_mm_loadu_si128`: Unaligned 128-bit load
+
+### SSE4.2
+
+Adds string processing instructions.
+
+```rust
+use core::arch::x86_64::*;
+
+unsafe fn find_structural_sse42(data: &[u8; 16]) -> u16 {
+    let chunk = _mm_loadu_si128(data.as_ptr() as *const __m128i);
+
+    // Find any of these characters: {}[]:,"
+    let chars = _mm_setr_epi8(
+        b'{' as i8, b'}' as i8, b'[' as i8, b']' as i8,
+        b':' as i8, b',' as i8, b'"' as i8, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    );
+
+    _mm_cmpistrm(
+        chars, chunk,
+        _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_ANY | _SIDD_BIT_MASK
+    ) as u16
+}
+```
+
+**Result**: 38% faster character classification vs SSE2.
+
+### AVX2
+
+256-bit vectors (32 bytes). Best for memory-bound workloads.
+
+```rust
+use core::arch::x86_64::*;
+
+unsafe fn classify_avx2(data: &[u8; 32]) -> u32 {
+    let chunk = _mm256_loadu_si256(data.as_ptr() as *const __m256i);
+
+    // Character classification
+    let quotes = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'"' as i8));
+    let colon = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b':' as i8));
+    let comma = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b',' as i8));
+    // ... more characters ...
+
+    let structural = _mm256_or_si256(quotes, _mm256_or_si256(colon, comma));
+    _mm256_movemask_epi8(structural) as u32
+}
+```
+
+**Result in succinctly**: 78% faster JSON parsing vs SSE2.
+
+### AVX-512
+
+512-bit vectors. **Use with caution** - not always faster.
+
+```rust
+use core::arch::x86_64::*;
+
+#[target_feature(enable = "avx512vpopcntdq")]
+unsafe fn popcount_avx512(words: &[u64; 8]) -> u64 {
+    let data = _mm512_loadu_si512(words.as_ptr() as *const i32);
+    let counts = _mm512_popcnt_epi64(data);
+    _mm512_reduce_add_epi64(counts) as u64
+}
+```
+
+**When AVX-512 wins**: Compute-bound operations like popcount (5.2x faster).
+
+**When AVX-512 loses**: Memory-bound operations like JSON parsing (7-17% slower).
+
+**Why it can be slower**:
+1. Zen 4 splits AVX-512 into 2×256-bit micro-ops
+2. Higher power consumption causes frequency throttling
+3. Memory bandwidth is the bottleneck, not compute
+
+---
+
+## ARM NEON
+
+128-bit vectors, always available on ARM64.
+
+### Basic Operations
+
+```rust
+use core::arch::aarch64::*;
+
+unsafe fn classify_neon(data: &[u8; 16]) -> u16 {
+    let chunk = vld1q_u8(data.as_ptr());
+
+    // Character comparisons
+    let quotes = vceqq_u8(chunk, vdupq_n_u8(b'"'));
+    let backslash = vceqq_u8(chunk, vdupq_n_u8(b'\\'));
+
+    let mask = vorrq_u8(quotes, backslash);
+    neon_movemask(mask)
+}
+```
+
+### NEON Movemask (Custom)
+
+NEON lacks `movemask`. Use multiplication trick:
+
+```rust
+unsafe fn neon_movemask(mask: uint8x16_t) -> u16 {
+    // Extract high bit of each byte
+    let high_bits = vshrq_n_u8(mask, 7);
+
+    // Pack into u64 using magic multiplication
+    let magic: u64 = 0x0102040810204080;
+
+    let lo = vget_low_u8(high_bits);
+    let hi = vget_high_u8(high_bits);
+
+    let lo_sum = vaddv_u8(vmul_u8(lo, vcreate_u8(magic)));
+    let hi_sum = vaddv_u8(vmul_u8(hi, vcreate_u8(magic)));
+
+    ((hi_sum as u16) << 8) | (lo_sum as u16)
+}
+```
+
+**Result**: 10-18% improvement over variable shifts.
+
+### NEON Table Lookup (vqtbl1q_u8)
+
+16 parallel lookups from a 16-entry table:
+
+```rust
+unsafe fn nibble_classify(chars: uint8x16_t) -> uint8x16_t {
+    let lo_nibble = vandq_u8(chars, vdupq_n_u8(0x0F));
+    let hi_nibble = vshrq_n_u8(chars, 4);
+
+    let lo_table = vld1q_u8(LO_TABLE.as_ptr());
+    let hi_table = vld1q_u8(HI_TABLE.as_ptr());
+
+    let lo_result = vqtbl1q_u8(lo_table, lo_nibble);
+    let hi_result = vqtbl1q_u8(hi_table, hi_nibble);
+
+    vandq_u8(lo_result, hi_result)
+}
+```
+
+**Result**: Replaces 13 comparisons with 6 operations.
+
+### NEON Popcount
+
+```rust
+unsafe fn popcount_neon(data: &[u8; 64]) -> u32 {
+    let mut sum = vdupq_n_u8(0);
+
+    for chunk in data.chunks_exact(16) {
+        let v = vld1q_u8(chunk.as_ptr());
+        sum = vaddq_u8(sum, vcntq_u8(v));
+    }
+
+    // Horizontal sum with widening to avoid overflow
+    let sum16 = vpaddlq_u8(sum);
+    let sum32 = vpaddlq_u16(sum16);
+    let sum64 = vpaddlq_u32(sum32);
+
+    vgetq_lane_u64(sum64, 0) as u32 + vgetq_lane_u64(sum64, 1) as u32
+}
+```
+
+---
+
+## Runtime Feature Detection
+
+### x86_64
+
+```rust
+fn select_simd_impl() -> impl Fn(&[u8]) -> Vec<u64> {
+    if is_x86_feature_detected!("avx2") {
+        avx2_impl
+    } else if is_x86_feature_detected!("sse4.2") {
+        sse42_impl
+    } else {
+        sse2_impl
+    }
+}
+```
+
+**Dispatch order**: AVX-512 VPOPCNTDQ → AVX2+BMI2 → AVX2 → SSE4.2 → SSE2
+
+### ARM64
+
+NEON is always available - no runtime detection needed:
+
+```rust
+#[cfg(target_arch = "aarch64")]
+fn process(data: &[u8]) -> Vec<u64> {
+    neon_impl(data)
+}
+```
+
+---
+
+## SIMD Patterns
+
+### Character Classification
+
+Process N bytes, produce N-bit mask:
+
+```rust
+// Input:  ['{', 'a', '"', 'b', '}', ...]
+// Output: [1,   0,   1,   0,   1,   ...]  (structural chars)
+```
+
+**Pattern**:
+1. Load vector
+2. Compare against each target character
+3. OR results together
+4. Extract to bitmask
+
+### Prefix Operations
+
+Compute cumulative XOR/sum across vector:
+
+```rust
+fn prefix_xor(mut y: u64) -> u64 {
+    y ^= y << 1;
+    y ^= y << 2;
+    y ^= y << 4;
+    y ^= y << 8;
+    y ^= y << 16;
+    y ^= y << 32;
+    y
+}
+```
+
+**Application**: Quote state tracking in CSV/JSON parsing.
+
+### Batch Processing
+
+Process chunks larger than vector width:
+
+```rust
+// Process 64 bytes using 2x AVX2 (32-byte) loads
+unsafe fn process_64_avx2(data: &[u8; 64]) -> u64 {
+    let lo = _mm256_loadu_si256(data[0..32].as_ptr() as *const __m256i);
+    let hi = _mm256_loadu_si256(data[32..64].as_ptr() as *const __m256i);
+
+    let lo_mask = classify_avx2(lo);
+    let hi_mask = classify_avx2(hi);
+
+    (lo_mask as u64) | ((hi_mask as u64) << 32)
+}
+```
+
+---
+
+## Failed SIMD Optimizations
+
+### AVX-512 JSON Parser (-10% penalty)
+
+**Attempted**: Process 64 bytes per iteration with AVX-512.
+**Result**: 7-17% slower than AVX2.
+**Reason**: Memory-bound workload doesn't benefit from wider vectors.
+
+### BMI1 Mask Iteration (-26% penalty)
+
+**Attempted**: Use TZCNT/BLSR to skip non-structural bytes.
+**Result**: 9-31% slower.
+**Reason**: Optimized <1% of execution time; state machine needs all bytes.
+
+### NEON Batched Popcount (-25% penalty)
+
+**Attempted**: Batch popcount 8 words for cumulative index.
+**Result**: 1.33x slower.
+**Reason**: Prefix sum is inherently sequential; extraction overhead dominates.
+
+---
+
+## Usage in Succinctly
+
+| SIMD Level | Location                | Purpose                  | Speedup |
+|------------|-------------------------|--------------------------|---------|
+| AVX-512    | `bits/popcount.rs`      | Parallel popcount        | 5.2x    |
+| AVX2       | `json/simd/avx2.rs`     | JSON char classification | 1.78x   |
+| AVX2+BMI2  | `dsv/simd/bmi2.rs`      | DSV quote masking        | 10x     |
+| SSE4.2     | `json/simd/sse42.rs`    | String matching          | 1.38x   |
+| NEON       | `json/simd/neon.rs`     | ARM JSON parsing         | 1.11x   |
+| NEON       | `dsv/simd/neon.rs`      | ARM DSV parsing          | 1.8x    |
+
+---
+
+## Key Lessons
+
+1. **Wider isn't always faster**: AVX-512 loses on memory-bound tasks
+2. **Profile the bottleneck**: Don't optimize 1% of runtime
+3. **Memory bandwidth limits**: 32 bytes/cycle is often the ceiling
+4. **Runtime dispatch is cheap**: One branch vs. many iterations
+5. **ARM NEON is different**: No movemask; use multiplication trick
+
+---
+
+## References
+
+- Intel "Intrinsics Guide": https://www.intel.com/content/www/us/en/docs/intrinsics-guide
+- ARM "NEON Intrinsics Reference": https://developer.arm.com/architectures/instruction-sets/intrinsics
+- Lemire, D. "Parsing Gigabytes of JSON per Second" (2019)
+- Langdale, G. & Lemire, D. "simdjson: Parsing Gigabytes of JSON per Second" (2019)
+- Fog, A. "Instruction Tables" - Latency/throughput data
+- Mytkowicz, T. et al. "Data-Parallel Finite-State Machines" (2014)
