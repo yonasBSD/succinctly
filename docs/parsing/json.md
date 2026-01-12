@@ -269,6 +269,51 @@ enum StandardJson<'a> {
 
 ---
 
+## Position Location (jq-locate)
+
+The `locate` module enables reverse lookup: given a byte offset or line/column position, find the jq expression that navigates to that location.
+
+### Algorithm
+
+1. **Position resolution**: Convert line/column to byte offset using a newline index
+2. **Node lookup**: Use `ib_rank1(offset)` to find the containing structural element
+3. **Path construction**: Walk up using `bp.parent()`, collecting path components
+
+### NewlineIndex
+
+Fast line/column to offset conversion using rank/select on newline positions:
+
+```rust
+use succinctly::json::locate::NewlineIndex;
+
+let text = b"line1\nline2\nline3";
+let index = NewlineIndex::build(text);
+
+// Line/column are 1-indexed
+assert_eq!(index.to_offset(2, 1), Some(6));  // Start of line 2
+assert_eq!(index.to_line_column(6), (2, 1)); // Reverse lookup
+```
+
+Handles all line ending conventions: Unix (LF), Windows (CRLF), and classic Mac (CR).
+
+### CLI Usage
+
+```bash
+# By byte offset (0-indexed)
+succinctly jq-locate file.json --offset 42
+# Output: .users[0].name
+
+# By line/column (1-indexed)
+succinctly jq-locate file.json --line 5 --column 10
+# Output: .data.items[2]
+
+# Detailed JSON output
+succinctly jq-locate file.json --offset 42 --format json
+# Output: {"expression": ".users[0].name", "type": "string", "byte_range": [42, 49]}
+```
+
+---
+
 ## File Locations
 
 | File | Purpose |
@@ -278,6 +323,7 @@ enum StandardJson<'a> {
 | `src/json/pfsm_optimized.rs` | Single-pass PFSM processor |
 | `src/json/standard.rs` | 4-state cursor algorithm |
 | `src/json/light.rs` | JsonIndex, JsonCursor APIs |
+| `src/json/locate.rs` | Path location (jq-locate CLI) |
 | `src/json/bit_writer.rs` | BitWriter implementation |
 | `src/json/simd/avx2.rs` | AVX2 classification |
 | `src/json/simd/neon.rs` | NEON nibble lookup |

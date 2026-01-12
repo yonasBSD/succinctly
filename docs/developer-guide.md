@@ -26,6 +26,7 @@ src/
 ├── binary.rs           # Binary I/O utilities
 ├── json/               # JSON semi-indexing
 │   ├── mod.rs          # Public API
+│   ├── locate.rs       # Path location (jq-locate)
 │   ├── pfsm_optimized.rs  # Table-driven parser (default)
 │   ├── pfsm_tables.rs     # State machine tables
 │   ├── standard.rs        # Standard cursor implementation
@@ -45,7 +46,8 @@ src/
     └── succinctly/
         ├── main.rs
         ├── generators.rs
-        └── jq_runner.rs
+        ├── jq_runner.rs
+        └── jq_locate.rs
 ```
 
 ### Public API

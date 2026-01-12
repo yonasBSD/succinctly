@@ -250,6 +250,11 @@ cargo build --release --features cli
 ./target/release/succinctly jq -r '.users[] | [.name, .age] | @csv' data.json
 ./target/release/succinctly jq -r '.users[] | [.name, .age] | @tsv' data.json
 ./target/release/succinctly jq -r '.users[] | [.name, .age] | @dsv("|")' data.json
+
+# Find jq expression for a position in JSON (useful for editor integration)
+./target/release/succinctly jq-locate input.json --offset 42      # by byte offset (0-indexed)
+./target/release/succinctly jq-locate input.json --line 5 --column 10  # by line/column (1-indexed)
+./target/release/succinctly jq-locate input.json --offset 42 --format json  # detailed output
 ```
 
 ## Architecture

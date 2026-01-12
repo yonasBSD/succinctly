@@ -48,6 +48,8 @@ cargo build --release --features cli
 ./target/release/succinctly jq '.users[].name' input.json
 ./target/release/succinctly jq -r '.users[] | [.name, .age] | @csv' input.json
 ./target/release/succinctly jq -r '.users[] | [.name, .age] | @dsv("|")' input.json
+./target/release/succinctly jq-locate input.json --offset 42
+./target/release/succinctly jq-locate input.json --line 5 --column 10
 ./target/release/succinctly dev bench jq
 ```
 
