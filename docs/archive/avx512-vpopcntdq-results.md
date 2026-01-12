@@ -6,7 +6,7 @@ Successfully implemented AVX512-VPOPCNTDQ with runtime dispatch, achieving **5.2
 
 ## Implementation
 
-- **File**: [src/popcount.rs](../src/popcount.rs)
+- **File**: [src/bits/popcount.rs](../../src/bits/popcount.rs)
 - **Function**: `popcount_words_avx512vpopcntdq()`
 - **Instruction**: `_mm512_popcnt_epi64` - counts bits in 8 u64 words (512 bits) in parallel
 - **Dispatch**: Runtime CPU detection via `is_x86_feature_detected!("avx512vpopcntdq")`

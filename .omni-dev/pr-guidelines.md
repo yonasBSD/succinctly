@@ -466,10 +466,6 @@ curl -X POST http://localhost:3000/auth/oauth/initiate \
   -d '{"provider": "google"}'
 ```
 
-## Screenshots
-![OAuth2 Login Flow](screenshots/oauth2-login.png)
-![Account Linking Interface](screenshots/account-linking.png)
-
 ## Checklist
 - [x] My code follows the project's style guidelines
 - [x] I have performed a self-review of my own code

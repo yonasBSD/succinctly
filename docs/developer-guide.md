@@ -293,7 +293,7 @@ fn rank1(&self, i: usize) -> usize;
 
 ## Release Process
 
-See [RELEASE.md](RELEASE.md) for detailed release instructions.
+See [RELEASE.md](../RELEASE.md) for detailed release instructions.
 
 Quick summary:
 1. Update version in `Cargo.toml`

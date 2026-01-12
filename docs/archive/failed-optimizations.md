@@ -29,7 +29,7 @@ This document records optimization attempts that failed, providing valuable less
 
 **Lesson**: Wider SIMD ≠ automatically faster. Memory-bound workloads don't benefit from wider registers.
 
-**Documentation**: [docs/AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md)
+**Documentation**: [avx512-json-results.md](avx512-json-results.md)
 
 ---
 
@@ -201,8 +201,8 @@ If you can't answer these confidently, **don't optimize**.
 
 ## References
 
-- AVX-512 detailed analysis: [AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md)
-- AVX-512 popcount success: [AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md)
+- AVX-512 detailed analysis: [avx512-json-results.md](avx512-json-results.md)
+- AVX-512 popcount success: [avx512-vpopcntdq-results.md](avx512-vpopcntdq-results.md)
 - BMI1 detailed analysis: `/tmp/bmi1_failure_analysis.md` (temporary)
 - Optimization opportunities (updated): [optimization-opportunities.md](optimization-opportunities.md)
 

@@ -96,9 +96,9 @@ std = []      # ← Exists but must be explicitly enabled
 **Key Learning**: Wider SIMD ≠ automatically faster. JSON parsing is memory-bound with sequential state machine dependencies. Failed optimizations should be removed, not kept as technical debt.
 
 **Documentation**:
-- [AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md) - 5.2x speedup details
-- [AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md) - Why it was slower and removed
-- [PERFORMANCE-OUTCOMES-SUMMARY.md](PERFORMANCE-OUTCOMES-SUMMARY.md)
+- [avx512-vpopcntdq-results.md](avx512-vpopcntdq-results.md) - 5.2x speedup details
+- [avx512-json-results.md](avx512-json-results.md) - Why it was slower and removed
+- [performance-outcomes-summary.md](performance-outcomes-summary.md)
 
 ---
 
@@ -243,7 +243,7 @@ fn should_use_bmi2() -> bool {
 
 **Why Limited**: Amdahl's Law - optimizing 1.6% of work yields ~1% overall improvement
 
-**Documentation**: See [AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md)
+**Documentation**: See [avx512-vpopcntdq-results.md](avx512-vpopcntdq-results.md)
 
 ---
 

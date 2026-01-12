@@ -195,7 +195,7 @@ Comparison of `succinctly jq .` vs `jq .` for formatting/printing JSON files.
 | **x86_64** | Popcount (AVX-512 VPOPCNTDQ) | 96.8 GiB/s |  5.2x vs scalar |
 | **ARM**    | NEON JSON (string-heavy)     |  3.7 GiB/s | 1.69x vs scalar |
 
-See [docs/rust-json-comparison.md](docs/rust-json-comparison.md), [docs/jq-comparison.md](docs/jq-comparison.md), and [docs/optimization-summary.md](docs/optimization-summary.md) for detailed benchmarks.
+See [docs/rust-json-comparison.md](docs/rust-json-comparison.md), [docs/jq-comparison.md](docs/jq-comparison.md), and [docs/archive/OPTIMIZATION-SUMMARY.md](docs/archive/OPTIMIZATION-SUMMARY.md) for detailed benchmarks.
 
 ## Feature Flags
 
@@ -291,7 +291,7 @@ The library uses runtime CPU feature detection to select the best implementation
 - [docs/rust-json-comparison.md](docs/rust-json-comparison.md) - Comparison with Rust JSON parsers
 - [docs/jq-comparison.md](docs/jq-comparison.md) - Comparison with system jq command
 - [docs/dsv-performance.md](docs/dsv-performance.md) - DSV (CSV/TSV) input performance benchmarks
-- [docs/optimization-summary.md](docs/optimization-summary.md) - Performance optimization history
+- [docs/archive/OPTIMIZATION-SUMMARY.md](docs/archive/OPTIMIZATION-SUMMARY.md) - Performance optimization history
 
 ## Contributing
 

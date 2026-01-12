@@ -534,4 +534,4 @@ match parse(".invalid[") {
 
 - **Documentation**: [docs.rs/succinctly](https://docs.rs/succinctly)
 - **Issues**: [GitHub Issues](https://github.com/rust-works/succinctly/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/rust-works/succinctly/discussions)
+- **Questions**: [GitHub Issues](https://github.com/rust-works/succinctly/issues)

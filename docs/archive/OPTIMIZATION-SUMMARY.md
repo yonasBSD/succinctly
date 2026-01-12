@@ -23,7 +23,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 1. AVX2 SIMD JSON Parser (x86_64)
 
 **Status**: ✅ IMPLEMENTED & DEPLOYED
-**File**: [src/json/simd/avx2.rs](../src/json/simd/avx2.rs)
+**File**: [src/json/simd/avx2.rs](../../src/json/simd/avx2.rs)
 **Date**: 2025
 
 **Technique**: Process 32 bytes per iteration using AVX2 SIMD instructions for character classification.
@@ -52,7 +52,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 2. AVX512-VPOPCNTDQ Popcount (x86_64)
 
 **Status**: ✅ IMPLEMENTED & DEPLOYED
-**File**: [src/popcount.rs](../src/popcount.rs)
+**File**: [src/bits/popcount.rs](../../src/bits/popcount.rs)
 **Date**: January 2026
 
 **Technique**: Parallel popcount of 8 u64 words (512 bits) using `_mm512_popcnt_epi64`.
@@ -86,7 +86,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 3. SSE4.2 with PCMPISTRI (x86_64)
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/json/simd/sse42.rs](../src/json/simd/sse42.rs)
+**File**: [src/json/simd/sse42.rs](../../src/json/simd/sse42.rs)
 **Date**: 2025
 
 **Technique**: Use SSE4.2 `_mm_cmpistri` for efficient character set matching.
@@ -111,7 +111,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 4. NEON 32-byte Processing (ARM aarch64)
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/json/simd/neon.rs](../src/json/simd/neon.rs)
+**File**: [src/json/simd/neon.rs](../../src/json/simd/neon.rs)
 **Date**: January 2026
 
 **Technique**: Process two 16-byte NEON vectors (32 bytes total) per iteration.
@@ -141,7 +141,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 5. NEON Nibble Lookup for Value Characters (ARM aarch64)
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/json/simd/neon.rs](../src/json/simd/neon.rs)
+**File**: [src/json/simd/neon.rs](../../src/json/simd/neon.rs)
 **Date**: January 2026
 
 **Technique**: Replace 13 NEON operations (range checks + ORs) with 6-operation nibble lookup table.
@@ -169,7 +169,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 6. Runtime CPU Feature Detection
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/json/simd/mod.rs](../src/json/simd/mod.rs), [src/popcount.rs](../src/popcount.rs)
+**File**: [src/json/simd/mod.rs](../../src/json/simd/mod.rs), [src/bits/popcount.rs](../../src/bits/popcount.rs)
 **Date**: 2025-2026
 
 **Technique**: Automatic dispatch to best available SIMD implementation using `is_x86_feature_detected!()`.
@@ -200,7 +200,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 7. Balanced Parentheses Byte-Level Lookup Tables
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/bp.rs](../src/bp.rs)
+**File**: [src/trees/bp.rs](../../src/trees/bp.rs)
 **Date**: 2025
 
 **Technique**: Precomputed lookup tables for byte-level excess and find_close operations.
@@ -226,7 +226,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 8. Hierarchical RangeMin Index for Balanced Parentheses
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/bp.rs](../src/bp.rs)
+**File**: [src/trees/bp.rs](../../src/trees/bp.rs)
 **Date**: 2025
 
 **Technique**: 3-level index (L0: 64-bit, L1: 512-bit, L2: 4096-bit blocks) for O(1) min-excess queries.
@@ -252,7 +252,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 9. Dual Select Methods (Binary + Exponential Search)
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/json/index.rs](../src/json/index.rs)
+**File**: src/json/mod.rs (index functionality)
 **Date**: January 2026
 
 **Technique**:
@@ -284,7 +284,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 10. Cumulative Index for O(1) IB Select
 
 **Status**: ✅ IMPLEMENTED
-**File**: [src/json/index.rs](../src/json/index.rs)
+**File**: src/json/mod.rs (index functionality)
 **Date**: 2025
 
 **Technique**: Precomputed cumulative bit counts for direct rank-to-position mapping.
@@ -310,7 +310,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 11. DSV Lightweight Index for NEON (ARM)
 
 **Status**: ✅ IMPLEMENTED & DEPLOYED
-**File**: [src/dsv/simd/neon.rs](../src/dsv/simd/neon.rs)
+**File**: [src/dsv/simd/neon.rs](../../src/dsv/simd/neon.rs)
 **Date**: 2026-01-12
 
 **Technique**: Use lightweight cumulative rank index instead of full BitVec with 3-level rank directory for DSV parsing on ARM.
@@ -343,7 +343,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 ### 12. PFSM (Parallel Finite State Machine) JSON Parser (x86_64)
 
 **Status**: ✅ IMPLEMENTED & DEPLOYED
-**Files**: [src/json/pfsm.rs](../src/json/pfsm.rs), [src/json/pfsm_tables.rs](../src/json/pfsm_tables.rs)
+**Files**: [src/json/pfsm_optimized.rs](../../src/json/pfsm_optimized.rs), [src/json/pfsm_tables.rs](../../src/json/pfsm_tables.rs)
 **Date**: 2026-01-07
 
 **Technique**: Table-driven state machine with BMI2/AVX2 batch bit extraction (ported from haskellworks hw-json-simd).
@@ -423,7 +423,7 @@ This document provides a comprehensive record of all optimizations attempted in 
 
 **Lesson**: Wider SIMD ≠ automatically faster for memory-bound workloads
 
-**Documentation**: [docs/AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md) (historical reference)
+**Documentation**: [avx512-json-results.md](avx512-json-results.md) (historical reference)
 
 ---
 
@@ -481,7 +481,7 @@ while mask != 0 {
 
 **Lesson**: "Smarter" code isn't always faster. Profile first to find the real bottleneck.
 
-**Documentation**: [docs/FAILED-OPTIMIZATIONS.md](FAILED-OPTIMIZATIONS.md)
+**Documentation**: [failed-optimizations.md](failed-optimizations.md)
 
 ---
 
@@ -532,14 +532,14 @@ self.current_word |= _pdep_u64(bits, shifted_mask);
 
 **Lesson**: Fancy instructions aren't automatically better. PDEP/PEXT are specialized tools for sparse operations, not replacements for simple shift+mask. Always benchmark!
 
-**Documentation**: [docs/FAILED-OPTIMIZATIONS.md](FAILED-OPTIMIZATIONS.md)
+**Documentation**: [failed-optimizations.md](failed-optimizations.md)
 
 ---
 
 ### 4. PFSM Batched Processing (Portable)
 
 **Status**: ❌ SLOWER THAN PRODUCTION
-**File**: [src/json/pfsm_simd.rs](../src/json/pfsm_simd.rs)
+**File**: src/json/pfsm_optimized.rs (batched approach merged)
 **Date**: 2026-01-08
 
 **Technique**: Process 4 bytes at a time with batched table lookups and direct bit writing.
@@ -877,10 +877,10 @@ Before implementing an optimization, ask:
 
 ### Performance Analysis Documents
 
-- [jq-comparison.md](jq-comparison.md) - jq vs succinctly comparison (Apple M1 Max)
-- [AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md) - Popcount 5.2x speedup
-- [AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md) - Why AVX2 beats AVX-512 (historical)
-- [FAILED-OPTIMIZATIONS.md](FAILED-OPTIMIZATIONS.md) - Detailed failure analysis
+- [jq-comparison.md](../jq-comparison.md) - jq vs succinctly comparison (Apple M1 Max)
+- [avx512-vpopcntdq-results.md](avx512-vpopcntdq-results.md) - Popcount 5.2x speedup
+- [avx512-json-results.md](avx512-json-results.md) - Why AVX2 beats AVX-512 (historical)
+- [failed-optimizations.md](failed-optimizations.md) - Detailed failure analysis
 - [implemented-optimizations.md](implemented-optimizations.md) - Implementation catalog
 - [optimization-opportunities.md](optimization-opportunities.md) - Remaining opportunities
 

@@ -148,8 +148,8 @@ Community leaders will follow these Community Impact Guidelines in determining t
 
 ### Learning Resources
 * [Contributing Guidelines](CONTRIBUTING.md)
-* [Developer Guide](docs/DEVELOPER_GUIDE.md)
-* [User Guide](docs/USER_GUIDE.md)
+* [Developer Guide](docs/developer-guide.md)
+* [User Guide](docs/user-guide.md)
 * [Project Architecture](CLAUDE.md)
 
 ### Mental Health and Well-being
@@ -174,7 +174,7 @@ For questions about this Code of Conduct or to report violations:
 * **Primary Contact**: Project Maintainers via GitHub
 * **Repository**: [https://github.com/rust-works/succinctly](https://github.com/rust-works/succinctly)
 * **Issues**: [https://github.com/rust-works/succinctly/issues](https://github.com/rust-works/succinctly/issues)
-* **Discussions**: [https://github.com/rust-works/succinctly/discussions](https://github.com/rust-works/succinctly/discussions)
+* **Questions**: [https://github.com/rust-works/succinctly/issues](https://github.com/rust-works/succinctly/issues)
 
 ---
 

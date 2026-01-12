@@ -35,6 +35,9 @@ jobs:
             --exclude-path ./data
             --exclude '^https://crates\.io/crates/'
             --exclude '^https://docs\.rs/'
+            --exclude '^https://www\.intel\.com/'
+            --exclude '^https://dl\.acm\.org/'
+            --exclude '^https://lib\.rs/'
             '**/*.md'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

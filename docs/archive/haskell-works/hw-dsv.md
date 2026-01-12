@@ -415,5 +415,5 @@ A Rust port would be valuable for the ecosystem, offering a unique approach comp
 - [hw-dsv GitHub Repository](https://github.com/haskell-works/hw-dsv)
 - [Succinct Data Structures (Wikipedia)](https://en.wikipedia.org/wiki/Succinct_data_structure)
 - [Intel BMI2 Instructions](https://en.wikipedia.org/wiki/X86_Bit_manipulation_instruction_set#BMI2)
-- [Semi-indexing Semi-structured Data in Tiny Space](https://www.di.ens.fr/~mauborgne/publi/sem_index.pdf)
+- [Semi-indexing Semi-structured Data in Tiny Space](https://arxiv.org/abs/1104.4892) (Ottaviano & Grossi, 2011)
 - [CsPoppy: Cache-Succinct Rank/Select](https://www.cs.cmu.edu/~dga/papers/zhou-sea2013.pdf)

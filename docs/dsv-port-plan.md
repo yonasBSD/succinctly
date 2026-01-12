@@ -1017,6 +1017,6 @@ Succinctly's existing BitVec infrastructure should provide comparable performanc
 
 ## References
 
-- [hw-dsv source](../../haskell-works/hw-dsv)
+- [hw-dsv source](https://github.com/haskell-works/hw-dsv)
 - [Semi-Indexing Semi-Structured Data in Tiny Space](https://arxiv.org/abs/1104.4892) (Ottaviano et al.)
 - Succinctly's existing JSON semi-indexing in `src/json/`

@@ -199,7 +199,7 @@ pub use x86::build_semi_index_standard;  // ← Production always uses SSE2!
 
 ## Next Steps
 
-1. ✅ **Read full migration guide**: [MIGRATION-FROM-LOCAL-BRANCH.md](MIGRATION-FROM-LOCAL-BRANCH.md)
+1. ✅ **Read full migration guide**: [migration-from-local-branch.md](migration-from-local-branch.md)
 2. ✅ **Execute Phase 1**: Cherry-pick documentation (5 min)
 3. ✅ **Test with origin's tools**: Generate suite and benchmark (15 min)
 4. 🔧 **Implement critical fix**: Enable runtime dispatch (5 min)

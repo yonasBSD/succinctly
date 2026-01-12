@@ -25,7 +25,7 @@ Implemented and benchmarked AVX-512 optimizations on AMD Ryzen 9 7950X (Zen 4). 
 
 ### Implementation
 
-- **File**: [src/popcount.rs](../src/popcount.rs)
+- **File**: [src/bits/popcount.rs](../../src/bits/popcount.rs)
 - **Instruction**: `_mm512_popcnt_epi64` - hardware popcount for 8 u64 words
 - **Chunk size**: 512 bits (8 u64 words) per iteration
 - **Fallback**: Scalar POPCNT for unaligned remainder
@@ -84,7 +84,7 @@ Implemented and benchmarked AVX-512 optimizations on AMD Ryzen 9 7950X (Zen 4). 
 
 ### Implementation
 
-- **File**: [src/json/simd/avx512.rs](../src/json/simd/avx512.rs)
+- **File**: src/json/simd/avx512.rs (removed - optimization failed)
 - **Instructions**: AVX512F + AVX512BW (byte operations with mask registers)
 - **Chunk size**: 64 bytes per iteration (vs 32 for AVX2)
 - **Logic**: Character classification + sequential state machine
@@ -372,18 +372,18 @@ cargo bench --bench rank_select --features simd
 
 Complete analysis documents:
 
-1. **[AVX512-VPOPCNTDQ-RESULTS.md](AVX512-VPOPCNTDQ-RESULTS.md)**
+1. **[avx512-vpopcntdq-results.md](avx512-vpopcntdq-results.md)**
    - 5.2x speedup analysis
    - Implementation details
    - End-to-end impact assessment
 
-2. **[AVX512-JSON-RESULTS.md](AVX512-JSON-RESULTS.md)**
+2. **[avx512-json-results.md](avx512-json-results.md)**
    - Why AVX2 beats AVX-512
    - Architectural insights
    - Memory-bound vs compute-bound
    - Amdahl's Law in practice
 
-3. **[CLAUDE.md](../CLAUDE.md)** (updated)
+3. **[CLAUDE.md](../../CLAUDE.md)** (updated)
    - Key learnings section
    - When to use each SIMD level
    - Benchmarking best practices

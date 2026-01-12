@@ -25,7 +25,7 @@ Your CPU has several important instruction sets between AVX2 (2013) and AVX-512 
 
 ### 1. BMI2 - PDEP/PEXT (Bit Deposit/Extract) ⭐⭐⭐
 
-**Status**: Partially used in [src/json/simd/bmi2.rs](../src/json/simd/bmi2.rs)
+**Status**: Partially used in [src/json/simd/bmi2.rs](../../src/json/simd/bmi2.rs)
 
 **Current Usage**: BMI2 utilities exist but not actively used in hot paths
 
@@ -349,7 +349,7 @@ unsafe fn process_chunk_bmi1(class: CharClass, state: State, ...) {
 
 ### Implement Now: BMI1 Optimization
 
-**Target**: JSON mask processing in [src/json/simd/](../src/json/simd/)
+**Target**: JSON mask processing in [src/json/simd/](../../src/json/simd/)
 
 **Steps**:
 1. Add BMI1-optimized `process_chunk` variant
@@ -374,4 +374,4 @@ unsafe fn process_chunk_bmi1(class: CharClass, state: State, ...) {
 - [Intel Intrinsics Guide - BMI1](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#techs=BMI1)
 - [Intel Intrinsics Guide - BMI2](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#techs=BMI2)
 - [AMD Zen 3 BMI2 Improvements](https://www.anandtech.com/show/16214/amd-zen-3-ryzen-deep-dive-review-5950x-5900x-5800x-and-5700x-tested/7)
-- [Travis Downs: BMI2 on AMD](https://travisdowns.github.io/blog/2020/05/18/icelake-bmi2.html)
+- [Travis Downs: Hardware Store Elimination](https://travisdowns.github.io/blog/2020/05/13/intel-zero-opt.html) (discusses BMI2 performance on AMD)
