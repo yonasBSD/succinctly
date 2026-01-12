@@ -301,6 +301,85 @@ let expr = parse(".name, .age").unwrap();
 let expr = parse(".. | .name?").unwrap();
 ```
 
+### Format Functions
+
+Format functions convert values to strings with specific formatting:
+
+```rust
+// CSV format (comma-separated values)
+let expr = parse(r#"["a", "b", "c"] | @csv"#).unwrap();
+// Output: "a,b,c"
+
+// TSV format (tab-separated values)
+let expr = parse(r#"["a", "b", "c"] | @tsv"#).unwrap();
+// Output: "a\tb\tc"
+
+// Generic DSV format with custom delimiter
+let expr = parse(r#"["a", "b", "c"] | @dsv("|")"#).unwrap();
+// Output: "a|b|c"
+
+let expr = parse(r#"["a", "b", "c"] | @dsv(";")"#).unwrap();
+// Output: "a;b;c"
+
+// Auto-quoting when data contains delimiter
+let expr = parse(r#"["a", "b|c", "d"] | @dsv("|")"#).unwrap();
+// Output: "a|\"b|c\"|d"
+
+// JSON format
+let expr = parse(r#"{"name": "Alice"} | @json"#).unwrap();
+// Output: "{\"name\":\"Alice\"}"
+
+// Text (convert to string)
+let expr = parse("42 | @text").unwrap();
+// Output: "42"
+
+// URI encoding
+let expr = parse(r#""hello world" | @uri"#).unwrap();
+// Output: "hello%20world"
+
+// Base64 encoding
+let expr = parse(r#""hello" | @base64"#).unwrap();
+// Output: "aGVsbG8="
+
+// HTML entity escaping
+let expr = parse(r#""<script>" | @html"#).unwrap();
+// Output: "&lt;script&gt;"
+
+// Shell quoting
+let expr = parse(r#""hello world" | @sh"#).unwrap();
+// Output: "'hello world'"
+```
+
+#### DSV Format Details
+
+The `@dsv(delimiter)` format function provides flexible delimiter-separated value output:
+
+- **Custom delimiters**: Any single or multi-character string
+- **Smart quoting**: Automatically quotes fields containing:
+  - The delimiter character
+  - Quote characters (`"`)
+  - Newlines (`\n`)
+- **CSV-compatible**: `@dsv(",")` produces identical output to `@csv`
+- **Escape handling**: Quotes in data are escaped as `""`
+
+Example use cases:
+
+```rust
+// Pipe-separated values (common in Unix tools)
+let expr = parse(r#".users[] | [.name, .age, .city] | @dsv("|")"#).unwrap();
+
+// Semicolon-separated (European CSV standard)
+let expr = parse(r#".data[] | @dsv(";")"#).unwrap();
+
+// Custom multi-character delimiter
+let expr = parse(r#".items[] | @dsv(" :: ")"#).unwrap();
+
+// Compatible with existing @csv and @tsv
+// These three produce equivalent output for comma delimiter:
+let expr1 = parse(r#"[.name, .age] | @csv"#).unwrap();
+let expr2 = parse(r#"[.name, .age] | @dsv(",")"#).unwrap();
+```
+
 ## CLI Tool
 
 The CLI tool provides command-line access to JSON operations.
@@ -352,6 +431,32 @@ succinctly jq -c '.users[]' data.json
 
 # Read from stdin
 cat data.json | succinctly jq '.name'
+```
+
+### Format Functions in CLI
+
+```bash
+# CSV output
+succinctly jq -r '.users[] | [.name, .age, .city] | @csv' data.json
+
+# TSV output
+succinctly jq -r '.users[] | [.name, .age] | @tsv' data.json
+
+# Custom delimiter output (pipe-separated)
+succinctly jq -r '.users[] | [.name, .age, .city] | @dsv("|")' data.json
+
+# Semicolon-separated (European CSV)
+succinctly jq -r '.data[] | @dsv(";")' data.json
+
+# Convert JSON to CSV with headers
+echo '{"name":"Alice","age":30}' | succinctly jq -r '[.name, .age] | @csv'
+# Output: Alice,30
+
+# Multiple rows
+succinctly jq -r '.users[] | [.name, .email] | @dsv("|")' users.json
+# Output:
+# alice@example.com|Alice
+# bob@example.com|Bob
 ```
 
 ## Feature Flags

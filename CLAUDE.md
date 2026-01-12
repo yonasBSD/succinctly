@@ -46,6 +46,8 @@ cargo build --release --features cli
 
 ./target/release/succinctly json generate 10mb -o benchmark.json
 ./target/release/succinctly jq '.users[].name' input.json
+./target/release/succinctly jq -r '.users[] | [.name, .age] | @csv' input.json
+./target/release/succinctly jq -r '.users[] | [.name, .age] | @dsv("|")' input.json
 ./target/release/succinctly dev bench jq
 ```
 
@@ -80,6 +82,36 @@ use succinctly::jq::{parse, eval};
 | **BalancedParens**| Succinct tree navigation               | ~6% overhead  |
 | **JsonIndex**     | JSON semi-indexing with PFSM parser    | ~950 MiB/s    |
 | **DsvIndex**      | DSV semi-indexing with lightweight rank| 11-169 MiB/s (CLI), 85-1676 MiB/s (API)|
+
+### jq Format Functions
+
+The jq implementation supports format functions for converting values to strings:
+
+| Format       | Syntax              | Description                                       | Example Output      |
+|--------------|---------------------|---------------------------------------------------|---------------------|
+| **@csv**     | `@csv`              | Comma-separated values (fixed delimiter)          | `a,b,c`             |
+| **@tsv**     | `@tsv`              | Tab-separated values (fixed delimiter)            | `a\tb\tc`           |
+| **@dsv**     | `@dsv(delimiter)`   | Generic DSV with custom delimiter                 | `a\|b\|c`           |
+| **@json**    | `@json`             | JSON format                                       | `{"a":1}`           |
+| **@text**    | `@text`             | Convert to string (same as tostring)              | `42`                |
+| **@uri**     | `@uri`              | URI percent encoding                              | `hello%20world`     |
+| **@base64**  | `@base64`           | Base64 encoding                                   | `aGVsbG8=`          |
+| **@base64d** | `@base64d`          | Base64 decoding                                   | `hello`             |
+| **@html**    | `@html`             | HTML entity escaping                              | `&lt;script&gt;`    |
+| **@sh**      | `@sh`               | Shell quoting                                     | `'hello world'`     |
+
+**@dsv(delimiter) specifics:**
+- Custom delimiters: Any single or multi-character string
+- Smart quoting: Auto-quotes fields containing delimiter, `"`, or `\n`
+- CSV-compatible: `@dsv(",")` produces identical output to `@csv`
+- Escape handling: Quotes are escaped as `""`
+
+```bash
+# Examples
+echo '["a","b","c"]' | jq -r '@dsv("|")'        # Output: a|b|c
+echo '["a","b|c","d"]' | jq -r '@dsv("|")'      # Output: a|"b|c"|d
+echo '["a","b","c"]' | jq -r '@dsv(";")'        # Output: a;b;c
+```
 
 ## Feature Flags
 

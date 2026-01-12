@@ -245,6 +245,11 @@ cargo build --release --features cli
 # Query CSV/TSV files (converted to JSON on-the-fly)
 ./target/release/succinctly jq --input-dsv ',' '.[] | .name' users.csv
 ./target/release/succinctly jq --input-dsv '\t' '.[0]' data.tsv
+
+# Output JSON as CSV/TSV/DSV
+./target/release/succinctly jq -r '.users[] | [.name, .age] | @csv' data.json
+./target/release/succinctly jq -r '.users[] | [.name, .age] | @tsv' data.json
+./target/release/succinctly jq -r '.users[] | [.name, .age] | @dsv("|")' data.json
 ```
 
 ## Architecture

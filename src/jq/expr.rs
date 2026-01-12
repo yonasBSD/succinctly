@@ -342,7 +342,7 @@ pub enum StringPart {
 }
 
 /// Format string types for @format expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatType {
     /// @text - convert to string (same as tostring)
     Text,
@@ -354,6 +354,8 @@ pub enum FormatType {
     Csv,
     /// @tsv - TSV format (for arrays)
     Tsv,
+    /// @dsv(delimiter) - Generic DSV format with custom delimiter
+    Dsv(String),
     /// @base64 - base64 encode
     Base64,
     /// @base64d - base64 decode

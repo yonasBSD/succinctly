@@ -1487,7 +1487,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a format string: @text, @json, @uri, etc.
+    /// Parse a format string: @text, @json, @uri, @dsv(delimiter), etc.
     fn parse_format_string(&mut self) -> Result<Expr, ParseError> {
         self.expect('@')?;
 
@@ -1507,6 +1507,26 @@ impl<'a> Parser<'a> {
             "uri" => FormatType::Uri,
             "csv" => FormatType::Csv,
             "tsv" => FormatType::Tsv,
+            "dsv" => {
+                // @dsv(delimiter) - parse the delimiter argument
+                self.skip_ws();
+                self.expect('(')?;
+                self.skip_ws();
+
+                // Parse delimiter as a string literal
+                if self.peek() != Some('"') {
+                    return Err(ParseError::new(
+                        "expected string delimiter argument for @dsv".to_string(),
+                        self.pos,
+                    ));
+                }
+
+                let delimiter = self.parse_string_literal()?;
+
+                self.skip_ws();
+                self.expect(')')?;
+                FormatType::Dsv(delimiter)
+            }
             "base64" => FormatType::Base64,
             "base64d" => FormatType::Base64d,
             "html" => FormatType::Html,

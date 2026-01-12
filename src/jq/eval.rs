@@ -248,7 +248,7 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>>(
 
         Expr::StringInterpolation(parts) => eval_string_interpolation(parts, value, optional),
 
-        Expr::Format(format_type) => eval_format(*format_type, value, optional),
+        Expr::Format(format_type) => eval_format(format_type.clone(), value, optional),
 
         // Phase 8: Variables and Advanced Control Flow
         Expr::As { expr, var, body } => eval_as(expr, var, body, value, optional),
@@ -2485,6 +2485,7 @@ fn eval_format<'a, W: Clone + AsRef<[u64]>>(
         FormatType::Uri => format_uri(&owned, optional),
         FormatType::Csv => format_csv(&owned, optional),
         FormatType::Tsv => format_tsv(&owned, optional),
+        FormatType::Dsv(delimiter) => format_dsv(&owned, &delimiter, optional),
         FormatType::Base64 => format_base64(&owned, optional),
         FormatType::Base64d => format_base64d(&owned, optional),
         FormatType::Html => format_html(&owned, optional),
@@ -2570,6 +2571,32 @@ fn format_tsv(value: &OwnedValue, optional: bool) -> Result<String, EvalError> {
                 })
                 .collect();
             Ok(parts.join("\t"))
+        }
+        _ if optional => Ok(String::new()),
+        _ => Err(EvalError::type_error("array", value.type_name())),
+    }
+}
+
+/// @dsv(delimiter) - Generic DSV format with custom delimiter (for arrays)
+fn format_dsv(value: &OwnedValue, delimiter: &str, optional: bool) -> Result<String, EvalError> {
+    match value {
+        OwnedValue::Array(arr) => {
+            let parts: Vec<String> = arr
+                .iter()
+                .map(|v| match v {
+                    OwnedValue::String(s) => {
+                        // Quote if string contains delimiter, quote, or newline
+                        if s.contains(delimiter) || s.contains('"') || s.contains('\n') {
+                            format!("\"{}\"", s.replace('"', "\"\""))
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    OwnedValue::Null => String::new(),
+                    other => owned_to_string(other),
+                })
+                .collect();
+            Ok(parts.join(delimiter))
         }
         _ if optional => Ok(String::new()),
         _ => Err(EvalError::type_error("array", value.type_name())),
@@ -3829,7 +3856,7 @@ fn substitute_var(expr: &Expr, var_name: &str, replacement: &OwnedValue) -> Expr
                 })
                 .collect(),
         ),
-        Expr::Format(f) => Expr::Format(*f),
+        Expr::Format(f) => Expr::Format(f.clone()),
         // Phase 8 expressions
         Expr::As { expr, var, body } => {
             // Don't substitute if this `as` binds the same variable (shadowing)
@@ -6229,7 +6256,7 @@ fn expand_func_calls(expr: &Expr, func_name: &str, params: &[String], body: &Exp
                 })
                 .collect(),
         ),
-        Expr::Format(f) => Expr::Format(*f),
+        Expr::Format(f) => Expr::Format(f.clone()),
         Expr::Var(v) => Expr::Var(v.clone()),
         Expr::As {
             expr,
@@ -6450,7 +6477,7 @@ fn substitute_func_param(expr: &Expr, param: &str, arg: &Expr) -> Expr {
                 })
                 .collect(),
         ),
-        Expr::Format(f) => Expr::Format(*f),
+        Expr::Format(f) => Expr::Format(f.clone()),
         Expr::As { expr, var, body } => {
             // If var shadows param, don't substitute in body
             if var == param {
@@ -8405,6 +8432,51 @@ mod tests {
         query!(br#"["a", "b", "c"]"#, "@tsv",
             QueryResult::Owned(OwnedValue::String(s)) => {
                 assert_eq!(s, "a\tb\tc");
+            }
+        );
+    }
+
+    #[test]
+    fn test_format_dsv_pipe() {
+        query!(br#"["a", "b", "c"]"#, r#"@dsv("|")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "a|b|c");
+            }
+        );
+    }
+
+    #[test]
+    fn test_format_dsv_semicolon() {
+        query!(br#"["a", "b", "c"]"#, r#"@dsv(";")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "a;b;c");
+            }
+        );
+    }
+
+    #[test]
+    fn test_format_dsv_with_quoting() {
+        query!(br#"["a", "b|c", "d"]"#, r#"@dsv("|")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, r#"a|"b|c"|d"#);
+            }
+        );
+    }
+
+    #[test]
+    fn test_format_dsv_with_quotes_in_data() {
+        query!(br#"["a", "b\"c", "d"]"#, r#"@dsv(",")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, r#"a,"b""c",d"#);
+            }
+        );
+    }
+
+    #[test]
+    fn test_format_dsv_with_newline() {
+        query!(br#"["a", "b\nc", "d"]"#, r#"@dsv(",")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "a,\"b\nc\",d");
             }
         );
     }
