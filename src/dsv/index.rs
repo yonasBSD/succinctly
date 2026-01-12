@@ -3,7 +3,6 @@
 use super::index_lightweight::DsvIndexLightweight;
 use crate::bits::BitVec;
 
-#[cfg(not(test))]
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 

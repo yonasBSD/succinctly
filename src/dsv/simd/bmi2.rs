@@ -345,6 +345,7 @@ mod tests {
         // Quote that spans a 64-byte boundary
         let mut csv = Vec::new();
         csv.push(b'"');
+        #[allow(clippy::same_item_push)]
         for _ in 0..70 {
             csv.push(b'x');
         }
@@ -382,7 +383,7 @@ mod tests {
             assert_eq!(mask, !0u64, "No quotes means all outside");
 
             // Single quote at position 0 - everything after is inside
-            let (mask, carry) = toggle64_bmi2(0, 1);
+            let (_mask, carry) = toggle64_bmi2(0, 1);
             // After the quote, we're inside, so the mask should have 0s
             assert_eq!(carry, 1, "Odd quotes should set carry");
         }

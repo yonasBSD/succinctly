@@ -235,6 +235,7 @@ mod tests {
 
         let mut csv = Vec::new();
         csv.push(b'"');
+        #[allow(clippy::same_item_push)]
         for _ in 0..70 {
             csv.push(b'x');
         }
