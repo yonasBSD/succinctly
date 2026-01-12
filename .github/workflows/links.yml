@@ -1,0 +1,43 @@
+name: Links
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - '.github/workflows/links.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.md'
+      - '.github/workflows/links.yml'
+  # Allow manual trigger
+  workflow_dispatch:
+  # Run weekly to catch external link rot
+  schedule:
+    - cron: '0 0 * * 0'
+
+jobs:
+  check-links:
+    name: Check Links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check markdown links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --verbose
+            --no-progress
+            --accept 100..=399
+            --exclude-path ./target
+            --exclude-path ./data
+            --exclude '^https://crates\.io/crates/'
+            --exclude '^https://docs\.rs/'
+            '**/*.md'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail if broken links found
+        run: exit ${{ steps.lychee.outputs.exit_code }}
