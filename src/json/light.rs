@@ -321,8 +321,7 @@ impl<W: AsRef<[u64]>> JsonIndex<W> {
     /// Perform rank1 on the IB (count 1-bits in [0, pos)).
     ///
     /// Uses cumulative popcount index for O(1) performance.
-    #[allow(dead_code)]
-    fn ib_rank1(&self, pos: usize) -> usize {
+    pub fn ib_rank1(&self, pos: usize) -> usize {
         if pos == 0 {
             return 0;
         }
@@ -383,6 +382,19 @@ impl<'a, W> Clone for JsonCursor<'a, W> {
 impl<'a, W> Copy for JsonCursor<'a, W> {}
 
 impl<'a, W: AsRef<[u64]>> JsonCursor<'a, W> {
+    /// Create a cursor at a specific BP position.
+    ///
+    /// This is useful for constructing cursors when you know the BP position
+    /// directly, such as when walking up the tree using `parent()`.
+    #[inline]
+    pub fn from_bp_position(index: &'a JsonIndex<W>, text: &'a [u8], bp_pos: usize) -> Self {
+        Self {
+            text,
+            index,
+            bp_pos,
+        }
+    }
+
     /// Get the position in the BP vector.
     #[inline]
     pub fn bp_position(&self) -> usize {

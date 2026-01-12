@@ -21,6 +21,8 @@ enum Command {
     Dsv(DsvCommand),
     /// Command-line JSON processor (jq-compatible)
     Jq(JqCommand),
+    /// Find jq expression for a position in a JSON file
+    JqLocate(jq_locate::JqLocateArgs),
     /// Developer tools (benchmarking, profiling)
     Dev(DevCommand),
 }
@@ -545,6 +547,10 @@ fn main() -> Result<()> {
             let exit_code = jq_runner::run_jq(args)?;
             std::process::exit(exit_code);
         }
+        Command::JqLocate(args) => {
+            let exit_code = jq_locate::run_jq_locate(args)?;
+            std::process::exit(exit_code);
+        }
         Command::Json(json_cmd) => match json_cmd.command {
             JsonSubcommand::Generate(args) => {
                 let json = generate_json(
@@ -985,6 +991,7 @@ mod dsv_bench;
 mod dsv_generators;
 mod generators;
 mod jq_bench;
+mod jq_locate;
 mod jq_runner;
 use generators::generate_json;
 
