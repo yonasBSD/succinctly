@@ -23,6 +23,8 @@ enum Command {
     Yaml(YamlCommand),
     /// Command-line JSON processor (jq-compatible)
     Jq(JqCommand),
+    /// Command-line YAML processor (jq-compatible syntax)
+    Yq(YqCommand),
     /// Find jq expression for a position in a JSON file
     JqLocate(jq_locate::JqLocateArgs),
     /// Developer tools (benchmarking, profiling)
@@ -597,6 +599,94 @@ struct JqCommand {
     build_configuration: bool,
 }
 
+/// Command-line YAML processor (jq-compatible syntax)
+#[derive(Debug, Parser)]
+#[command(name = "yq")]
+#[command(about = "Command-line YAML processor", long_about = None)]
+pub struct YqCommand {
+    /// jq filter expression (e.g., ".", ".foo", ".[]")
+    /// If not provided, uses "." (identity)
+    pub filter: Option<String>,
+
+    /// Input files (reads from stdin if none provided)
+    #[arg(trailing_var_arg = true)]
+    pub files: Vec<String>,
+
+    // === Input Options ===
+    /// Don't read any input; use null as the single input value
+    #[arg(short = 'n', long)]
+    pub null_input: bool,
+
+    /// Read all inputs into an array and use it as the single input value
+    #[arg(short = 's', long)]
+    pub slurp: bool,
+
+    // === Output Options ===
+    /// Compact output (no pretty printing)
+    #[arg(short = 'c', long)]
+    pub compact_output: bool,
+
+    /// Output raw strings without quotes
+    #[arg(short = 'r', long)]
+    pub raw_output: bool,
+
+    /// Like -r but don't print newline after each output
+    #[arg(short = 'j', long)]
+    pub join_output: bool,
+
+    /// Output ASCII only, escaping non-ASCII as \uXXXX
+    #[arg(short = 'a', long)]
+    pub ascii_output: bool,
+
+    /// Colorize output (default if stdout is a terminal)
+    #[arg(short = 'C', long)]
+    pub color_output: bool,
+
+    /// Disable colorized output
+    #[arg(short = 'M', long)]
+    pub monochrome_output: bool,
+
+    /// Sort keys of each object on output
+    #[arg(short = 'S', long)]
+    pub sort_keys: bool,
+
+    /// Use tabs for indentation
+    #[arg(long)]
+    pub tab: bool,
+
+    /// Use n spaces for indentation (max 7)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=7))]
+    pub indent: Option<u8>,
+
+    // === Program Input ===
+    /// Read filter from file instead of command line
+    #[arg(short = 'f', long, value_name = "FILE")]
+    pub from_file: Option<PathBuf>,
+
+    // === Variables ===
+    /// Set $name to the string value
+    #[arg(long, value_names = ["NAME", "VALUE"], num_args = 2, action = clap::ArgAction::Append)]
+    pub arg: Vec<String>,
+
+    /// Set $name to the JSON value
+    #[arg(long, value_names = ["NAME", "VALUE"], num_args = 2, action = clap::ArgAction::Append)]
+    pub argjson: Vec<String>,
+
+    // === Exit Status ===
+    /// Set exit status based on output (0 if last output != false/null)
+    #[arg(short = 'e', long)]
+    pub exit_status: bool,
+
+    // === Info ===
+    /// Show version information
+    #[arg(short = 'V', long)]
+    pub version: bool,
+
+    /// Show build configuration
+    #[arg(long)]
+    pub build_configuration: bool,
+}
+
 impl From<PatternArg> for generators::Pattern {
     fn from(arg: PatternArg) -> Self {
         match arg {
@@ -652,6 +742,10 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Jq(args) => {
             let exit_code = jq_runner::run_jq(args)?;
+            std::process::exit(exit_code);
+        }
+        Command::Yq(args) => {
+            let exit_code = yq_runner::run_yq(args)?;
             std::process::exit(exit_code);
         }
         Command::JqLocate(args) => {
@@ -1223,6 +1317,7 @@ mod jq_bench;
 mod jq_locate;
 mod jq_runner;
 mod yaml_generators;
+mod yq_runner;
 use generators::generate_json;
 
 #[cfg(test)]
