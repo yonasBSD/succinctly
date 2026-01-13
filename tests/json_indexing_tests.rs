@@ -849,9 +849,7 @@ mod locate_exhaustive {
             json.extend(format!(r#"{{"level{}":"v{}","n":"#, i, i).as_bytes());
         }
         json.extend(br#""bottom""#);
-        for _ in 0..20 {
-            json.push(b'}');
-        }
+        json.resize(json.len() + 20, b'}');
         test_all_offsets(&json, "Deep nesting (20 levels)");
     }
 
