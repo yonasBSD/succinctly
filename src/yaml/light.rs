@@ -726,23 +726,25 @@ impl<'a> YamlString<'a> {
             YamlString::DoubleQuoted { text, start } => {
                 let end = Self::find_double_quote_end(text, *start);
                 let bytes = &text[*start + 1..end - 1]; // Strip quotes
-                if !bytes.contains(&b'\\') {
+                                                        // Need decoding if contains escapes or newlines (multiline folding)
+                if !bytes.contains(&b'\\') && !bytes.contains(&b'\n') && !bytes.contains(&b'\r') {
                     let s =
                         core::str::from_utf8(bytes).map_err(|_| YamlStringError::InvalidUtf8)?;
                     Ok(Cow::Borrowed(s))
                 } else {
-                    decode_double_quoted_escapes(bytes).map(Cow::Owned)
+                    decode_double_quoted(bytes).map(Cow::Owned)
                 }
             }
             YamlString::SingleQuoted { text, start } => {
                 let end = Self::find_single_quote_end(text, *start);
                 let bytes = &text[*start + 1..end - 1]; // Strip quotes
-                if !bytes.contains(&b'\'') {
+                                                        // Need decoding if contains escaped quotes or newlines (multiline folding)
+                if !bytes.contains(&b'\'') && !bytes.contains(&b'\n') && !bytes.contains(&b'\r') {
                     let s =
                         core::str::from_utf8(bytes).map_err(|_| YamlStringError::InvalidUtf8)?;
                     Ok(Cow::Borrowed(s))
                 } else {
-                    decode_single_quoted_escapes(bytes).map(Cow::Owned)
+                    decode_single_quoted(bytes).map(Cow::Owned)
                 }
             }
             YamlString::Unquoted { text, start, end } => {
@@ -970,113 +972,229 @@ impl core::fmt::Display for YamlStringError {
     }
 }
 
-/// Decode escape sequences in a double-quoted YAML string.
-fn decode_double_quoted_escapes(bytes: &[u8]) -> Result<String, YamlStringError> {
+/// Decode a double-quoted YAML string, handling escapes and line folding.
+///
+/// Line folding rules for double-quoted strings:
+/// - A single line break becomes a space (unless escaped with \)
+/// - Multiple consecutive line breaks: first becomes space, rest become \n
+/// - Leading whitespace on continuation lines is trimmed
+/// - `\` at end of line escapes the line break entirely (no space added)
+fn decode_double_quoted(bytes: &[u8]) -> Result<String, YamlStringError> {
     let mut result = String::with_capacity(bytes.len());
     let mut i = 0;
 
     while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            if i + 1 >= bytes.len() {
-                return Err(YamlStringError::InvalidEscape);
-            }
-            i += 1;
-            match bytes[i] {
-                b'0' => result.push('\0'),
-                b'a' => result.push('\x07'), // bell
-                b'b' => result.push('\x08'), // backspace
-                b't' | b'\t' => result.push('\t'),
-                b'n' => result.push('\n'),
-                b'v' => result.push('\x0B'), // vertical tab
-                b'f' => result.push('\x0C'), // form feed
-                b'r' => result.push('\r'),
-                b'e' => result.push('\x1B'), // escape
-                b' ' => result.push(' '),
-                b'"' => result.push('"'),
-                b'/' => result.push('/'),
-                b'\\' => result.push('\\'),
-                b'N' => result.push('\u{0085}'), // next line
-                b'_' => result.push('\u{00A0}'), // non-breaking space
-                b'L' => result.push('\u{2028}'), // line separator
-                b'P' => result.push('\u{2029}'), // paragraph separator
-                b'x' => {
-                    // \xNN - 2 hex digits
-                    if i + 2 >= bytes.len() {
-                        return Err(YamlStringError::InvalidEscape);
-                    }
-                    let hex = &bytes[i + 1..i + 3];
-                    let val = parse_hex(hex)?;
-                    if val <= 0x7F {
-                        result.push(val as u8 as char);
-                    } else {
-                        result.push(
-                            char::from_u32(val as u32).ok_or(YamlStringError::InvalidEscape)?,
-                        );
-                    }
-                    i += 2;
+        match bytes[i] {
+            b'\\' => {
+                if i + 1 >= bytes.len() {
+                    return Err(YamlStringError::InvalidEscape);
                 }
-                b'u' => {
-                    // \uNNNN - 4 hex digits
-                    if i + 4 >= bytes.len() {
-                        return Err(YamlStringError::InvalidEscape);
+                i += 1;
+                match bytes[i] {
+                    b'0' => result.push('\0'),
+                    b'a' => result.push('\x07'), // bell
+                    b'b' => result.push('\x08'), // backspace
+                    b't' | b'\t' => result.push('\t'),
+                    b'n' => result.push('\n'),
+                    b'v' => result.push('\x0B'), // vertical tab
+                    b'f' => result.push('\x0C'), // form feed
+                    b'r' => result.push('\r'),
+                    b'e' => result.push('\x1B'), // escape
+                    b' ' => result.push(' '),
+                    b'"' => result.push('"'),
+                    b'/' => result.push('/'),
+                    b'\\' => result.push('\\'),
+                    b'N' => result.push('\u{0085}'), // next line
+                    b'_' => result.push('\u{00A0}'), // non-breaking space
+                    b'L' => result.push('\u{2028}'), // line separator
+                    b'P' => result.push('\u{2029}'), // paragraph separator
+                    b'\n' => {
+                        // Escaped line break - skip it entirely (no space added)
+                        // Also skip leading whitespace on next line
+                        i += 1;
+                        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                            i += 1;
+                        }
+                        continue; // Don't increment i again at end of loop
                     }
-                    let hex = &bytes[i + 1..i + 5];
-                    let codepoint = parse_hex(hex)? as u32;
-                    result.push(char::from_u32(codepoint).ok_or(YamlStringError::InvalidEscape)?);
-                    i += 4;
-                }
-                b'U' => {
-                    // \UNNNNNNNN - 8 hex digits
-                    if i + 8 >= bytes.len() {
-                        return Err(YamlStringError::InvalidEscape);
+                    b'\r' => {
+                        // Escaped line break (CRLF variant)
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == b'\n' {
+                            i += 1;
+                        }
+                        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                            i += 1;
+                        }
+                        continue;
                     }
-                    let hex = &bytes[i + 1..i + 9];
-                    let codepoint = parse_hex(hex)?;
-                    result.push(char::from_u32(codepoint).ok_or(YamlStringError::InvalidEscape)?);
-                    i += 8;
+                    b'x' => {
+                        // \xNN - 2 hex digits
+                        if i + 2 >= bytes.len() {
+                            return Err(YamlStringError::InvalidEscape);
+                        }
+                        let hex = &bytes[i + 1..i + 3];
+                        let val = parse_hex(hex)?;
+                        if val <= 0x7F {
+                            result.push(val as u8 as char);
+                        } else {
+                            result.push(
+                                char::from_u32(val as u32).ok_or(YamlStringError::InvalidEscape)?,
+                            );
+                        }
+                        i += 2;
+                    }
+                    b'u' => {
+                        // \uNNNN - 4 hex digits
+                        if i + 4 >= bytes.len() {
+                            return Err(YamlStringError::InvalidEscape);
+                        }
+                        let hex = &bytes[i + 1..i + 5];
+                        let codepoint = parse_hex(hex)? as u32;
+                        result
+                            .push(char::from_u32(codepoint).ok_or(YamlStringError::InvalidEscape)?);
+                        i += 4;
+                    }
+                    b'U' => {
+                        // \UNNNNNNNN - 8 hex digits
+                        if i + 8 >= bytes.len() {
+                            return Err(YamlStringError::InvalidEscape);
+                        }
+                        let hex = &bytes[i + 1..i + 9];
+                        let codepoint = parse_hex(hex)?;
+                        result
+                            .push(char::from_u32(codepoint).ok_or(YamlStringError::InvalidEscape)?);
+                        i += 8;
+                    }
+                    _ => return Err(YamlStringError::InvalidEscape),
                 }
-                _ => return Err(YamlStringError::InvalidEscape),
-            }
-            i += 1;
-        } else {
-            // Regular UTF-8 byte
-            let start = i;
-            while i < bytes.len() && bytes[i] != b'\\' {
                 i += 1;
             }
-            let chunk =
-                core::str::from_utf8(&bytes[start..i]).map_err(|_| YamlStringError::InvalidUtf8)?;
-            result.push_str(chunk);
+            b'\r' | b'\n' => {
+                // Line folding: handle newlines
+                i = fold_quoted_line_break(bytes, i, &mut result);
+            }
+            _ => {
+                // Regular content - copy until we hit escape or newline
+                let start = i;
+                while i < bytes.len() && !matches!(bytes[i], b'\\' | b'\n' | b'\r') {
+                    i += 1;
+                }
+                let chunk = core::str::from_utf8(&bytes[start..i])
+                    .map_err(|_| YamlStringError::InvalidUtf8)?;
+                result.push_str(chunk);
+            }
         }
     }
 
     Ok(result)
 }
 
-/// Decode escape sequences in a single-quoted YAML string.
-fn decode_single_quoted_escapes(bytes: &[u8]) -> Result<String, YamlStringError> {
+/// Decode a single-quoted YAML string, handling '' escapes and line folding.
+///
+/// Line folding rules for single-quoted strings:
+/// - A single line break becomes a space
+/// - Multiple consecutive line breaks: first becomes space, rest become \n
+/// - Leading whitespace on continuation lines is trimmed
+fn decode_single_quoted(bytes: &[u8]) -> Result<String, YamlStringError> {
     let mut result = String::with_capacity(bytes.len());
     let mut i = 0;
 
     while i < bytes.len() {
-        if bytes[i] == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-            // '' -> '
-            result.push('\'');
-            i += 2;
-        } else {
-            let start = i;
-            while i < bytes.len()
-                && !(bytes[i] == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'')
-            {
-                i += 1;
+        match bytes[i] {
+            b'\'' if i + 1 < bytes.len() && bytes[i + 1] == b'\'' => {
+                // '' -> '
+                result.push('\'');
+                i += 2;
             }
-            let chunk =
-                core::str::from_utf8(&bytes[start..i]).map_err(|_| YamlStringError::InvalidUtf8)?;
-            result.push_str(chunk);
+            b'\r' | b'\n' => {
+                // Line folding
+                i = fold_quoted_line_break(bytes, i, &mut result);
+            }
+            _ => {
+                // Regular content
+                let start = i;
+                while i < bytes.len()
+                    && !matches!(bytes[i], b'\n' | b'\r')
+                    && !(bytes[i] == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'')
+                {
+                    i += 1;
+                }
+                let chunk = core::str::from_utf8(&bytes[start..i])
+                    .map_err(|_| YamlStringError::InvalidUtf8)?;
+                result.push_str(chunk);
+            }
         }
     }
 
     Ok(result)
+}
+
+/// Handle line folding for quoted strings.
+/// Returns the new position after processing the line break(s).
+///
+/// Rules:
+/// - Trim trailing whitespace from the previous line (already in result)
+/// - Skip the line break
+/// - Count consecutive empty lines (they become \n)
+/// - Skip leading whitespace on the continuation line
+/// - Add a space for the line break (or \n for each empty line)
+fn fold_quoted_line_break(bytes: &[u8], mut i: usize, result: &mut String) -> usize {
+    // Trim trailing whitespace from what we've accumulated
+    while result.ends_with(' ') || result.ends_with('\t') {
+        result.pop();
+    }
+
+    // Skip the first line break
+    if bytes[i] == b'\r' {
+        i += 1;
+        if i < bytes.len() && bytes[i] == b'\n' {
+            i += 1;
+        }
+    } else if bytes[i] == b'\n' {
+        i += 1;
+    }
+
+    // Count empty lines (lines with only whitespace)
+    let mut empty_lines = 0;
+    loop {
+        // Skip whitespace at start of line
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+            i += 1;
+        }
+
+        // Check if this is an empty line
+        if i < bytes.len() && (bytes[i] == b'\n' || bytes[i] == b'\r') {
+            empty_lines += 1;
+            // Skip the line break
+            if bytes[i] == b'\r' {
+                i += 1;
+                if i < bytes.len() && bytes[i] == b'\n' {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        } else {
+            // Non-empty line - we're done counting empty lines
+            // i is now positioned after the leading whitespace
+            break;
+        }
+    }
+
+    // Output the folded content
+    if empty_lines == 0 {
+        // Single line break -> space
+        result.push(' ');
+    } else {
+        // Empty lines -> newlines (first line break becomes space, rest become \n)
+        // Actually per YAML spec: empty lines preserve as \n each
+        for _ in 0..empty_lines {
+            result.push('\n');
+        }
+    }
+
+    i
 }
 
 /// Parse hex digits into a u32.
@@ -2103,5 +2221,142 @@ mod tests {
         } else {
             panic!("expected mapping");
         }
+    }
+
+    #[test]
+    fn test_multiline_double_quoted_simple() {
+        // Simple line folding: newline becomes space
+        let yaml = b"key: \"line one\n  line two\"";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+        if let YamlValue::Sequence(docs) = root.value() {
+            let doc = docs.into_iter().next().unwrap();
+            if let YamlValue::Mapping(fields) = doc {
+                let field = fields.into_iter().next().unwrap();
+                let value = field.value();
+                if let YamlValue::String(s) = value {
+                    assert_eq!(&*s.as_str().unwrap(), "line one line two");
+                } else {
+                    panic!("expected string value");
+                }
+            } else {
+                panic!("expected mapping");
+            }
+        } else {
+            panic!("expected sequence");
+        }
+    }
+
+    #[test]
+    fn test_multiline_double_quoted_empty_line() {
+        // Empty line becomes newline
+        let yaml = b"key: \"line one\n\n  line two\"";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+        if let YamlValue::Sequence(docs) = root.value() {
+            let doc = docs.into_iter().next().unwrap();
+            if let YamlValue::Mapping(fields) = doc {
+                let field = fields.into_iter().next().unwrap();
+                let value = field.value();
+                if let YamlValue::String(s) = value {
+                    assert_eq!(&*s.as_str().unwrap(), "line one\nline two");
+                } else {
+                    panic!("expected string value");
+                }
+            } else {
+                panic!("expected mapping");
+            }
+        } else {
+            panic!("expected sequence");
+        }
+    }
+
+    #[test]
+    fn test_multiline_double_quoted_escaped_newline() {
+        // Escaped newline: no space added
+        let yaml = b"key: \"line one\\\n  line two\"";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+        if let YamlValue::Sequence(docs) = root.value() {
+            let doc = docs.into_iter().next().unwrap();
+            if let YamlValue::Mapping(fields) = doc {
+                let field = fields.into_iter().next().unwrap();
+                let value = field.value();
+                if let YamlValue::String(s) = value {
+                    assert_eq!(&*s.as_str().unwrap(), "line oneline two");
+                } else {
+                    panic!("expected string value");
+                }
+            } else {
+                panic!("expected mapping");
+            }
+        } else {
+            panic!("expected sequence");
+        }
+    }
+
+    #[test]
+    fn test_multiline_single_quoted_simple() {
+        // Simple line folding in single-quoted strings
+        let yaml = b"key: 'line one\n  line two'";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+        if let YamlValue::Sequence(docs) = root.value() {
+            let doc = docs.into_iter().next().unwrap();
+            if let YamlValue::Mapping(fields) = doc {
+                let field = fields.into_iter().next().unwrap();
+                let value = field.value();
+                if let YamlValue::String(s) = value {
+                    assert_eq!(&*s.as_str().unwrap(), "line one line two");
+                } else {
+                    panic!("expected string value");
+                }
+            } else {
+                panic!("expected mapping");
+            }
+        } else {
+            panic!("expected sequence");
+        }
+    }
+
+    #[test]
+    fn test_multiline_single_quoted_with_escaped_quote() {
+        // Single-quoted with '' escape and line folding
+        let yaml = b"key: 'it''s\n  working'";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+        if let YamlValue::Sequence(docs) = root.value() {
+            let doc = docs.into_iter().next().unwrap();
+            if let YamlValue::Mapping(fields) = doc {
+                let field = fields.into_iter().next().unwrap();
+                let value = field.value();
+                if let YamlValue::String(s) = value {
+                    assert_eq!(&*s.as_str().unwrap(), "it's working");
+                } else {
+                    panic!("expected string value");
+                }
+            } else {
+                panic!("expected mapping");
+            }
+        } else {
+            panic!("expected sequence");
+        }
+    }
+
+    #[test]
+    fn test_sequence_entry_content_on_next_line() {
+        // Sequence entry with content on the next line parses without error
+        // (structure verification is done by the official YAML test suite tests 229Q and M6YH)
+        let yaml = b"-\n  name: Mark McGwire\n  hr: 65";
+        let result = YamlIndex::build(yaml);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_sequence_entry_nested_sequence_on_next_line() {
+        // Nested sequence on next line parses without error
+        let yaml = b"-\n - inner1\n - inner2";
+        let result = YamlIndex::build(yaml);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
     }
 }

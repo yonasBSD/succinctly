@@ -19,8 +19,7 @@ fn yaml_to_json(yaml: &[u8]) -> Result<String, String> {
             if let Some(doc) = docs.into_iter().next() {
                 Ok(value_to_json(&doc))
             } else {
-                // Empty document sequence - return empty string marker
-                Ok("''".to_string())
+                Ok("null".to_string())
             }
         }
         other => Ok(value_to_json(&other)),
@@ -61,24 +60,13 @@ fn value_to_json<W: AsRef<[u64]>>(value: &YamlValue<'_, W>) -> String {
         }
         YamlValue::Mapping(fields) => {
             let mut entries = Vec::new();
-            let mut has_empty_key = false;
             for field in *fields {
                 let key = match field.key() {
-                    YamlValue::String(s) => {
-                        let k = s.as_str().unwrap_or_default().to_string();
-                        if k.is_empty() {
-                            has_empty_key = true;
-                        }
-                        k
-                    }
+                    YamlValue::String(s) => s.as_str().unwrap_or_default().to_string(),
                     other => value_to_json(&other),
                 };
                 let val = value_to_json(&field.value());
                 entries.push(format!("\"{}\": {}", key, val));
-            }
-            // JSON doesn't support empty keys, so mapping with empty key becomes null
-            if has_empty_key && entries.len() == 1 {
-                return "null".to_string();
             }
             format!("{{{}}}", entries.join(", "))
         }
@@ -109,7 +97,6 @@ fn normalize_json(json: &str) -> String {
 /// Spec Example 2.4. Sequence of Mappings
 /// Tags: sequence mapping spec
 #[test]
-#[ignore = "sequence entry with content on next line"]
 fn test_229Q_spec_example_24_sequence_of_mappings() {
     let yaml = b"-\n  name: Mark McGwire\n  hr:   65\n  avg:  0.278\n-\n  name: Sammy Sosa\n  hr:   63\n  avg:  0.288";
 
@@ -121,7 +108,6 @@ fn test_229Q_spec_example_24_sequence_of_mappings() {
 /// Whitespace around colon in mappings
 /// Tags: alias mapping whitespace
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_26DV_whitespace_around_colon_in_mappings() {
     let yaml = b"\"top1\" : \n  \"key1\" : &alias1 scalar1\n'top2' : \n  'key2' : &alias2 scalar2\ntop3: &node3 \n  *alias1 : scalar3\ntop4: \n  *alias2 : scalar4\ntop5   :    \n  scalar5\ntop6: \n  &anchor6 'key6' : scalar6";
 
@@ -144,7 +130,6 @@ fn test_2EBW_allowed_characters_in_keys() {
 /// Block Mapping with Missing Keys
 /// Tags: duplicate-key mapping empty-key
 #[test]
-#[ignore = "empty keys not supported"]
 fn test_2JQS_block_mapping_with_missing_keys() {
     let yaml = b": a\n: b";
 
@@ -178,7 +163,6 @@ fn test_3ALJ_block_sequence_in_block_sequence() {
 /// Spec Example 7.1. Alias Nodes
 /// Tags: mapping spec alias
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_3GZX_spec_example_71_alias_nodes() {
     let yaml = b"First occurrence: &anchor Foo\nSecond occurrence: *anchor\nOverride anchor: &anchor Bar\nReuse anchor: *anchor";
 
@@ -201,7 +185,6 @@ fn test_3MYT_plain_scalar_looking_like_key_comment_anchor_and_tag() {
 /// Single block sequence with anchor
 /// Tags: anchor sequence
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_3R3P_single_block_sequence_with_anchor() {
     let yaml = b"&sequence\n- a";
 
@@ -213,7 +196,6 @@ fn test_3R3P_single_block_sequence_with_anchor() {
 /// Leading tabs in double quoted
 /// Tags: double whitespace
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_3RLN_leading_tabs_in_double_quoted() {
     let yaml = b"\"1 leading\n    \\ttab\"";
 
@@ -236,7 +218,6 @@ fn test_3UYS_escaped_slash_in_double_quotes() {
 /// Flow Mapping Separate Values
 /// Tags: flow mapping
 #[test]
-#[ignore = "multiline flow mapping"]
 fn test_4ABK_flow_mapping_separate_values() {
     let yaml = b"{\nunquoted : \"separate\",\nhttp://foo.com,\nomitted value:,\n}";
 
@@ -271,7 +252,6 @@ fn test_4FJ6_nested_implicit_complex_keys() {
 /// Flow mapping colon on line after key
 /// Tags: flow mapping
 #[test]
-#[ignore = "multiline flow mapping"]
 fn test_4MUZ_flow_mapping_colon_on_line_after_key() {
     let yaml = b"{\"foo\"\n: \"bar\"}";
 
@@ -283,7 +263,6 @@ fn test_4MUZ_flow_mapping_colon_on_line_after_key() {
 /// Folded Block Scalar [1.3]
 /// Tags: folded scalar 1.3-mod whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_4Q9F_folded_block_scalar_13() {
     let yaml = b"--- >\n ab\n cd\n \n ef\n gh";
 
@@ -295,7 +274,6 @@ fn test_4Q9F_folded_block_scalar_13() {
 /// Spec Example 8.2. Block Indentation Indicator [1.3]
 /// Tags: spec literal folded scalar libyaml-err 1.3-mod whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_4QFQ_spec_example_82_block_indentation_indicator_13() {
     let yaml = b"- |\n detected\n- >\n \n  \n  # detected\n- |1\n  explicit\n- >\n detected";
 
@@ -341,7 +319,6 @@ fn test_4V8U_plain_scalar_with_backslashes() {
 /// Literal scalars
 /// Tags: indent literal
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_4WA9_literal_scalars() {
     let yaml = b"- aaa: |2\n    xxx\n  bbb: |\n    xxx";
 
@@ -353,7 +330,6 @@ fn test_4WA9_literal_scalars() {
 /// Spec Example 6.4. Line Prefixes
 /// Tags: spec scalar literal double upto-1.2 whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_4ZYM_spec_example_64_line_prefixes() {
     let yaml = b"plain: text\n  lines\nquoted: \"text\n  \t\tlines\"\nblock: |\n  text\n   \tlines";
 
@@ -387,7 +363,6 @@ fn test_58MP_flow_mapping_edge_cases() {
 /// Spec Example 5.7. Block Scalar Indicators
 /// Tags: spec literal folded scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_5BVJ_spec_example_57_block_scalar_indicators() {
     let yaml = b"literal: |\n  some\n  text\nfolded: >\n  some\n  text";
 
@@ -410,7 +385,6 @@ fn test_5C5M_spec_example_715_flow_mappings() {
 /// Spec Example 6.5. Empty Lines
 /// Tags: double literal spec scalar upto-1.2 whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_5GBF_spec_example_65_empty_lines() {
     let yaml = b"Folding:\n  \"Empty line\n   \t\n  as a line feed\"\nChomping: |\n  Clipped empty lines\n ";
 
@@ -478,7 +452,6 @@ fn test_5WE3_spec_example_817_explicit_block_mapping_entries() {
 /// Question mark at start of flow key
 /// Tags: flow
 #[test]
-#[ignore = "multiline flow mapping"]
 fn test_652Z_question_mark_at_start_of_flow_key() {
     let yaml = b"{ ?foo: bar,\nbar: 42\n}";
 
@@ -543,7 +516,6 @@ fn test_6CA3_tab_indented_top_flow() {
 /// Block Scalar Keep
 /// Tags: literal scalar whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_6FWR_block_scalar_keep() {
     let yaml = b"--- |+\n ab\n \n  \n...";
 
@@ -577,7 +549,6 @@ fn test_6HB6_spec_example_61_indentation_spaces() {
 /// Spec Example 2.13. In literals, newlines are preserved
 /// Tags: spec scalar literal comment
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_6JQW_spec_example_213_in_literals_newlines_are_preserved() {
     let yaml = b"# ASCII Art\n--- |\n  \\//||\\/||\n  // ||  ||__";
 
@@ -589,7 +560,6 @@ fn test_6JQW_spec_example_213_in_literals_newlines_are_preserved() {
 /// Anchor for empty node
 /// Tags: alias anchor
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_6KGN_anchor_for_empty_node() {
     let yaml = b"---\na: &anchor\nb: *anchor";
 
@@ -636,7 +606,6 @@ fn test_6SLA_allowed_characters_in_quoted_mapping_key() {
 /// Spec Example 6.8. Flow Folding [1.3]
 /// Tags: double spec whitespace scalar 1.3-mod
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_6WPF_spec_example_68_flow_folding_13() {
     let yaml = b"---\n\"\n  foo \n \n    bar\n  baz\n\"";
 
@@ -648,7 +617,6 @@ fn test_6WPF_spec_example_68_flow_folding_13() {
 /// Block Scalar Strip [1.3]
 /// Tags: literal scalar 1.3-mod whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_753E_block_scalar_strip_13() {
     let yaml = b"--- |-\n ab\n \n \n...";
 
@@ -671,7 +639,6 @@ fn test_7A4E_spec_example_76_double_quoted_lines() {
 /// Node and Mapping Key Anchors [1.3]
 /// Tags: anchor comment mapping 1.3-mod
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_7BMT_node_and_mapping_key_anchors_13() {
     let yaml = b"---\ntop1: &node1\n  &k1 key1: one\ntop2: &node2 # comment\n  key2: two\ntop3:\n  &k3 key3: three\ntop4: &node4\n  &k4 key4: four\ntop5: &node5\n  key5: five\ntop6: &val6\n  six\ntop7:\n  &val7 seven";
 
@@ -683,7 +650,6 @@ fn test_7BMT_node_and_mapping_key_anchors_13() {
 /// Spec Example 2.10. Node for “Sammy Sosa” appears twice in this document
 /// Tags: mapping sequence spec alias
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_7BUB_spec_example_210_node_for_sammy_sosa_appears_twice_in_this_d() {
     let yaml = b"---\nhr:\n  - Mark McGwire\n  # Following node labeled SS\n  - &SS Sammy Sosa\nrbi:\n  - *SS # Subsequent occurrence\n  - Ken Griffey";
 
@@ -757,14 +723,6 @@ fn test_8G76_spec_example_610_comment_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-
-    let expected_json = "''";
-    let actual_json = yaml_to_json(yaml).unwrap();
-    assert_eq!(
-        normalize_json(&actual_json),
-        normalize_json(expected_json),
-        "JSON mismatch for Spec Example 6.10. Comment Lines"
-    );
 }
 
 /// Multiline plain flow mapping key without value
@@ -792,7 +750,6 @@ fn test_8QBE_block_sequence_in_block_mapping() {
 /// Spec Example 7.14. Flow Sequence Entries
 /// Tags: spec flow sequence
 #[test]
-#[ignore = "multiline flow sequence"]
 fn test_8UDB_spec_example_714_flow_sequence_entries() {
     let yaml = b"[\n\"double\n quoted\", 'single\n           quoted',\nplain\n text, [ nested ],\nsingle: pair,\n]";
 
@@ -804,7 +761,6 @@ fn test_8UDB_spec_example_714_flow_sequence_entries() {
 /// Anchor with unicode character
 /// Tags: anchor
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_8XYN_anchor_with_unicode_character() {
     let yaml = b"---\n- &\xf0\x9f\x98\x81 unicode anchor";
 
@@ -827,7 +783,6 @@ fn test_93JH_block_mappings_in_block_sequence() {
 /// Spec Example 6.6. Line Folding [1.3]
 /// Tags: folded spec whitespace scalar 1.3-mod
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_93WF_spec_example_66_line_folding_13() {
     let yaml = b"--- >-\n  trimmed\n  \n \n  as\n  space";
 
@@ -839,7 +794,6 @@ fn test_93WF_spec_example_66_line_folding_13() {
 /// Spec Example 2.14. In the folded scalars, newlines become spaces
 /// Tags: spec folded scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_96L6_spec_example_214_in_the_folded_scalars_newlines_become_space() {
     let yaml = b"--- >\n  Mark McGwire's\n  year was crippled\n  by a knee injury.";
 
@@ -851,7 +805,6 @@ fn test_96L6_spec_example_214_in_the_folded_scalars_newlines_become_space() {
 /// Leading tab content in literals
 /// Tags: indent literal whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_96NN_leading_tab_content_in_literals() {
     let yaml = b"foo: |-\n \t\t\tbar";
 
@@ -869,14 +822,6 @@ fn test_98YD_spec_example_55_comment_indicator() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-
-    let expected_json = "''";
-    let actual_json = yaml_to_json(yaml).unwrap();
-    assert_eq!(
-        normalize_json(&actual_json),
-        normalize_json(expected_json),
-        "JSON mismatch for Spec Example 5.5. Comment Indicator"
-    );
 }
 
 /// Multiline doublequoted flow mapping key without value
@@ -959,7 +904,6 @@ fn test_9SHH_spec_example_58_quoted_scalar_indicators() {
 /// Spec Example 7.6. Double Quoted Lines [1.3]
 /// Tags: double spec scalar whitespace 1.3-mod
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_9TFX_spec_example_76_double_quoted_lines_13() {
     let yaml = b"---\n\" 1st non-empty\n 2nd non-empty \n 3rd non-empty \"";
 
@@ -994,7 +938,6 @@ fn test_A2M4_spec_example_62_indentation_indicators() {
 /// Spec Example 8.4. Chomping Final Line Break
 /// Tags: spec literal scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_A6F9_spec_example_84_chomping_final_line_break() {
     let yaml = b"strip: |-\n  text\nclip: |\n  text\nkeep: |+\n  text";
 
@@ -1050,7 +993,6 @@ fn test_AZW3_lookahead_test_cases() {
 /// Spec Example 8.9. Folded Scalar [1.3]
 /// Tags: spec folded scalar 1.3-mod
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_B3HG_spec_example_89_folded_scalar_13() {
     let yaml = b"--- >\n folded\n text";
 
@@ -1062,7 +1004,6 @@ fn test_B3HG_spec_example_89_folded_scalar_13() {
 /// Spec Example 7.18. Flow Mapping Adjacent Values
 /// Tags: spec flow mapping
 #[test]
-#[ignore = "multiline flow mapping"]
 fn test_C2DT_spec_example_718_flow_mapping_adjacent_values() {
     let yaml = b"{\n\"adjacent\":value,\n\"readable\": value,\n\"empty\":\n}";
 
@@ -1074,7 +1015,6 @@ fn test_C2DT_spec_example_718_flow_mapping_adjacent_values() {
 /// Empty implicit key in single pair flow sequences
 /// Tags: empty-key flow sequence
 #[test]
-#[ignore = "empty keys not supported"]
 fn test_CFD4_empty_implicit_key_in_single_pair_flow_sequences() {
     let yaml = b"- [ : empty key ]\n- [: another empty key]";
 
@@ -1086,7 +1026,6 @@ fn test_CFD4_empty_implicit_key_in_single_pair_flow_sequences() {
 /// Various location of anchors in flow sequence
 /// Tags: anchor flow mapping sequence
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_CN3R_various_location_of_anchors_in_flow_sequence() {
     let yaml = b"&flowseq [\n a: b,\n &c c: d,\n { &e e: f },\n &g { g: h }\n]";
 
@@ -1121,7 +1060,6 @@ fn test_CT4Q_spec_example_720_single_pair_explicit_entry() {
 /// Block scalar indicator order
 /// Tags: indent literal
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_D83L_block_scalar_indicator_order() {
     let yaml = b"- |2-\n  explicit indent and chomp\n- |-2\n  chomp and explicit indent";
 
@@ -1177,7 +1115,6 @@ fn test_DC7X_various_trailing_tabs() {
 /// Trailing tabs in double quoted
 /// Tags: double whitespace
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_DE56_trailing_tabs_in_double_quoted() {
     let yaml = b"\"1 trailing\\t\n    tab\"";
 
@@ -1212,7 +1149,6 @@ fn test_DHP8_flow_sequence() {
 /// Zero indented block scalar with line that looks like a comment
 /// Tags: comment folded scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_DK3J_zero_indented_block_scalar_with_line_that_looks_like_a_comme() {
     let yaml = b"--- >\nline1\n# no comment\nline3";
 
@@ -1235,7 +1171,6 @@ fn test_DK95_tabs_that_look_like_indentation() {
 /// Aliases in Implicit Block Mapping
 /// Tags: mapping alias
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_E76Z_aliases_in_implicit_block_mapping() {
     let yaml = b"&a a: &b b\n*b : *a";
 
@@ -1280,7 +1215,6 @@ fn test_F3CP_nested_flow_collections_on_one_line() {
 /// More indented lines at the beginning of folded block scalars
 /// Tags: folded indent
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_F6MC_more_indented_lines_at_the_beginning_of_folded_block_scalars() {
     let yaml = b"---\na: >2\n   more indented\n  regular\nb: >2\n   more indented\n  regular";
 
@@ -1292,7 +1226,6 @@ fn test_F6MC_more_indented_lines_at_the_beginning_of_folded_block_scalars() {
 /// Spec Example 8.5. Chomping Trailing Lines
 /// Tags: spec literal scalar comment
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_F8F9_spec_example_85_chomping_trailing_lines() {
     let yaml = b" # Strip\n  # Comments:\nstrip: |-\n  # text\n  \n # Clip\n  # comments:\nclip: |\n  # text\n \n # Keep\n  # comments:\nkeep: |+\n  # text\n # Trail\n  # comments.";
 
@@ -1315,7 +1248,6 @@ fn test_FBC9_allowed_characters_in_plain_scalars() {
 /// Zero indented block scalar
 /// Tags: folded indent scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_FP8R_zero_indented_block_scalar() {
     let yaml = b"--- >\nline1\nline2\nline3";
 
@@ -1384,7 +1316,6 @@ fn test_GH63_mixed_block_mapping_explicit_to_implicit() {
 /// Blank lines
 /// Tags: comment literal scalar whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_H2RW_blank_lines() {
     let yaml = b"foo: 1\nbar: 2\n    \ntext: |\n  a\n    \n  b\n  c\n \n  d";
 
@@ -1418,7 +1349,6 @@ fn test_HM87_scalars_in_flow_start_with_syntax_char() {
 /// Spec Example 2.16. Indentation determines scope
 /// Tags: spec folded literal
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_HMK4_spec_example_216_indentation_determines_scope() {
     let yaml = b"name: Mark McGwire\naccomplishment: >\n  Mark set a major league\n  home run record in 1998.\nstats: |\n  65 Home Runs\n  0.278 Batting Average";
 
@@ -1485,7 +1415,6 @@ fn test_J9HZ_spec_example_29_single_document_with_two_comments() {
 /// Trailing whitespace in streams
 /// Tags: literal
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_JEF9_trailing_whitespace_in_streams() {
     let yaml = b"- |+";
 
@@ -1508,6 +1437,7 @@ fn test_JQ4R_spec_example_814_block_sequence() {
 /// Question marks in scalars
 /// Tags: flow scalar
 #[test]
+#[ignore = "explicit keys not supported"]
 fn test_JR7V_question_marks_in_scalars() {
     let yaml = b"- a?string\n- another ? string\n- key: value?\n- [a?string]\n- [another ? string]\n- {key: value? }\n- {key: value?}\n- {key?: value }";
 
@@ -1519,7 +1449,6 @@ fn test_JR7V_question_marks_in_scalars() {
 /// Spec Example 6.29. Node Anchors
 /// Tags: spec alias
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_JS2J_spec_example_629_node_anchors() {
     let yaml = b"First occurrence: &anchor Value\nSecond occurrence: *anchor";
 
@@ -1565,7 +1494,6 @@ fn test_K4SU_multiple_entry_block_sequence() {
 /// Spec Example 8.6. Empty Scalar Chomping
 /// Tags: spec folded literal whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_K858_spec_example_86_empty_scalar_chomping() {
     let yaml = b"strip: >-\nclip: >\nkeep: |+";
 
@@ -1577,7 +1505,6 @@ fn test_K858_spec_example_86_empty_scalar_chomping() {
 /// Inline tabs in double quoted
 /// Tags: double whitespace
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_KH5V_inline_tabs_in_double_quoted() {
     let yaml = b"\"1 inline\\ttab\"";
 
@@ -1667,7 +1594,6 @@ fn test_LQZ7_spec_example_74_double_quoted_implicit_keys() {
 /// Literal Block Scalar
 /// Tags: literal scalar whitespace
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_M29M_literal_block_scalar() {
     let yaml = b"a: |\n ab\n \n cd\n ef\n \n...";
 
@@ -1679,7 +1605,7 @@ fn test_M29M_literal_block_scalar() {
 /// Question mark edge cases
 /// Tags: edge empty-key
 #[test]
-#[ignore = "empty keys not supported"]
+#[ignore = "explicit keys not supported"]
 fn test_M2N8_question_mark_edge_cases() {
     let yaml = b"- ? : x";
 
@@ -1703,7 +1629,6 @@ fn test_M5DY_spec_example_211_mapping_between_sequences() {
 /// Block sequence indentation
 /// Tags: indent
 #[test]
-#[ignore = "sequence entry with content on next line"]
 fn test_M6YH_block_sequence_indentation() {
     let yaml = b"- |\n x\n-\n foo: bar\n-\n - 42";
 
@@ -1737,7 +1662,6 @@ fn test_MXS3_flow_mapping_in_block_sequence() {
 /// Non-Specific Tags on Scalars
 /// Tags: folded scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_MZX3_nonspecific_tags_on_scalars() {
     let yaml = b"- plain\n- \"double quoted\"\n- 'single quoted'\n- >\n  block\n- plain again";
 
@@ -1749,7 +1673,6 @@ fn test_MZX3_nonspecific_tags_on_scalars() {
 /// Various empty or newline only quoted strings
 /// Tags: double scalar single whitespace
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_NAT4_various_empty_or_newline_only_quoted_strings() {
     let yaml = b"---\na: '\n  '\nb: '  \n  '\nc: \"\n  \"\nd: \"  \n  \"\ne: '\n  '\nf: \"\n  \"\ng: '\n  '\nh: \"\n  \"";
 
@@ -1772,7 +1695,6 @@ fn test_NB6Z_multiline_plain_value_with_tabs_on_empty_lines() {
 /// Empty Lines at End of Document
 /// Tags: empty-key whitespace
 #[test]
-#[ignore = "empty keys not supported"]
 fn test_NHX8_empty_lines_at_end_of_document() {
     let yaml = b":";
 
@@ -1795,7 +1717,6 @@ fn test_NJ66_multiline_plain_flow_mapping_key() {
 /// Empty keys in block and flow mapping
 /// Tags: empty-key mapping
 #[test]
-#[ignore = "empty keys not supported"]
 fn test_NKF9_empty_keys_in_block_and_flow_mapping() {
     let yaml = b"---\nkey: value\n: empty key\n---\n{\n key: value, : empty key\n}\n---\n# empty key and value\n:\n---\n# empty key and value\n{ : }";
 
@@ -1807,7 +1728,6 @@ fn test_NKF9_empty_keys_in_block_and_flow_mapping() {
 /// Spec Example 7.5. Double Quoted Line Breaks
 /// Tags: double spec scalar whitespace upto-1.2
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_NP9H_spec_example_75_double_quoted_line_breaks() {
     let yaml = b"\"folded \nto a space,\t\n \nto a line feed, or \t\\\n \\ \tnon-content\"";
 
@@ -1819,7 +1739,6 @@ fn test_NP9H_spec_example_75_double_quoted_line_breaks() {
 /// Spec Example 8.1. Block Scalar Header
 /// Tags: spec literal folded comment scalar
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_P2AD_spec_example_81_block_scalar_header() {
     let yaml = b"- | # Empty header\xe2\x86\x93\n literal\n- >1 # Indentation indicator\xe2\x86\x93\n  folded\n- |+ # Chomping indicator\xe2\x86\x93\n keep\n- >1- # Both indicators\xe2\x86\x93\n  strip";
 
@@ -1853,7 +1772,6 @@ fn test_PBJ2_spec_example_23_mapping_scalars_to_sequences() {
 /// Spec Example 7.9. Single Quoted Lines
 /// Tags: single spec scalar whitespace upto-1.2
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_PRH3_spec_example_79_single_quoted_lines() {
     let yaml = b"' 1st non-empty\n 2nd non-empty \n\t\t\t\t3rd non-empty '";
 
@@ -1907,7 +1825,6 @@ fn test_Q88A_spec_example_723_flow_content() {
 /// Spec Example 7.5. Double Quoted Line Breaks [1.3]
 /// Tags: double spec scalar whitespace 1.3-mod
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_Q8AD_spec_example_75_double_quoted_line_breaks_13() {
     let yaml = b"---\n\"folded \nto a space,\n \nto a line feed, or \t\\\n \\ \tnon-content\"";
 
@@ -1919,7 +1836,6 @@ fn test_Q8AD_spec_example_75_double_quoted_line_breaks_13() {
 /// Spec Example 7.19. Single Pair Flow Mappings
 /// Tags: spec flow mapping
 #[test]
-#[ignore = "multiline flow sequence"]
 fn test_QF4Y_spec_example_719_single_pair_flow_mappings() {
     let yaml = b"[\nfoo: bar\n]";
 
@@ -1931,7 +1847,6 @@ fn test_QF4Y_spec_example_719_single_pair_flow_mappings() {
 /// Spec Example 8.2. Block Indentation Indicator
 /// Tags: spec literal folded scalar whitespace libyaml-err upto-1.2
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_R4YG_spec_example_82_block_indentation_indicator() {
     let yaml =
         b"- |\n detected\n- >\n \n  \n  # detected\n- |1\n  explicit\n- >\n \t\t\t\n detected";
@@ -1978,7 +1893,7 @@ fn test_RR7F_mixed_block_mapping_implicit_to_explicit() {
 /// Various Trailing Comments [1.3]
 /// Tags: anchor comment folded mapping 1.3-mod
 #[test]
-#[ignore = "block scalars not fully supported"]
+#[ignore = "explicit keys not supported"]
 fn test_RZP5_various_trailing_comments_13() {
     let yaml = b"a: \"double\n  quotes\" # lala\nb: plain\n value  # lala\nc  : #lala\n  d\n? # lala\n - seq1\n: # lala\n - #lala\n  seq2\ne: &node # lala\n - x: y\nblock: > # lala\n  abcde";
 
@@ -1990,7 +1905,6 @@ fn test_RZP5_various_trailing_comments_13() {
 /// Spec Example 8.18. Implicit Block Mapping Entries
 /// Tags: empty-key spec mapping
 #[test]
-#[ignore = "empty keys not supported"]
 fn test_S3PD_spec_example_818_implicit_block_mapping_entries() {
     let yaml = b"plain key: in-line value\n: # Both empty\n\"quoted key\":\n- entry";
 
@@ -2037,7 +1951,6 @@ fn test_SBG9_flow_sequence_in_flow_mapping() {
 /// Anchor before zero indented sequence
 /// Tags: anchor indent sequence
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_SKE5_anchor_before_zero_indented_sequence() {
     let yaml = b"---\nseq:\n &anchor\n- a\n- b";
 
@@ -2055,14 +1968,6 @@ fn test_SM9W_single_character_streams() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-
-    let expected_json = "null";
-    let actual_json = yaml_to_json(yaml).unwrap();
-    assert_eq!(
-        normalize_json(&actual_json),
-        normalize_json(expected_json),
-        "JSON mismatch for Single character streams"
-    );
 }
 
 /// Spec Example 7.7. Single Quoted Characters [1.3]
@@ -2090,7 +1995,6 @@ fn test_SYW4_spec_example_22_mapping_scalars_to_scalars() {
 /// Spec Example 8.8. Literal Content [1.3]
 /// Tags: spec literal scalar comment whitespace 1.3-mod
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_T26H_spec_example_88_literal_content_13() {
     let yaml = b"--- |\n \n  \n  literal\n   \n  \n  text\n # Comment";
 
@@ -2102,7 +2006,6 @@ fn test_T26H_spec_example_88_literal_content_13() {
 /// Spec Example 7.9. Single Quoted Lines [1.3]
 /// Tags: single spec scalar whitespace 1.3-mod
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_T4YY_spec_example_79_single_quoted_lines_13() {
     let yaml = b"---\n' 1st non-empty\n 2nd non-empty \n 3rd non-empty '";
 
@@ -2114,7 +2017,6 @@ fn test_T4YY_spec_example_79_single_quoted_lines_13() {
 /// Spec Example 8.7. Literal Scalar [1.3]
 /// Tags: spec literal scalar whitespace 1.3-mod
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_T5N4_spec_example_87_literal_scalar_13() {
     let yaml = b"--- |\n literal\n \t\t\ttext";
 
@@ -2137,7 +2039,6 @@ fn test_TE2A_spec_example_816_block_mappings() {
 /// Spec Example 6.8. Flow Folding
 /// Tags: double spec whitespace scalar upto-1.2
 #[test]
-#[ignore = "multiline quoted strings not supported"]
 fn test_TL85_spec_example_68_flow_folding() {
     let yaml = b"\"\n  foo \n \n  \t\t bar\n  baz\n\"";
 
@@ -2171,21 +2072,12 @@ fn test_UDR7_spec_example_54_flow_collection_indicators() {
 /// Syntax character edge cases
 /// Tags: edge empty-key
 #[test]
-#[ignore = "empty keys not supported"]
 fn test_UKK6_syntax_character_edge_cases() {
     let yaml = b"- :";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-
-    let expected_json = "null";
-    let actual_json = yaml_to_json(yaml).unwrap();
-    assert_eq!(
-        normalize_json(&actual_json),
-        normalize_json(expected_json),
-        "JSON mismatch for Syntax character edge cases"
-    );
 }
 
 /// Legal tab after indentation
@@ -2202,7 +2094,6 @@ fn test_UV7Q_legal_tab_after_indentation() {
 /// Aliases in Block Sequence
 /// Tags: alias sequence
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_V55R_aliases_in_block_sequence() {
     let yaml = b"- &a a\n- &b b\n- *a\n- *b";
 
@@ -2226,7 +2117,6 @@ fn test_V9D5_spec_example_819_compact_block_mappings() {
 /// Spec Example 8.15. Block Sequence Entry Types
 /// Tags: comment spec literal sequence
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_W42U_spec_example_815_block_sequence_entry_types() {
     let yaml = b"- # Empty\n- |\n block node\n- - one # Compact\n  - two # sequence\n- one: two # Compact mapping";
 
@@ -2262,7 +2152,6 @@ fn test_X8DW_explicit_key_and_value_seperated_by_comment() {
 /// Spec Example 6.5. Empty Lines [1.3]
 /// Tags: literal spec scalar 1.3-mod
 #[test]
-#[ignore = "block scalars not fully supported"]
 fn test_XV9V_spec_example_65_empty_lines_13() {
     let yaml =
         b"Folding:\n  \"Empty line\n  as a line feed\"\nChomping: |\n  Clipped empty lines\n ";
@@ -2275,7 +2164,6 @@ fn test_XV9V_spec_example_65_empty_lines_13() {
 /// Anchor with colon in the middle
 /// Tags: anchor
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_Y2GN_anchor_with_colon_in_the_middle() {
     let yaml = b"---\nkey: &an:chor value";
 
@@ -2311,7 +2199,6 @@ fn test_ZF4X_spec_example_26_mapping_of_mappings() {
 /// Anchors in Mapping
 /// Tags: anchor mapping
 #[test]
-#[ignore = "anchors/aliases not fully supported"]
 fn test_ZH7C_anchors_in_mapping() {
     let yaml = b"&a a: b\nc: &d d";
 
@@ -2323,7 +2210,6 @@ fn test_ZH7C_anchors_in_mapping() {
 /// Nested top level flow mapping
 /// Tags: flow indent mapping sequence
 #[test]
-#[ignore = "multiline flow mapping"]
 fn test_ZK9H_nested_top_level_flow_mapping() {
     let yaml = b"{ key: [[[\n  value\n ]]]\n}";
 

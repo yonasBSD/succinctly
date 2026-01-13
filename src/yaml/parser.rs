@@ -586,32 +586,95 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parse an unquoted scalar value (stops at colon+space, newline, or comment).
-    fn parse_unquoted_value(&mut self) -> usize {
+    /// Parse an unquoted scalar value with a minimum indentation requirement.
+    /// Handles multiline plain scalars - continues on lines more indented than start_indent.
+    fn parse_unquoted_value_with_indent(&mut self, start_indent: usize) -> usize {
         let start = self.pos;
 
-        while let Some(b) = self.peek() {
-            match b {
-                b'\n' | b'#' => break,
-                b':' => {
-                    // Colon followed by whitespace ends the value (could be a key)
-                    // But in value context, colons in URLs etc. are allowed
-                    // For Phase 1, we stop at colon + whitespace
-                    if self.peek_at(1) == Some(b' ')
-                        || self.peek_at(1) == Some(b'\t')
-                        || self.peek_at(1) == Some(b'\n')
-                    {
-                        break;
+        loop {
+            // Parse content on current line
+            while let Some(b) = self.peek() {
+                match b {
+                    b'\n' | b'#' => break,
+                    b':' => {
+                        // Colon followed by whitespace ends the value (could be a key)
+                        // But in value context, colons in URLs etc. are allowed
+                        if self.peek_at(1) == Some(b' ')
+                            || self.peek_at(1) == Some(b'\t')
+                            || self.peek_at(1) == Some(b'\n')
+                        {
+                            break;
+                        }
+                        self.advance();
                     }
+                    _ => self.advance(),
+                }
+            }
+
+            // Check if we can continue to next line
+            if self.peek() != Some(b'\n') {
+                break;
+            }
+
+            // Look ahead to see if next line is a continuation
+            let mut lookahead = self.pos + 1; // Skip \n
+            let mut next_indent = 0;
+
+            // Count indentation on next line (spaces and tabs both count)
+            while lookahead < self.input.len() {
+                match self.input[lookahead] {
+                    b' ' | b'\t' => {
+                        next_indent += 1;
+                        lookahead += 1;
+                    }
+                    _ => break,
+                }
+            }
+
+            // Check what comes after the indent
+            if lookahead >= self.input.len() {
+                // EOF - stop here
+                break;
+            }
+
+            let next_char = self.input[lookahead];
+
+            // If empty line (just whitespace then newline), skip it and continue
+            if next_char == b'\n' {
+                self.advance(); // Skip current \n
+                                // Skip the empty line's whitespace
+                while matches!(self.peek(), Some(b' ') | Some(b'\t')) {
                     self.advance();
                 }
-                _ => self.advance(),
+                continue;
+            }
+
+            // Continuation requires more indent than where scalar started
+            // and next line shouldn't start block structure or be a comment
+            if next_indent > start_indent
+                && next_char != b'#'
+                && !(next_char == b'-'
+                    && lookahead + 1 < self.input.len()
+                    && self.input[lookahead + 1] == b' ')
+                && !(next_char == b':'
+                    && lookahead + 1 < self.input.len()
+                    && matches!(self.input[lookahead + 1], b' ' | b'\n'))
+            {
+                // Continue to next line
+                self.advance(); // Skip \n
+                                // Skip leading whitespace
+                while matches!(self.peek(), Some(b' ') | Some(b'\t')) {
+                    self.advance();
+                }
+            } else {
+                // Not a continuation - stop here
+                break;
             }
         }
 
         // Trim trailing whitespace
         let mut end = self.pos;
-        while end > start && self.input[end - 1] == b' ' {
+        while end > start && matches!(self.input[end - 1], b' ' | b'\t') {
             end -= 1;
         }
 
@@ -665,10 +728,7 @@ impl<'a> Parser<'a> {
             end -= 1;
         }
 
-        if end == start {
-            return Err(YamlError::UnexpectedEof { context: "key" });
-        }
-
+        // Empty key is valid in YAML (e.g., `: value`)
         Ok(end - start)
     }
 
@@ -802,7 +862,7 @@ impl<'a> Parser<'a> {
             // Open value node
             self.set_ib();
             self.write_bp_open();
-            self.parse_inline_value()?;
+            self.parse_inline_value(indent)?;
             self.write_bp_close();
         }
 
@@ -947,7 +1007,7 @@ impl<'a> Parser<'a> {
                     // Scalar value - wrap in BP
                     self.set_ib();
                     self.write_bp_open();
-                    self.parse_inline_value()?;
+                    self.parse_inline_value(indent)?;
                     self.write_bp_close();
                 }
             }
@@ -960,7 +1020,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an inline scalar value (on the same line as the key).
-    fn parse_inline_value(&mut self) -> Result<(), YamlError> {
+    fn parse_inline_value(&mut self, min_indent: usize) -> Result<(), YamlError> {
         match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
@@ -969,7 +1029,7 @@ impl<'a> Parser<'a> {
                 self.parse_single_quoted()?;
             }
             _ => {
-                self.parse_unquoted_value();
+                self.parse_unquoted_value_with_indent(min_indent);
             }
         }
         Ok(())
@@ -1022,7 +1082,7 @@ impl<'a> Parser<'a> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value();
+                self.parse_unquoted_value_with_indent(min_indent);
                 self.write_bp_close();
             }
         }
@@ -1515,12 +1575,7 @@ impl<'a> Parser<'a> {
             end -= 1;
         }
 
-        if end == start {
-            return Err(YamlError::UnexpectedEof {
-                context: "flow key",
-            });
-        }
-
+        // Empty key is valid in YAML (e.g., `[ : value ]`)
         Ok(end - start)
     }
 
@@ -1565,7 +1620,40 @@ impl<'a> Parser<'a> {
 
         while let Some(b) = self.peek() {
             match b {
-                b',' | b'}' | b']' | b'\n' | b'\r' => break,
+                b',' | b'}' | b']' => break,
+                b'\n' | b'\r' => {
+                    // Multiline value - check if next line continues the value
+                    let mut lookahead = self.pos;
+                    // Skip newline
+                    if lookahead < self.input.len() && self.input[lookahead] == b'\r' {
+                        lookahead += 1;
+                    }
+                    if lookahead < self.input.len() && self.input[lookahead] == b'\n' {
+                        lookahead += 1;
+                    }
+                    // Skip leading whitespace on next line
+                    while lookahead < self.input.len()
+                        && matches!(self.input[lookahead], b' ' | b'\t')
+                    {
+                        lookahead += 1;
+                    }
+                    // Check what follows
+                    if lookahead >= self.input.len()
+                        || matches!(self.input[lookahead], b',' | b'}' | b']')
+                    {
+                        // Delimiter or EOF - stop value here
+                        break;
+                    }
+                    // Continue parsing on next line
+                    self.advance(); // Skip \r if present
+                    if self.peek() == Some(b'\n') {
+                        self.advance();
+                    }
+                    // Skip leading whitespace
+                    while matches!(self.peek(), Some(b' ') | Some(b'\t')) {
+                        self.advance();
+                    }
+                }
                 _ => self.advance(),
             }
         }
@@ -1839,12 +1927,20 @@ impl<'a> Parser<'a> {
     fn parse_anchor_name(&mut self) -> Result<String, YamlError> {
         let start = self.pos;
 
+        // YAML anchor names can contain any character except flow indicators,
+        // whitespace, and certain special chars
         while let Some(b) = self.peek() {
             match b {
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {
+                // Stop at flow indicators, whitespace, and newlines
+                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' | b':' => break,
+                // High byte indicates start of multi-byte UTF-8 - consume all bytes
+                0x80..=0xFF => {
+                    // Multi-byte UTF-8 character - consume continuation bytes
                     self.advance();
                 }
-                _ => break,
+                _ => {
+                    self.advance();
+                }
             }
         }
 
@@ -1866,8 +1962,6 @@ impl<'a> Parser<'a> {
     /// Parse an anchor definition (`&name`).
     /// Records the anchor and returns, expecting the value to follow.
     fn parse_anchor(&mut self) -> Result<String, YamlError> {
-        let anchor_offset = self.pos;
-
         // Consume `&`
         self.advance();
 
@@ -1878,14 +1972,7 @@ impl<'a> Parser<'a> {
         self.skip_inline_whitespace();
 
         // Record anchor - will point to the next BP position (the value)
-        // We'll update this when the value is parsed
-        if self.anchors.contains_key(&name) {
-            return Err(YamlError::DuplicateAnchor {
-                offset: anchor_offset,
-                name,
-            });
-        }
-
+        // YAML allows anchor redefinition - later definitions override earlier ones
         // Store placeholder - will be updated when value BP is opened
         self.anchors.insert(name.clone(), self.bp_pos);
 
@@ -2077,7 +2164,12 @@ impl<'a> Parser<'a> {
 
         // Check what kind of content this is
         match self.peek() {
-            Some(b'-') if self.peek_at(1) == Some(b' ') => {
+            Some(b'-')
+                if matches!(
+                    self.peek_at(1),
+                    Some(b' ') | Some(b'\n') | Some(b'\r') | None
+                ) =>
+            {
                 self.parse_sequence_item(indent)?;
             }
             Some(b'#') => {
@@ -2111,7 +2203,7 @@ impl<'a> Parser<'a> {
                             self.parse_single_quoted()?;
                         }
                         _ => {
-                            self.parse_unquoted_value();
+                            self.parse_unquoted_value_with_indent(indent);
                         }
                     }
                     self.write_bp_close();
@@ -2621,6 +2713,18 @@ mod tests {
         assert!(
             result.is_ok(),
             "quoted key mapping should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_empty_key_in_flow_sequence() {
+        // CFD4: [ : empty key ]
+        let yaml = b"- [ : empty key ]";
+        let result = build_semi_index(yaml);
+        assert!(
+            result.is_ok(),
+            "empty key in flow sequence should parse: {:?}",
             result
         );
     }
