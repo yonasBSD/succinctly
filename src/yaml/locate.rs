@@ -323,6 +323,7 @@ pub fn locate_offset_detailed<W: AsRef<[u64]>>(
         YamlValue::Mapping(_) => "mapping",
         YamlValue::Sequence(_) => "sequence",
         YamlValue::String(_) => "string",
+        YamlValue::Alias { .. } => "alias",
         YamlValue::Error(_) => "error",
     };
 

@@ -1,20 +1,29 @@
-//! YAML parser (oracle) for Phase 3: YAML with block scalars.
+//! YAML parser (oracle) for Phase 4: YAML with anchors and aliases.
 //!
 //! This module implements the sequential oracle that resolves YAML's
 //! context-sensitive grammar and emits IB/BP/TY bits for index construction.
 //!
-//! # Phase 3 Scope
+//! # Phase 4 Scope
 //!
 //! - Block mappings and sequences
 //! - Flow mappings `{key: value}` and sequences `[a, b, c]`
 //! - Simple scalars (unquoted, double-quoted, single-quoted)
-//! - **Block scalars: literal (`|`) and folded (`>`)**
-//! - **Chomping modifiers: strip (`-`), keep (`+`), clip (default)**
+//! - Block scalars: literal (`|`) and folded (`>`)
+//! - Chomping modifiers: strip (`-`), keep (`+`), clip (default)
+//! - **Anchors (`&name`) and aliases (`*name`)**
 //! - Comments (ignored in block context, not allowed in flow)
 //! - Single document only
 
 #[cfg(not(test))]
-use alloc::{vec, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 use super::error::YamlError;
 
@@ -83,6 +92,10 @@ pub struct SemiIndex {
     /// Number of valid bits in TY (= number of container opens)
     #[allow(dead_code)]
     pub ty_len: usize,
+    /// Anchor definitions: anchor name → BP position of the anchored value
+    pub anchors: BTreeMap<String, usize>,
+    /// Alias references: BP position of alias → anchor name being referenced
+    pub aliases: BTreeMap<usize, String>,
 }
 
 /// Parser state for the YAML-lite oracle.
@@ -106,6 +119,12 @@ struct Parser<'a> {
 
     // Node type stack (to track if we're in mapping or sequence)
     type_stack: Vec<NodeType>,
+
+    // Anchor and alias tracking
+    /// Anchors collected during parsing: name → bp_pos of anchored value
+    anchors: BTreeMap<String, usize>,
+    /// Aliases collected during parsing: bp_pos → anchor name referenced
+    aliases: BTreeMap<usize, String>,
 }
 
 impl<'a> Parser<'a> {
@@ -126,6 +145,8 @@ impl<'a> Parser<'a> {
             bp_to_text: Vec::new(),
             indent_stack: vec![0], // Start at indent 0
             type_stack: Vec::new(),
+            anchors: BTreeMap::new(),
+            aliases: BTreeMap::new(),
         }
     }
 
@@ -306,7 +327,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Check for unsupported YAML features (Phase 2: flow style is now supported).
+    /// Check for unsupported YAML features (Phase 4: anchors and aliases now supported).
     fn check_unsupported(&self) -> Result<(), YamlError> {
         if let Some(b) = self.peek() {
             match b {
@@ -318,8 +339,9 @@ impl<'a> Parser<'a> {
                 b'|' | b'>' => {
                     // Allowed - will be parsed by parse_block_scalar()
                 }
+                // Anchors and aliases are supported in Phase 4+
                 b'&' | b'*' => {
-                    return Err(YamlError::AnchorAliasNotSupported { offset: self.pos });
+                    // Allowed - will be parsed by parse_anchor() or parse_alias()
                 }
                 b'?' => {
                     // Check if it's explicit key (? at start of content + space)
@@ -611,6 +633,29 @@ impl<'a> Parser<'a> {
             self.write_bp_close();
         } else {
             self.check_unsupported()?;
+
+            // Check for anchor first - it prefixes the actual value
+            let anchor_name = if self.peek() == Some(b'&') {
+                Some(self.parse_anchor()?)
+            } else {
+                None
+            };
+
+            // After anchor, check if value continues on next line
+            if self.at_line_end() {
+                // Anchor followed by nested structure (value on next line)
+                // The anchor already recorded bp_pos, which will be the nested structure
+                // that gets created when we continue parsing. Don't create a placeholder.
+                self.skip_to_eol();
+                return Ok(());
+            }
+
+            // Check for alias - this IS the value
+            if self.peek() == Some(b'*') {
+                self.parse_alias()?;
+                return Ok(());
+            }
+
             // Check for flow style or block scalar - these handle their own BP
             match self.peek() {
                 Some(b'[') => {
@@ -631,6 +676,9 @@ impl<'a> Parser<'a> {
                     self.write_bp_close();
                 }
             }
+
+            // Suppress unused warning for anchor_name
+            let _ = anchor_name;
         }
 
         Ok(())
@@ -655,6 +703,17 @@ impl<'a> Parser<'a> {
     /// Parse a value (could be scalar or nested structure).
     fn parse_value(&mut self, min_indent: usize) -> Result<(), YamlError> {
         self.check_unsupported()?;
+
+        // Check for anchor first - it prefixes the actual value
+        if self.peek() == Some(b'&') {
+            self.parse_anchor()?;
+            // Now parse the actual value that follows
+        }
+
+        // Check for alias - this IS the value (no value follows)
+        if self.peek() == Some(b'*') {
+            return self.parse_alias();
+        }
 
         match self.peek() {
             Some(b'"') => {
@@ -751,6 +810,18 @@ impl<'a> Parser<'a> {
             }
             first = false;
 
+            // Check for anchor first - it prefixes the actual value
+            if self.peek() == Some(b'&') {
+                self.parse_anchor()?;
+            }
+
+            // Check for alias - this IS the value
+            if self.peek() == Some(b'*') {
+                self.parse_alias()?;
+                self.skip_flow_whitespace();
+                continue;
+            }
+
             // Parse flow value (item) - containers handle their own BP
             match self.peek() {
                 Some(b'[') => {
@@ -842,20 +913,33 @@ impl<'a> Parser<'a> {
             self.advance(); // Skip `:`
             self.skip_flow_whitespace();
 
-            // Parse value - for nested containers, they handle their own BP
-            match self.peek() {
-                Some(b'[') => {
-                    self.parse_flow_sequence()?;
-                }
-                Some(b'{') => {
-                    self.parse_flow_mapping()?;
-                }
-                _ => {
-                    // Scalar value - wrap in BP
-                    self.set_ib();
-                    self.write_bp_open();
-                    self.parse_flow_scalar()?;
-                    self.write_bp_close();
+            // Parse value - check for anchor or alias first
+            // Check for anchor prefix on value
+            let _anchor_name = if self.peek() == Some(b'&') {
+                Some(self.parse_anchor()?)
+            } else {
+                None
+            };
+
+            // Check for alias (standalone value)
+            if self.peek() == Some(b'*') {
+                self.parse_alias()?;
+            } else {
+                // Parse the actual value - for nested containers, they handle their own BP
+                match self.peek() {
+                    Some(b'[') => {
+                        self.parse_flow_sequence()?;
+                    }
+                    Some(b'{') => {
+                        self.parse_flow_mapping()?;
+                    }
+                    _ => {
+                        // Scalar value - wrap in BP
+                        self.set_ib();
+                        self.write_bp_open();
+                        self.parse_flow_scalar()?;
+                        self.write_bp_close();
+                    }
                 }
             }
 
@@ -1231,6 +1315,98 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    // =========================================================================
+    // Anchor and alias parsing (Phase 4)
+    // =========================================================================
+
+    /// Parse an anchor name (characters after `&` or `*`).
+    /// Valid anchor names: `[a-zA-Z0-9_-]+` (YAML 1.2 compliant)
+    fn parse_anchor_name(&mut self) -> Result<String, YamlError> {
+        let start = self.pos;
+
+        while let Some(b) = self.peek() {
+            match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+
+        if self.pos == start {
+            return Err(YamlError::InvalidAnchorName {
+                offset: start,
+                reason: "anchor name cannot be empty",
+            });
+        }
+
+        // Convert to string
+        let name = core::str::from_utf8(&self.input[start..self.pos])
+            .map_err(|_| YamlError::InvalidUtf8 { offset: start })?
+            .to_string();
+
+        Ok(name)
+    }
+
+    /// Parse an anchor definition (`&name`).
+    /// Records the anchor and returns, expecting the value to follow.
+    fn parse_anchor(&mut self) -> Result<String, YamlError> {
+        let anchor_offset = self.pos;
+
+        // Consume `&`
+        self.advance();
+
+        // Parse anchor name
+        let name = self.parse_anchor_name()?;
+
+        // Skip whitespace after anchor name
+        self.skip_inline_whitespace();
+
+        // Record anchor - will point to the next BP position (the value)
+        // We'll update this when the value is parsed
+        if self.anchors.contains_key(&name) {
+            return Err(YamlError::DuplicateAnchor {
+                offset: anchor_offset,
+                name,
+            });
+        }
+
+        // Store placeholder - will be updated when value BP is opened
+        self.anchors.insert(name.clone(), self.bp_pos);
+
+        Ok(name)
+    }
+
+    /// Parse an alias reference (`*name`).
+    /// Creates a leaf node in the BP tree pointing to the aliased value.
+    fn parse_alias(&mut self) -> Result<(), YamlError> {
+        let alias_offset = self.pos;
+
+        // Mark alias position
+        self.set_ib();
+        self.write_bp_open();
+
+        // Consume `*`
+        self.advance();
+
+        // Parse anchor name
+        let name = self.parse_anchor_name()?;
+
+        // Record alias reference (bp_pos - 1 because we already opened)
+        let alias_bp_pos = self.bp_pos - 1;
+        self.aliases.insert(alias_bp_pos, name.clone());
+
+        // Note: We don't verify the anchor exists at parse time.
+        // This allows forward references (alias before anchor definition).
+        // Validation happens at query time.
+        let _ = alias_offset; // suppress unused warning
+
+        // Close the alias node
+        self.write_bp_close();
+
+        Ok(())
+    }
+
     /// Main parsing loop.
     fn parse(&mut self) -> Result<SemiIndex, YamlError> {
         if self.input.is_empty() {
@@ -1270,6 +1446,8 @@ impl<'a> Parser<'a> {
             ib_len: self.input.len(),
             bp_len: self.bp_pos,
             ty_len: self.ty_pos,
+            anchors: core::mem::take(&mut self.anchors),
+            aliases: core::mem::take(&mut self.aliases),
         })
     }
 

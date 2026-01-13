@@ -3,7 +3,13 @@
 //! Holds the semi-index (IB, BP, TY) and provides rank/select operations.
 
 #[cfg(not(test))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
+
+#[cfg(not(test))]
+use alloc::collections::BTreeMap;
+
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 use crate::trees::BalancedParens;
 use crate::util::broadword::select_in_word;
@@ -35,6 +41,10 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Direct BP open index to text position mapping.
     /// Entry i = text byte offset for the i-th BP open.
     bp_to_text: Vec<u32>,
+    /// Anchor definitions: anchor name → BP position of the anchored value
+    anchors: BTreeMap<String, usize>,
+    /// Alias references: BP position of alias → anchor name being referenced
+    aliases: BTreeMap<usize, String>,
 }
 
 /// Build cumulative popcount index for IB.
@@ -69,6 +79,8 @@ impl YamlIndex<Vec<u64>> {
             ty: semi.ty,
             ty_len: semi.ty_len,
             bp_to_text: semi.bp_to_text,
+            anchors: semi.anchors,
+            aliases: semi.aliases,
         })
     }
 }
@@ -77,6 +89,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     /// Create a YAML index from pre-existing IB, BP, TY, and bp_to_text data.
     ///
     /// This is useful for loading serialized index data.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         ib: W,
         ib_len: usize,
@@ -85,6 +98,8 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         ty: W,
         ty_len: usize,
         bp_to_text: Vec<u32>,
+        anchors: BTreeMap<String, usize>,
+        aliases: BTreeMap<usize, String>,
     ) -> Self {
         let ib_rank = build_ib_rank(ib.as_ref());
 
@@ -96,6 +111,8 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             ty,
             ty_len,
             bp_to_text,
+            anchors,
+            aliases,
         }
     }
 
@@ -166,6 +183,48 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         } else {
             false
         }
+    }
+
+    /// Check if a BP position corresponds to an alias.
+    #[inline]
+    pub fn is_alias(&self, bp_pos: usize) -> bool {
+        self.aliases.contains_key(&bp_pos)
+    }
+
+    /// Get the anchor name for an alias at the given BP position.
+    ///
+    /// Returns `None` if the position is not an alias.
+    #[inline]
+    pub fn get_alias_anchor(&self, bp_pos: usize) -> Option<&str> {
+        self.aliases.get(&bp_pos).map(|s| s.as_str())
+    }
+
+    /// Get the BP position of an anchor by name.
+    ///
+    /// Returns `None` if the anchor is not defined.
+    #[inline]
+    pub fn get_anchor_bp_pos(&self, anchor_name: &str) -> Option<usize> {
+        self.anchors.get(anchor_name).copied()
+    }
+
+    /// Resolve an alias at the given BP position to a cursor pointing to
+    /// the anchored value.
+    ///
+    /// Returns `None` if:
+    /// - The position is not an alias
+    /// - The referenced anchor is not defined
+    pub fn resolve_alias<'a>(&'a self, bp_pos: usize, text: &'a [u8]) -> Option<YamlCursor<'a, W>> {
+        let anchor_name = self.aliases.get(&bp_pos)?;
+        let target_bp_pos = self.anchors.get(anchor_name)?;
+        Some(YamlCursor::new(self, text, *target_bp_pos))
+    }
+
+    /// Create a cursor at the given BP position.
+    ///
+    /// This is useful for navigating to a specific position in the index.
+    #[inline]
+    pub fn cursor_at<'a>(&'a self, bp_pos: usize, text: &'a [u8]) -> YamlCursor<'a, W> {
+        YamlCursor::new(self, text, bp_pos)
     }
 
     /// Perform select1 with a hint for the starting word index.

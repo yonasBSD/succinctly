@@ -111,9 +111,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             return YamlValue::Error("text position out of bounds");
         }
 
+        // Check for alias first (before containers)
+        let byte = self.text[text_pos];
+        if byte == b'*' {
+            return self.parse_alias_value(text_pos);
+        }
+
         // Check for flow containers by looking at the text
         // (empty flow containers may not have children, so check text first)
-        let byte = self.text[text_pos];
         if byte == b'[' {
             // Flow sequence
             return YamlValue::Sequence(YamlElements::from_sequence_cursor(*self));
@@ -175,6 +180,32 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                     end,
                 })
             }
+        }
+    }
+
+    /// Parse an alias value from text position.
+    fn parse_alias_value(&self, text_pos: usize) -> YamlValue<'a, W> {
+        // Extract anchor name from text (skip the `*`)
+        let start = text_pos + 1;
+        let mut end = start;
+        while end < self.text.len() {
+            match self.text[end] {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => end += 1,
+                _ => break,
+            }
+        }
+
+        let anchor_name = match core::str::from_utf8(&self.text[start..end]) {
+            Ok(s) => s,
+            Err(_) => return YamlValue::Error("invalid UTF-8 in anchor name"),
+        };
+
+        // Try to resolve the alias to its target
+        let target = self.index.resolve_alias(self.bp_pos, self.text);
+
+        YamlValue::Alias {
+            anchor_name,
+            target,
         }
     }
 
@@ -322,6 +353,13 @@ pub enum YamlValue<'a, W = Vec<u64>> {
     Mapping(YamlFields<'a, W>),
     /// A YAML sequence (array-like)
     Sequence(YamlElements<'a, W>),
+    /// An alias referencing an anchored value (`*anchor_name`)
+    Alias {
+        /// The anchor name being referenced
+        anchor_name: &'a str,
+        /// Cursor to the referenced value (if resolvable)
+        target: Option<YamlCursor<'a, W>>,
+    },
     /// An error encountered during navigation
     Error(&'static str),
 }
@@ -1536,6 +1574,294 @@ mod tests {
             }
         } else {
             panic!("expected sequence, got: {:?}", root.value());
+        }
+    }
+
+    // =========================================================================
+    // Anchor and alias navigation tests (Phase 4)
+    // =========================================================================
+
+    #[test]
+    fn test_anchor_and_alias_basic() {
+        // Basic anchor and alias
+        let yaml = b"anchor: &name value\nalias: *name";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = root.value() {
+            // Check anchor value
+            if let Some(YamlValue::String(s)) = fields.find("anchor") {
+                assert_eq!(&*s.as_str().unwrap(), "value");
+            } else {
+                panic!("expected string for anchor");
+            }
+
+            // Check alias
+            let fields = YamlFields::from_mapping_cursor(root);
+            if let Some((_field, _rest)) = fields.uncons() {
+                // Skip first field (anchor)
+                let fields = _rest;
+                if let Some((field, _)) = fields.uncons() {
+                    // Second field is alias
+                    if let YamlValue::Alias {
+                        anchor_name,
+                        target,
+                    } = field.value()
+                    {
+                        assert_eq!(anchor_name, "name");
+                        // Target should resolve to the anchored value
+                        assert!(target.is_some(), "alias should resolve to target");
+                        if let Some(target_cursor) = target {
+                            if let YamlValue::String(s) = target_cursor.value() {
+                                assert_eq!(&*s.as_str().unwrap(), "value");
+                            } else {
+                                panic!("expected string for resolved alias");
+                            }
+                        }
+                    } else {
+                        panic!("expected alias for second field value");
+                    }
+                }
+            }
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_anchor_on_flow_mapping() {
+        // Use flow style mapping since block style nested mappings have a separate issue
+        let yaml = b"defaults: &defaults {key: value}\nother: *defaults";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = root.value() {
+            // Check defaults mapping (flow style)
+            if let Some(YamlValue::Mapping(default_fields)) = fields.find("defaults") {
+                if let Some(YamlValue::String(s)) = default_fields.find("key") {
+                    assert_eq!(&*s.as_str().unwrap(), "value");
+                } else {
+                    panic!("expected key in defaults");
+                }
+            } else {
+                panic!("expected mapping for defaults");
+            }
+
+            // Check other (alias)
+            let fields = YamlFields::from_mapping_cursor(root);
+            for field in fields {
+                if let YamlValue::String(key) = field.key() {
+                    if key.as_str().unwrap() == "other" {
+                        if let YamlValue::Alias {
+                            anchor_name,
+                            target,
+                        } = field.value()
+                        {
+                            assert_eq!(anchor_name, "defaults");
+                            assert!(target.is_some());
+                        } else {
+                            panic!("expected alias for 'other'");
+                        }
+                        return;
+                    }
+                }
+            }
+            panic!("did not find 'other' field");
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_anchor_in_flow_sequence() {
+        let yaml = b"items: [&first one, &second two, *first]";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = root.value() {
+            if let Some(YamlValue::Sequence(elements)) = fields.find("items") {
+                let items: Vec<_> = elements.collect();
+                assert_eq!(items.len(), 3, "expected 3 items");
+
+                // First item has anchor
+                if let YamlValue::String(s) = &items[0] {
+                    assert_eq!(&*s.as_str().unwrap(), "one");
+                } else {
+                    panic!("expected string for first item");
+                }
+
+                // Second item has anchor
+                if let YamlValue::String(s) = &items[1] {
+                    assert_eq!(&*s.as_str().unwrap(), "two");
+                } else {
+                    panic!("expected string for second item");
+                }
+
+                // Third item is alias
+                if let YamlValue::Alias {
+                    anchor_name,
+                    target,
+                } = &items[2]
+                {
+                    assert_eq!(*anchor_name, "first");
+                    assert!(target.is_some());
+                } else {
+                    panic!("expected alias for third item, got: {:?}", items[2]);
+                }
+            } else {
+                panic!("expected sequence for items");
+            }
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_anchor_in_flow_mapping() {
+        let yaml = b"data: {name: &n Alice, greeting: *n}";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = root.value() {
+            if let Some(YamlValue::Mapping(data_fields)) = fields.find("data") {
+                // Check name (has anchor)
+                if let Some(YamlValue::String(s)) = data_fields.find("name") {
+                    assert_eq!(&*s.as_str().unwrap(), "Alice");
+                } else {
+                    panic!("expected string for name");
+                }
+
+                // Check greeting (alias)
+                let data_fields = YamlFields::from_mapping_cursor(
+                    root.first_child().unwrap().next_sibling().unwrap(),
+                );
+                for field in data_fields {
+                    if let YamlValue::String(key) = field.key() {
+                        if key.as_str().unwrap() == "greeting" {
+                            if let YamlValue::Alias {
+                                anchor_name,
+                                target,
+                            } = field.value()
+                            {
+                                assert_eq!(anchor_name, "n");
+                                assert!(target.is_some());
+                                return;
+                            } else {
+                                panic!("expected alias for greeting");
+                            }
+                        }
+                    }
+                }
+                panic!("did not find greeting field");
+            } else {
+                panic!("expected mapping for data");
+            }
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_inline_anchor_in_sequence() {
+        let yaml = b"- &item value\n- *item";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Sequence(elements) = root.value() {
+            let items: Vec<_> = elements.collect();
+            assert_eq!(items.len(), 2, "expected 2 items");
+
+            // First item has anchor
+            if let YamlValue::String(s) = &items[0] {
+                assert_eq!(&*s.as_str().unwrap(), "value");
+            } else {
+                panic!("expected string for first item");
+            }
+
+            // Second item is alias
+            if let YamlValue::Alias {
+                anchor_name,
+                target,
+            } = &items[1]
+            {
+                assert_eq!(*anchor_name, "item");
+                assert!(target.is_some());
+            } else {
+                panic!("expected alias for second item");
+            }
+        } else {
+            panic!("expected sequence");
+        }
+    }
+
+    #[test]
+    fn test_multiple_anchors() {
+        let yaml = b"a: &x 1\nb: &y 2\nc: [*x, *y]";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = root.value() {
+            // Check a
+            if let Some(YamlValue::String(s)) = fields.find("a") {
+                assert_eq!(&*s.as_str().unwrap(), "1");
+            }
+            // Check b
+            if let Some(YamlValue::String(s)) = fields.find("b") {
+                assert_eq!(&*s.as_str().unwrap(), "2");
+            }
+            // Check c (sequence with aliases)
+            if let Some(YamlValue::Sequence(elements)) = fields.find("c") {
+                let items: Vec<_> = elements.collect();
+                assert_eq!(items.len(), 2);
+
+                if let YamlValue::Alias { anchor_name, .. } = &items[0] {
+                    assert_eq!(*anchor_name, "x");
+                } else {
+                    panic!("expected alias for first element");
+                }
+
+                if let YamlValue::Alias { anchor_name, .. } = &items[1] {
+                    assert_eq!(*anchor_name, "y");
+                } else {
+                    panic!("expected alias for second element");
+                }
+            } else {
+                panic!("expected sequence for c");
+            }
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_undefined_alias() {
+        // Alias to undefined anchor - should still parse, but target is None
+        let yaml = b"bad: *undefined";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = root.value() {
+            for field in fields {
+                if let YamlValue::String(key) = field.key() {
+                    if key.as_str().unwrap() == "bad" {
+                        if let YamlValue::Alias {
+                            anchor_name,
+                            target,
+                        } = field.value()
+                        {
+                            assert_eq!(anchor_name, "undefined");
+                            // Target should be None because anchor doesn't exist
+                            assert!(target.is_none(), "undefined alias should not resolve");
+                            return;
+                        } else {
+                            panic!("expected alias for bad");
+                        }
+                    }
+                }
+            }
+            panic!("did not find bad field");
+        } else {
+            panic!("expected mapping");
         }
     }
 }

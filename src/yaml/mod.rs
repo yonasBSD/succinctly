@@ -1,16 +1,17 @@
-//! YAML semi-indexing for succinct YAML parsing (Phase 3: YAML with block scalars).
+//! YAML semi-indexing for succinct YAML parsing (Phase 4: Anchors & Aliases).
 //!
 //! This module provides semi-indexing for YAML 1.2 documents, enabling efficient
 //! navigation using rank/select operations on the balanced parentheses (BP) tree.
 //!
-//! # Phase 3 Scope
+//! # Phase 4 Scope
 //!
 //! - Block mappings and sequences
 //! - Flow mappings `{key: value}` and sequences `[a, b, c]`
 //! - Nested flow containers (e.g., `{users: [{name: Alice}]}`)
 //! - Simple scalars (unquoted, double-quoted, single-quoted)
-//! - **Block scalars: literal (`|`) and folded (`>`)**
-//! - **Chomping modifiers: strip (`-`), keep (`+`), clip (default)**
+//! - Block scalars: literal (`|`) and folded (`>`)
+//! - Chomping modifiers: strip (`-`), keep (`+`), clip (default)
+//! - **Anchors (`&name`) and aliases (`*name`)**
 //! - Comments (ignored in block context)
 //! - Single document only
 //!
@@ -28,9 +29,9 @@
 //! let yaml_flow = b"person: {name: Alice, age: 30}";
 //! let index_flow = YamlIndex::build(yaml_flow)?;
 //!
-//! // Block scalar (literal)
-//! let yaml_block = b"description: |\n  Line 1\n  Line 2";
-//! let index_block = YamlIndex::build(yaml_block)?;
+//! // Anchor and alias
+//! let yaml_anchor = b"default: &def value\nref: *def";
+//! let index_anchor = YamlIndex::build(yaml_anchor)?;
 //! ```
 //!
 //! # Architecture
@@ -44,7 +45,7 @@
 //!    BP tree structure without re-parsing.
 //!
 //! The oracle handles block style (indentation-based), flow style
-//! (bracket-based like JSON), and block scalars uniformly.
+//! (bracket-based like JSON), anchors, aliases, and block scalars uniformly.
 
 mod error;
 mod index;

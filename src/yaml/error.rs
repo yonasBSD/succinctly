@@ -76,10 +76,20 @@ pub enum YamlError {
         char: char,
     },
 
-    /// Anchor or alias not supported.
-    AnchorAliasNotSupported {
-        /// Byte offset of the `&` or `*`
+    /// Invalid anchor name (empty or contains invalid characters).
+    InvalidAnchorName {
+        /// Byte offset of the anchor
         offset: usize,
+        /// Reason for invalidity
+        reason: &'static str,
+    },
+
+    /// Duplicate anchor definition.
+    DuplicateAnchor {
+        /// Byte offset of the duplicate anchor
+        offset: usize,
+        /// The anchor name
+        name: String,
     },
 
     /// Explicit key (`?`) not supported.
@@ -190,8 +200,15 @@ impl fmt::Display for YamlError {
                     char, offset
                 )
             }
-            YamlError::AnchorAliasNotSupported { offset } => {
-                write!(f, "anchors and aliases not supported at offset {}", offset)
+            YamlError::InvalidAnchorName { offset, reason } => {
+                write!(f, "invalid anchor name at offset {}: {}", offset, reason)
+            }
+            YamlError::DuplicateAnchor { offset, name } => {
+                write!(
+                    f,
+                    "duplicate anchor '{}' at offset {} (previously defined)",
+                    name, offset
+                )
             }
             YamlError::ExplicitKeyNotSupported { offset } => {
                 write!(f, "explicit keys (?) not supported at offset {}", offset)
