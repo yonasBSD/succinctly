@@ -201,14 +201,10 @@ fn extract_key_string<W: AsRef<[u64]>>(cursor: YamlCursor<'_, W>) -> Option<Stri
 }
 
 /// Check if a container is a sequence (vs mapping).
-fn is_sequence<W: AsRef<[u64]>>(index: &YamlIndex<W>, text: &[u8], bp_pos: usize) -> bool {
-    let cursor = YamlCursor::new(index, text, bp_pos);
-    if let Some(pos) = cursor.text_position() {
-        if pos < text.len() {
-            return text[pos] == b'-';
-        }
-    }
-    false
+fn is_sequence<W: AsRef<[u64]>>(index: &YamlIndex<W>, _text: &[u8], bp_pos: usize) -> bool {
+    // Use the TY bits to determine container type
+    // This handles virtual containers (like document root) correctly
+    index.is_sequence_at_bp(bp_pos)
 }
 
 /// Build the path expression from root to a specific BP position.

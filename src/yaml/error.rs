@@ -62,6 +62,8 @@ pub enum YamlError {
     },
 
     /// Document marker found but multi-document not supported.
+    /// Note: Multi-document streams are now supported in Phase 5+.
+    #[deprecated(note = "Multi-document streams are now supported in Phase 5+")]
     MultiDocumentNotSupported {
         /// Byte offset of the `---` marker
         offset: usize,
@@ -185,6 +187,7 @@ impl fmt::Display for YamlError {
             YamlError::InvalidUtf8 { offset } => {
                 write!(f, "invalid UTF-8 sequence at offset {}", offset)
             }
+            #[allow(deprecated)]
             YamlError::MultiDocumentNotSupported { offset } => {
                 write!(
                     f,

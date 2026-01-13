@@ -185,6 +185,23 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         }
     }
 
+    /// Check if the container at the given BP position is a sequence.
+    ///
+    /// This converts the BP position to a TY index and checks the type bit.
+    /// Only valid for BP positions that are container opens (1-bits).
+    ///
+    /// Returns `true` for sequence, `false` for mapping.
+    #[inline]
+    pub fn is_sequence_at_bp(&self, bp_pos: usize) -> bool {
+        // The TY index equals the number of 1-bits (opens) in BP at positions 0..bp_pos-1.
+        // For BP position 0: ty_idx = 0 (it's the first container)
+        // For BP position p > 0: ty_idx = rank1(p) which counts bits at positions 0..p-1
+        //
+        // Note: rank1(p) counts 1-bits at positions 0..p-1, so rank1(1) counts position 0.
+        let ty_idx = self.bp.rank1(bp_pos);
+        self.is_sequence_at(ty_idx)
+    }
+
     /// Check if a BP position corresponds to an alias.
     #[inline]
     pub fn is_alias(&self, bp_pos: usize) -> bool {

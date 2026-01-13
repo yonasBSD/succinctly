@@ -55,10 +55,20 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         self.bp_pos
     }
 
-    /// Check if this cursor points to a container (mapping or sequence).
+    /// Check if this cursor points to a structural container (mapping or sequence).
+    ///
+    /// This checks if the position has a corresponding TY (type) bit, which
+    /// distinguishes real containers from item wrappers and scalars.
     #[inline]
     pub fn is_container(&self) -> bool {
-        self.index.bp().first_child(self.bp_pos).is_some()
+        // Must have children AND have a valid TY index (be a real container)
+        if self.index.bp().first_child(self.bp_pos).is_none() {
+            return false;
+        }
+        // Check if this position has a TY entry
+        // TY index = rank1(bp_pos), and it must be < ty_len
+        let ty_idx = self.index.bp().rank1(self.bp_pos);
+        ty_idx < self.index.ty_len()
     }
 
     /// Get the byte position in the YAML text.
@@ -130,16 +140,12 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
 
         // Check if this is a container by looking at the BP structure
         if self.is_container() {
-            // Determine if mapping or sequence based on the text
-            match byte {
-                b'-' => {
-                    // Block sequence starts with `-`
-                    return YamlValue::Sequence(YamlElements::from_sequence_cursor(*self));
-                }
-                _ => {
-                    // Block mapping (key: value)
-                    return YamlValue::Mapping(YamlFields::from_mapping_cursor(*self));
-                }
+            // Determine if mapping or sequence using the TY bits
+            // (This handles virtual containers like the document root wrapper)
+            if self.index.is_sequence_at_bp(self.bp_pos) {
+                return YamlValue::Sequence(YamlElements::from_sequence_cursor(*self));
+            } else {
+                return YamlValue::Mapping(YamlFields::from_mapping_cursor(*self));
             }
         }
 
@@ -521,9 +527,32 @@ impl<'a, W: AsRef<[u64]>> YamlElements<'a, W> {
 
         // For block sequences, element_cursor points to the item wrapper node (at `-`).
         // We need to navigate to the item's first child to get the actual value.
-        // If the item wrapper has a child, use that; otherwise use the wrapper itself
-        // (for empty items or items where the value is implicitly null).
-        let value_cursor = element_cursor.first_child().unwrap_or(element_cursor);
+        // However, for flow sequences, virtual root sequences, and document containers,
+        // the element IS the value directly.
+        //
+        // Block sequence items are detected by:
+        // 1. Text starts with `-`
+        // 2. The element is NOT itself a container (containers starting with `-` are sequences)
+        //
+        // If the element is a container (like a nested sequence or mapping), use it directly.
+        let value_cursor = if element_cursor.is_container() {
+            // This is a container (mapping or sequence) - use it directly
+            element_cursor
+        } else if let Some(text_pos) = element_cursor.text_position() {
+            // Not a container - check if it's a block sequence item wrapper
+            if text_pos < element_cursor.text.len()
+                && element_cursor.text[text_pos] == b'-'
+                && element_cursor.first_child().is_some()
+            {
+                // Block sequence item with content - unwrap to get the actual value
+                element_cursor.first_child().unwrap()
+            } else {
+                // Scalar value or empty item
+                element_cursor
+            }
+        } else {
+            element_cursor
+        };
         let value = value_cursor.value();
         Some((value, rest))
     }
@@ -534,8 +563,21 @@ impl<'a, W: AsRef<[u64]>> YamlElements<'a, W> {
         for _ in 0..index {
             cursor = cursor.next_sibling()?;
         }
-        // Navigate to item's child to get actual value
-        let value_cursor = cursor.first_child().unwrap_or(cursor);
+        // Same logic as uncons - containers are used directly, block sequence items are unwrapped
+        let value_cursor = if cursor.is_container() {
+            cursor
+        } else if let Some(text_pos) = cursor.text_position() {
+            if text_pos < cursor.text.len()
+                && cursor.text[text_pos] == b'-'
+                && cursor.first_child().is_some()
+            {
+                cursor.first_child().unwrap()
+            } else {
+                cursor
+            }
+        } else {
+            cursor
+        };
         Some(value_cursor.value())
     }
 }
@@ -1254,18 +1296,35 @@ mod tests {
     use super::*;
     use crate::yaml::YamlIndex;
 
+    /// Helper to get the first document from the root document array.
+    /// All YAML documents are wrapped in a virtual root sequence.
+    fn first_doc<'a, W: AsRef<[u64]> + core::fmt::Debug>(
+        root: YamlCursor<'a, W>,
+    ) -> YamlValue<'a, W> {
+        match root.value() {
+            YamlValue::Sequence(elements) => elements
+                .into_iter()
+                .next()
+                .expect("expected at least one document"),
+            other => panic!(
+                "expected root to be document array (sequence), got {:?}",
+                other
+            ),
+        }
+    }
+
     #[test]
     fn test_simple_mapping_navigation() {
         let yaml = b"name: Alice";
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        // Root should be a mapping
-        match root.value() {
+        // First document should be a mapping
+        match first_doc(root) {
             YamlValue::Mapping(fields) => {
                 assert!(!fields.is_empty());
             }
-            _ => panic!("expected mapping"),
+            other => panic!("expected mapping, got {:?}", other),
         }
     }
 
@@ -1278,8 +1337,8 @@ mod tests {
         // Root should be at position 0
         assert_eq!(root.text_position(), Some(0));
 
-        // Root should be a mapping
-        if let YamlValue::Mapping(fields) = root.value() {
+        // First document should be a mapping
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             assert!(!fields.is_empty());
             if let Some((field, _rest)) = fields.uncons() {
                 // Key should be "name"
@@ -1306,7 +1365,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::String(s)) = fields.find("name") {
                 assert_eq!(&*s.as_str().unwrap(), "Alice");
             }
@@ -1319,7 +1378,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::String(s)) = fields.find("name") {
                 assert_eq!(&*s.as_str().unwrap(), "Alice");
             }
@@ -1354,8 +1413,8 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        // Root should be a mapping with "items" key
-        if let YamlValue::Mapping(fields) = root.value() {
+        // First document should be a mapping with "items" key
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::Sequence(elements)) = fields.find("items") {
                 let items: Vec<_> = elements.collect();
                 assert_eq!(items.len(), 3);
@@ -1380,8 +1439,8 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        // Root should be a mapping with "person" key
-        if let YamlValue::Mapping(fields) = root.value() {
+        // First document should be a mapping with "person" key
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::Mapping(person_fields)) = fields.find("person") {
                 // Check name
                 if let Some(YamlValue::String(s)) = person_fields.find("name") {
@@ -1410,7 +1469,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::Mapping(data_fields)) = fields.find("data") {
                 if let Some(YamlValue::Sequence(users)) = data_fields.find("users") {
                     let items: Vec<_> = users.collect();
@@ -1446,7 +1505,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::Sequence(elements)) = fields.find("items") {
                 let items: Vec<_> = elements.collect();
                 assert_eq!(items.len(), 0, "expected empty sequence");
@@ -1464,7 +1523,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::Mapping(data_fields)) = fields.find("data") {
                 assert!(data_fields.is_empty(), "expected empty mapping");
             } else {
@@ -1485,7 +1544,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::String(s)) = fields.find("text") {
                 // Block literal should preserve newlines
                 let decoded = s.as_str().unwrap();
@@ -1508,7 +1567,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::String(s)) = fields.find("text") {
                 // Block folded should fold newlines to spaces
                 let decoded = s.as_str().unwrap();
@@ -1532,7 +1591,7 @@ mod tests {
         let index_simple = YamlIndex::build(yaml_simple).unwrap();
         let root_simple = index_simple.root(yaml_simple);
 
-        if let YamlValue::Sequence(elements) = root_simple.value() {
+        if let YamlValue::Sequence(elements) = first_doc(root_simple) {
             let items: Vec<_> = elements.collect();
             assert_eq!(items.len(), 2, "simple: expected 2 items");
             // Check these work
@@ -1550,7 +1609,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Sequence(elements) = root.value() {
+        if let YamlValue::Sequence(elements) = first_doc(root) {
             let items: Vec<_> = elements.collect();
             assert_eq!(items.len(), 2, "expected 2 items, got items: {:?}", items);
 
@@ -1573,7 +1632,7 @@ mod tests {
                 panic!("expected string for second item");
             }
         } else {
-            panic!("expected sequence, got: {:?}", root.value());
+            panic!("expected sequence, got: {:?}", first_doc(root));
         }
     }
 
@@ -1588,7 +1647,10 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        // Get the first document cursor
+        let doc_cursor = root.first_child().expect("expected document");
+
+        if let YamlValue::Mapping(fields) = doc_cursor.value() {
             // Check anchor value
             if let Some(YamlValue::String(s)) = fields.find("anchor") {
                 assert_eq!(&*s.as_str().unwrap(), "value");
@@ -1597,7 +1659,7 @@ mod tests {
             }
 
             // Check alias
-            let fields = YamlFields::from_mapping_cursor(root);
+            let fields = YamlFields::from_mapping_cursor(doc_cursor);
             if let Some((_field, _rest)) = fields.uncons() {
                 // Skip first field (anchor)
                 let fields = _rest;
@@ -1635,7 +1697,10 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        // Get the first document cursor
+        let doc_cursor = root.first_child().expect("expected document");
+
+        if let YamlValue::Mapping(fields) = doc_cursor.value() {
             // Check defaults mapping (flow style)
             if let Some(YamlValue::Mapping(default_fields)) = fields.find("defaults") {
                 if let Some(YamlValue::String(s)) = default_fields.find("key") {
@@ -1648,7 +1713,7 @@ mod tests {
             }
 
             // Check other (alias)
-            let fields = YamlFields::from_mapping_cursor(root);
+            let fields = YamlFields::from_mapping_cursor(doc_cursor);
             for field in fields {
                 if let YamlValue::String(key) = field.key() {
                     if key.as_str().unwrap() == "other" {
@@ -1678,7 +1743,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             if let Some(YamlValue::Sequence(elements)) = fields.find("items") {
                 let items: Vec<_> = elements.collect();
                 assert_eq!(items.len(), 3, "expected 3 items");
@@ -1722,7 +1787,10 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        // Get the first document cursor
+        let doc_cursor = root.first_child().expect("expected document");
+
+        if let YamlValue::Mapping(fields) = doc_cursor.value() {
             if let Some(YamlValue::Mapping(data_fields)) = fields.find("data") {
                 // Check name (has anchor)
                 if let Some(YamlValue::String(s)) = data_fields.find("name") {
@@ -1732,8 +1800,9 @@ mod tests {
                 }
 
                 // Check greeting (alias)
+                // Navigate: doc_cursor -> first_child (data key) -> next_sibling (data value)
                 let data_fields = YamlFields::from_mapping_cursor(
-                    root.first_child().unwrap().next_sibling().unwrap(),
+                    doc_cursor.first_child().unwrap().next_sibling().unwrap(),
                 );
                 for field in data_fields {
                     if let YamlValue::String(key) = field.key() {
@@ -1767,7 +1836,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Sequence(elements) = root.value() {
+        if let YamlValue::Sequence(elements) = first_doc(root) {
             let items: Vec<_> = elements.collect();
             assert_eq!(items.len(), 2, "expected 2 items");
 
@@ -1800,7 +1869,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             // Check a
             if let Some(YamlValue::String(s)) = fields.find("a") {
                 assert_eq!(&*s.as_str().unwrap(), "1");
@@ -1840,7 +1909,7 @@ mod tests {
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
 
-        if let YamlValue::Mapping(fields) = root.value() {
+        if let YamlValue::Mapping(fields) = first_doc(root) {
             for field in fields {
                 if let YamlValue::String(key) = field.key() {
                     if key.as_str().unwrap() == "bad" {

@@ -1,18 +1,25 @@
-//! YAML parser (oracle) for Phase 4: YAML with anchors and aliases.
+//! YAML parser (oracle) for Phase 5: YAML with multi-document streams.
 //!
 //! This module implements the sequential oracle that resolves YAML's
 //! context-sensitive grammar and emits IB/BP/TY bits for index construction.
 //!
-//! # Phase 4 Scope
+//! # Phase 5 Scope
 //!
 //! - Block mappings and sequences
 //! - Flow mappings `{key: value}` and sequences `[a, b, c]`
 //! - Simple scalars (unquoted, double-quoted, single-quoted)
 //! - Block scalars: literal (`|`) and folded (`>`)
 //! - Chomping modifiers: strip (`-`), keep (`+`), clip (default)
-//! - **Anchors (`&name`) and aliases (`*name`)**
+//! - Anchors (`&name`) and aliases (`*name`)
 //! - Comments (ignored in block context, not allowed in flow)
-//! - Single document only
+//! - **Multi-document streams (`---` and `...` markers)**
+//!
+//! # Document Wrapping
+//!
+//! All YAML documents are wrapped in a virtual root sequence for consistent API:
+//! - Single-document files become 1-element arrays
+//! - Multi-document files become N-element arrays
+//! - Paths use `.[0].key` instead of `.key`
 
 #[cfg(not(test))]
 use alloc::{
@@ -125,6 +132,10 @@ struct Parser<'a> {
     anchors: BTreeMap<String, usize>,
     /// Aliases collected during parsing: bp_pos → anchor name referenced
     aliases: BTreeMap<usize, String>,
+
+    // Document tracking
+    /// Whether we're currently inside a document
+    in_document: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -147,6 +158,7 @@ impl<'a> Parser<'a> {
             type_stack: Vec::new(),
             anchors: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            in_document: false,
         }
     }
 
@@ -358,21 +370,63 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Check for document markers.
-    fn check_document_marker(&self) -> Result<(), YamlError> {
-        if self.pos + 2 < self.input.len() {
-            let slice = &self.input[self.pos..self.pos + 3];
-            if slice == b"---" || slice == b"..." {
-                // Check if it's at start of line (or followed by space/newline)
-                if self.peek_at(3) == Some(b' ')
-                    || self.peek_at(3) == Some(b'\n')
-                    || self.peek_at(3).is_none()
-                {
-                    return Err(YamlError::MultiDocumentNotSupported { offset: self.pos });
-                }
-            }
+    /// Check if we're at a document start marker (`---`).
+    fn is_document_start(&self) -> bool {
+        if self.pos + 2 >= self.input.len() {
+            return false;
         }
-        Ok(())
+        let slice = &self.input[self.pos..self.pos + 3];
+        if slice != b"---" {
+            return false;
+        }
+        // Must be followed by space, newline, or EOF
+        self.peek_at(3) == Some(b' ') || self.peek_at(3) == Some(b'\n') || self.peek_at(3).is_none()
+    }
+
+    /// Check if we're at a document end marker (`...`).
+    fn is_document_end(&self) -> bool {
+        if self.pos + 2 >= self.input.len() {
+            return false;
+        }
+        let slice = &self.input[self.pos..self.pos + 3];
+        if slice != b"..." {
+            return false;
+        }
+        // Must be followed by space, newline, or EOF
+        self.peek_at(3) == Some(b' ') || self.peek_at(3) == Some(b'\n') || self.peek_at(3).is_none()
+    }
+
+    /// Skip past a document marker (`---` or `...`) and any trailing content on the line.
+    fn skip_document_marker(&mut self) {
+        // Skip the 3-character marker
+        self.advance();
+        self.advance();
+        self.advance();
+        // Skip to end of line (any content after marker is ignored)
+        self.skip_to_eol();
+    }
+
+    /// Start a new document within the virtual root sequence.
+    /// This doesn't open a container - the document IS its content.
+    fn start_document(&mut self) {
+        self.in_document = true;
+    }
+
+    /// End the current document, closing any open containers.
+    fn end_document(&mut self) {
+        if !self.in_document {
+            return;
+        }
+
+        // Close any remaining open containers within the document
+        // The virtual root is at indent_stack[0], so close everything above it
+        while self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+            self.type_stack.pop();
+            self.write_bp_close();
+        }
+
+        self.in_document = false;
     }
 
     /// Parse a double-quoted string.
@@ -1420,23 +1474,24 @@ impl<'a> Parser<'a> {
             return Err(YamlError::EmptyInput);
         }
 
-        // Check for document markers at start
-        self.check_document_marker()?;
+        // Open virtual root sequence (wraps all documents)
+        // Position 0 with text position 0
+        self.write_bp_open_at(0);
+        self.write_ty(true); // Root is a sequence
+        self.type_stack.push(NodeType::Sequence);
+        // Use usize::MAX as a sentinel indent for virtual root
+        // This ensures document content at indent 0 creates its own container
+        self.indent_stack[0] = usize::MAX;
 
-        // Parse the root structure
-        self.parse_root()?;
+        // Parse all documents
+        self.parse_documents()?;
 
-        // Close any remaining open containers
-        while self.indent_stack.len() > 1 {
-            self.indent_stack.pop();
-            self.type_stack.pop();
-            self.write_bp_close();
-        }
+        // Close any remaining open document
+        self.end_document();
 
-        // Close root if we opened one
-        if !self.type_stack.is_empty() {
-            self.write_bp_close();
-        }
+        // Close virtual root sequence
+        self.type_stack.pop();
+        self.write_bp_close();
 
         Ok(SemiIndex {
             ib: self.ib_words.clone(),
@@ -1451,50 +1506,109 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parse the root structure.
-    fn parse_root(&mut self) -> Result<(), YamlError> {
-        while self.pos < self.input.len() {
+    /// Parse all documents in the stream.
+    fn parse_documents(&mut self) -> Result<(), YamlError> {
+        // Skip leading `---` if present (optional for first doc)
+        if self.is_document_start() {
+            self.skip_document_marker();
+            self.skip_newlines();
+        }
+
+        // Check if file is empty after markers
+        if self.peek().is_none() {
+            // Empty YAML - nothing to parse
+            return Ok(());
+        }
+
+        // Start first document
+        self.start_document();
+
+        // Parse document content
+        loop {
             self.skip_newlines();
 
             if self.peek().is_none() {
                 break;
             }
 
-            self.check_document_marker()?;
-            self.check_unsupported()?;
+            // Check for document end marker
+            if self.is_document_end() {
+                self.end_document();
+                self.skip_document_marker();
+                self.skip_newlines();
 
-            // Count indentation
-            let indent = self.count_indent()?;
+                // Check for another document or EOF
+                if self.peek().is_none() {
+                    break;
+                }
 
-            // Skip to content
-            let _content_start = self.pos;
-            for _ in 0..indent {
+                // If there's a document start marker, skip it
+                if self.is_document_start() {
+                    self.skip_document_marker();
+                    self.skip_newlines();
+                }
+
+                // Start new document if there's content
+                if self.peek().is_some() && !self.is_document_end() {
+                    self.start_document();
+                }
+                continue;
+            }
+
+            // Check for document start marker (new document)
+            if self.is_document_start() {
+                self.end_document();
+                self.skip_document_marker();
+                self.skip_newlines();
+
+                // Start new document if there's content
+                if self.peek().is_some() {
+                    self.start_document();
+                }
+                continue;
+            }
+
+            // Parse document content
+            self.parse_document_line()?;
+        }
+
+        Ok(())
+    }
+
+    /// Parse a single line of document content.
+    fn parse_document_line(&mut self) -> Result<(), YamlError> {
+        self.check_unsupported()?;
+
+        // Count indentation
+        let indent = self.count_indent()?;
+
+        // Skip to content
+        for _ in 0..indent {
+            self.advance();
+        }
+
+        // Check what kind of content this is
+        match self.peek() {
+            Some(b'-') if self.peek_at(1) == Some(b' ') => {
+                self.parse_sequence_item(indent)?;
+            }
+            Some(b'#') => {
+                // Comment line - skip
+                self.skip_to_eol();
+            }
+            Some(b'\n') => {
+                // Empty line
                 self.advance();
             }
-
-            // Check what kind of content this is
-            match self.peek() {
-                Some(b'-') if self.peek_at(1) == Some(b' ') => {
-                    self.parse_sequence_item(indent)?;
-                }
-                Some(b'#') => {
-                    // Comment line - skip
-                    self.skip_to_eol();
-                }
-                Some(b'\n') => {
-                    // Empty line
-                    self.advance();
-                }
-                Some(_) => {
-                    self.parse_mapping_entry(indent)?;
-                }
-                None => break,
+            Some(_) => {
+                self.parse_mapping_entry(indent)?;
             }
+            None => {}
+        }
 
-            // Move to next line if we haven't already
-            if self.peek() == Some(b'\n') {
-                self.advance();
-            }
+        // Move to next line if we haven't already
+        if self.peek() == Some(b'\n') {
+            self.advance();
         }
 
         Ok(())
@@ -1785,5 +1899,103 @@ mod tests {
             "Block scalar with comment should parse: {:?}",
             result
         );
+    }
+
+    // =========================================================================
+    // Multi-document stream tests (Phase 5)
+    // =========================================================================
+
+    #[test]
+    fn test_single_document_wrapped() {
+        // Single document should be wrapped in virtual root sequence
+        let yaml = b"name: Alice";
+        let result = build_semi_index(yaml).unwrap();
+        // Root is sequence (TY bit 0 = 1)
+        assert!(result.ty[0] & 1 == 1, "root should be sequence");
+        // At least 2 TY bits (root sequence + document mapping)
+        assert!(result.ty_len >= 2, "should have at least 2 containers");
+    }
+
+    #[test]
+    fn test_explicit_document_start() {
+        // Leading `---` should be handled
+        let yaml = b"---\nname: Alice";
+        let result = build_semi_index(yaml);
+        assert!(
+            result.is_ok(),
+            "explicit document start should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_two_documents() {
+        // Two documents separated by `---`
+        let yaml = b"---\nname: Alice\n---\nname: Bob";
+        let result = build_semi_index(yaml);
+        assert!(result.is_ok(), "two documents should parse: {:?}", result);
+    }
+
+    #[test]
+    fn test_document_end_marker() {
+        // Document end marker `...` followed by new document
+        let yaml = b"---\nname: Alice\n...\n---\nname: Bob";
+        let result = build_semi_index(yaml);
+        assert!(
+            result.is_ok(),
+            "document with end marker should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_document_end_at_eof() {
+        // Document end marker at EOF
+        let yaml = b"name: Alice\n...";
+        let result = build_semi_index(yaml);
+        assert!(
+            result.is_ok(),
+            "document end at EOF should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_mixed_document_types() {
+        // First document is sequence, second is mapping
+        let yaml = b"---\n- item1\n- item2\n---\nkey: value";
+        let result = build_semi_index(yaml);
+        assert!(
+            result.is_ok(),
+            "mixed document types should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_empty_between_markers() {
+        // Empty content between document markers
+        let yaml = b"---\n---\nname: Alice";
+        let result = build_semi_index(yaml);
+        assert!(result.is_ok(), "empty document should parse: {:?}", result);
+    }
+
+    #[test]
+    fn test_document_marker_in_flow() {
+        // `---` inside a quoted string should not be treated as marker
+        let yaml = b"text: \"---\"";
+        let result = build_semi_index(yaml);
+        assert!(
+            result.is_ok(),
+            "quoted document marker should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_three_documents() {
+        let yaml = b"---\na: 1\n---\nb: 2\n---\nc: 3";
+        let result = build_semi_index(yaml);
+        assert!(result.is_ok(), "three documents should parse: {:?}", result);
     }
 }
