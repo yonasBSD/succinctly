@@ -1049,6 +1049,173 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Check if current position starts an implicit mapping entry in flow context.
+    /// Returns true if there's a `key : value` pattern (colon followed by space).
+    /// This is used to detect patterns like `[ YAML : separate ]`.
+    fn looks_like_flow_mapping_entry(&self) -> bool {
+        let mut i = self.pos;
+
+        // Skip quoted string if present
+        if i < self.input.len() && (self.input[i] == b'"' || self.input[i] == b'\'') {
+            let quote = self.input[i];
+            i += 1;
+            while i < self.input.len() {
+                if self.input[i] == quote {
+                    if quote == b'\'' && i + 1 < self.input.len() && self.input[i + 1] == b'\'' {
+                        // Escaped single quote
+                        i += 2;
+                        continue;
+                    }
+                    i += 1; // Skip closing quote
+                    break;
+                } else if self.input[i] == b'\\' && quote == b'"' {
+                    i += 2; // Skip escape sequence
+                } else {
+                    i += 1;
+                }
+            }
+            // Skip whitespace after quoted string
+            while i < self.input.len() && matches!(self.input[i], b' ' | b'\t') {
+                i += 1;
+            }
+            // Check for colon - after quoted key, colon can be adjacent (no space required)
+            if i < self.input.len() && self.input[i] == b':' {
+                return true;
+            }
+            return false;
+        }
+
+        // Skip flow mapping or sequence if present (e.g., {JSON: like}:value or [a,b]:value)
+        if i < self.input.len() && (self.input[i] == b'{' || self.input[i] == b'[') {
+            let open = self.input[i];
+            let close = if open == b'{' { b'}' } else { b']' };
+            let mut depth = 1;
+            i += 1;
+            while i < self.input.len() && depth > 0 {
+                match self.input[i] {
+                    b'"' | b'\'' => {
+                        // Skip quoted string inside the flow
+                        let quote = self.input[i];
+                        i += 1;
+                        while i < self.input.len() {
+                            if self.input[i] == quote {
+                                if quote == b'\''
+                                    && i + 1 < self.input.len()
+                                    && self.input[i + 1] == b'\''
+                                {
+                                    i += 2;
+                                    continue;
+                                }
+                                i += 1;
+                                break;
+                            } else if self.input[i] == b'\\' && quote == b'"' {
+                                i += 2;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                    c if c == open => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    c if c == close => {
+                        depth -= 1;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            // After the flow, check for colon - can be adjacent (no space required)
+            if i < self.input.len() && self.input[i] == b':' {
+                return true;
+            }
+            return false;
+        }
+
+        // Scan unquoted content for `: ` pattern
+        while i < self.input.len() {
+            match self.input[i] {
+                b',' | b']' | b'}' | b'\n' => return false,
+                b':' => {
+                    let next = if i + 1 < self.input.len() {
+                        Some(self.input[i + 1])
+                    } else {
+                        None
+                    };
+                    // In flow context, colon must be followed by space, or flow indicator
+                    return matches!(
+                        next,
+                        Some(b' ') | Some(b'\t') | Some(b',') | Some(b']') | Some(b'}') | None
+                    );
+                }
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    /// Parse an implicit mapping entry in flow context: `key : value`
+    /// Creates a single-pair mapping as the sequence element.
+    fn parse_implicit_flow_mapping_entry(&mut self) -> Result<(), YamlError> {
+        // Open implicit mapping
+        self.set_ib();
+        self.write_bp_open();
+        self.write_ty(false); // 0 = mapping
+
+        // Parse key - can be scalar, quoted, flow mapping, or flow sequence
+        self.set_ib();
+        self.write_bp_open();
+        match self.peek() {
+            Some(b'{') => self.parse_flow_mapping()?,
+            Some(b'[') => self.parse_flow_sequence()?,
+            _ => self.parse_flow_key_scalar()?,
+        }
+        self.write_bp_close();
+
+        // Skip whitespace before colon
+        self.skip_inline_whitespace();
+
+        // Expect and skip colon
+        if self.peek() != Some(b':') {
+            return Err(YamlError::UnexpectedCharacter {
+                offset: self.pos,
+                char: self.peek().map(|b| b as char).unwrap_or('\0'),
+                context: "expected ':' in implicit flow mapping entry",
+            });
+        }
+        self.advance();
+        self.skip_flow_whitespace();
+
+        // Parse value (if present before , or ])
+        if !matches!(self.peek(), Some(b',') | Some(b']') | Some(b'}') | None) {
+            self.set_ib();
+            self.write_bp_open();
+            match self.peek() {
+                Some(b'[') => {
+                    self.parse_flow_sequence()?;
+                }
+                Some(b'{') => {
+                    self.parse_flow_mapping()?;
+                }
+                _ => {
+                    self.parse_flow_scalar()?;
+                }
+            }
+            self.write_bp_close();
+        } else {
+            // Empty value (null)
+            self.set_ib();
+            self.write_bp_open();
+            self.write_bp_close();
+        }
+
+        // Close implicit mapping
+        self.write_bp_close();
+
+        Ok(())
+    }
+
     /// Parse a flow sequence: `[item1, item2, ...]`
     fn parse_flow_sequence(&mut self) -> Result<(), YamlError> {
         // Mark the `[` position
@@ -1102,20 +1269,26 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            // Parse flow value (item) - containers handle their own BP
-            match self.peek() {
-                Some(b'[') => {
-                    self.parse_flow_sequence()?;
-                }
-                Some(b'{') => {
-                    self.parse_flow_mapping()?;
-                }
-                _ => {
-                    // Scalar value - wrap in BP
-                    self.set_ib();
-                    self.write_bp_open();
-                    self.parse_flow_scalar()?;
-                    self.write_bp_close();
+            // Check for implicit mapping entry FIRST (handles all key types including { and [)
+            if self.looks_like_flow_mapping_entry() {
+                // This is an implicit single-pair mapping: [ key : value ]
+                self.parse_implicit_flow_mapping_entry()?;
+            } else {
+                // Parse flow value (item) - containers handle their own BP
+                match self.peek() {
+                    Some(b'[') => {
+                        self.parse_flow_sequence()?;
+                    }
+                    Some(b'{') => {
+                        self.parse_flow_mapping()?;
+                    }
+                    _ => {
+                        // Plain scalar value - wrap in BP
+                        self.set_ib();
+                        self.write_bp_open();
+                        self.parse_flow_scalar()?;
+                        self.write_bp_close();
+                    }
                 }
             }
             self.skip_flow_whitespace();
@@ -1182,45 +1355,51 @@ impl<'a> Parser<'a> {
 
             self.skip_flow_whitespace();
 
-            // Expect colon
-            if self.peek() != Some(b':') {
+            // Check for colon - if missing, value is implicitly null
+            if self.peek() == Some(b':') {
+                self.advance(); // Skip `:`
+                self.skip_flow_whitespace();
+
+                // Parse value - check for anchor or alias first
+                // Check for anchor prefix on value
+                let _anchor_name = if self.peek() == Some(b'&') {
+                    Some(self.parse_anchor()?)
+                } else {
+                    None
+                };
+
+                // Check for alias (standalone value)
+                if self.peek() == Some(b'*') {
+                    self.parse_alias()?;
+                } else {
+                    // Parse the actual value - for nested containers, they handle their own BP
+                    match self.peek() {
+                        Some(b'[') => {
+                            self.parse_flow_sequence()?;
+                        }
+                        Some(b'{') => {
+                            self.parse_flow_mapping()?;
+                        }
+                        _ => {
+                            // Scalar value - wrap in BP
+                            self.set_ib();
+                            self.write_bp_open();
+                            self.parse_flow_scalar()?;
+                            self.write_bp_close();
+                        }
+                    }
+                }
+            } else if matches!(self.peek(), Some(b',') | Some(b'}')) {
+                // Key without colon/value - emit empty value (implicit null)
+                self.set_ib();
+                self.write_bp_open();
+                self.write_bp_close();
+            } else {
                 return Err(YamlError::UnexpectedCharacter {
                     offset: self.pos,
                     char: self.peek().map(|b| b as char).unwrap_or('\0'),
-                    context: "expected ':' after key in flow mapping",
+                    context: "expected ':', ',' or '}' after key in flow mapping",
                 });
-            }
-            self.advance(); // Skip `:`
-            self.skip_flow_whitespace();
-
-            // Parse value - check for anchor or alias first
-            // Check for anchor prefix on value
-            let _anchor_name = if self.peek() == Some(b'&') {
-                Some(self.parse_anchor()?)
-            } else {
-                None
-            };
-
-            // Check for alias (standalone value)
-            if self.peek() == Some(b'*') {
-                self.parse_alias()?;
-            } else {
-                // Parse the actual value - for nested containers, they handle their own BP
-                match self.peek() {
-                    Some(b'[') => {
-                        self.parse_flow_sequence()?;
-                    }
-                    Some(b'{') => {
-                        self.parse_flow_mapping()?;
-                    }
-                    _ => {
-                        // Scalar value - wrap in BP
-                        self.set_ib();
-                        self.write_bp_open();
-                        self.parse_flow_scalar()?;
-                        self.write_bp_close();
-                    }
-                }
             }
 
             self.skip_flow_whitespace();
@@ -1256,12 +1435,46 @@ impl<'a> Parser<'a> {
 
     /// Parse an unquoted key in flow context.
     /// Stops at `:`, `,`, `}`, `]`, or whitespace before those.
+    /// Handles multiline keys (continues across newlines with proper indentation).
     fn parse_flow_unquoted_key(&mut self) -> Result<usize, YamlError> {
         let start = self.pos;
 
         while let Some(b) = self.peek() {
             match b {
-                b':' | b',' | b'}' | b']' | b'\n' | b'\r' => break,
+                b':' | b',' | b'}' | b']' => break,
+                b'\n' | b'\r' => {
+                    // Multiline key - check if next line continues the key
+                    let mut lookahead = self.pos;
+                    // Skip newline
+                    if lookahead < self.input.len() && self.input[lookahead] == b'\r' {
+                        lookahead += 1;
+                    }
+                    if lookahead < self.input.len() && self.input[lookahead] == b'\n' {
+                        lookahead += 1;
+                    }
+                    // Skip leading whitespace on next line
+                    while lookahead < self.input.len()
+                        && matches!(self.input[lookahead], b' ' | b'\t')
+                    {
+                        lookahead += 1;
+                    }
+                    // Check what follows
+                    if lookahead >= self.input.len()
+                        || matches!(self.input[lookahead], b':' | b',' | b'}' | b']')
+                    {
+                        // Delimiter or EOF - stop key here
+                        break;
+                    }
+                    // Continue parsing on next line
+                    self.advance(); // Skip newline char(s)
+                    if self.peek() == Some(b'\n') {
+                        self.advance();
+                    }
+                    // Skip leading whitespace
+                    while matches!(self.peek(), Some(b' ') | Some(b'\t')) {
+                        self.advance();
+                    }
+                }
                 b' ' | b'\t' => {
                     // Check if whitespace is followed by a delimiter
                     let mut lookahead = self.pos + 1;
@@ -1270,6 +1483,10 @@ impl<'a> Parser<'a> {
                             b' ' | b'\t' => lookahead += 1,
                             b':' | b',' | b'}' | b']' => {
                                 // Whitespace before delimiter - stop here
+                                break;
+                            }
+                            b'\n' | b'\r' => {
+                                // Newline - check next line
                                 break;
                             }
                             _ => {
@@ -1318,6 +1535,24 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 self.parse_flow_unquoted_value();
+            }
+        }
+        Ok(())
+    }
+
+    /// Parse a flow key (for implicit mapping entries).
+    /// Like parse_flow_scalar but also stops at `: ` (colon followed by space/flow indicator).
+    fn parse_flow_key_scalar(&mut self) -> Result<(), YamlError> {
+        match self.peek() {
+            Some(b'"') => {
+                self.parse_double_quoted()?;
+            }
+            Some(b'\'') => {
+                self.parse_single_quoted()?;
+            }
+            _ => {
+                // Use existing parse_flow_unquoted_key which stops at `:`
+                self.parse_flow_unquoted_key()?;
             }
         }
         Ok(())
