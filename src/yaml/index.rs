@@ -208,6 +208,12 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         self.aliases.contains_key(&bp_pos)
     }
 
+    /// Debug helper to get bp_to_text array.
+    #[cfg(test)]
+    pub fn debug_bp_to_text(&self) -> &[u32] {
+        &self.bp_to_text
+    }
+
     /// Get the anchor name for an alias at the given BP position.
     ///
     /// Returns `None` if the position is not an alias.

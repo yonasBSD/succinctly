@@ -760,8 +760,7 @@ mod tests {
 
     #[test]
     fn test_yaml_to_owned_value_flow_sequence() {
-        // Note: Block-style nested sequences (items:\n  - one) are not yet supported
-        // by the YAML parser. Use flow style for now.
+        // Flow-style sequence
         let yaml = b"items: [one, two, three]";
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
@@ -787,8 +786,7 @@ mod tests {
 
     #[test]
     fn test_yaml_to_owned_value_flow_nested() {
-        // Note: Block-style nested mappings (person:\n  name: Alice) are not yet supported
-        // by the YAML parser. Use flow style for now.
+        // Flow-style nested mapping
         let yaml = b"person: {name: Alice, age: 30}";
         let index = YamlIndex::build(yaml).unwrap();
         let root = index.root(yaml);
@@ -805,6 +803,93 @@ mod tests {
                         assert_eq!(person.get("age"), Some(&OwnedValue::Int(30)));
                     } else {
                         panic!("expected object for person");
+                    }
+                } else {
+                    panic!("expected object");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_yaml_to_owned_value_block_sequence() {
+        // Block-style nested sequence (value on next line)
+        let yaml = b"items:\n  - one\n  - two\n  - three";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Sequence(docs) = root.value() {
+            if let Some(doc) = docs.into_iter().next() {
+                let value = yaml_to_owned_value(doc).unwrap();
+                if let OwnedValue::Object(map) = value {
+                    if let Some(OwnedValue::Array(arr)) = map.get("items") {
+                        assert_eq!(arr.len(), 3);
+                        assert_eq!(arr[0], OwnedValue::String("one".to_string()));
+                        assert_eq!(arr[1], OwnedValue::String("two".to_string()));
+                        assert_eq!(arr[2], OwnedValue::String("three".to_string()));
+                    } else {
+                        panic!("expected array for items, got {:?}", map.get("items"));
+                    }
+                } else {
+                    panic!("expected object");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_yaml_to_owned_value_block_nested_mapping() {
+        // Block-style nested mapping (value on next line)
+        let yaml = b"person:\n  name: Alice\n  age: 30";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Sequence(docs) = root.value() {
+            if let Some(doc) = docs.into_iter().next() {
+                let value = yaml_to_owned_value(doc).unwrap();
+                if let OwnedValue::Object(map) = value {
+                    if let Some(OwnedValue::Object(person)) = map.get("person") {
+                        assert_eq!(
+                            person.get("name"),
+                            Some(&OwnedValue::String("Alice".to_string()))
+                        );
+                        assert_eq!(person.get("age"), Some(&OwnedValue::Int(30)));
+                    } else {
+                        panic!("expected object for person, got {:?}", map.get("person"));
+                    }
+                } else {
+                    panic!("expected object");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_yaml_to_owned_value_deeply_nested() {
+        // Deeply nested block-style structure
+        let yaml = b"root:\n  level1:\n    level2:\n      value: deep";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Sequence(docs) = root.value() {
+            if let Some(doc) = docs.into_iter().next() {
+                let value = yaml_to_owned_value(doc).unwrap();
+                if let OwnedValue::Object(map) = value {
+                    if let Some(OwnedValue::Object(level1)) = map.get("root") {
+                        if let Some(OwnedValue::Object(level2)) = level1.get("level1") {
+                            if let Some(OwnedValue::Object(level3)) = level2.get("level2") {
+                                assert_eq!(
+                                    level3.get("value"),
+                                    Some(&OwnedValue::String("deep".to_string()))
+                                );
+                            } else {
+                                panic!("expected object for level2");
+                            }
+                        } else {
+                            panic!("expected object for level1");
+                        }
+                    } else {
+                        panic!("expected object for root");
                     }
                 } else {
                     panic!("expected object");

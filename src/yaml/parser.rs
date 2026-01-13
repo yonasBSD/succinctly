@@ -570,7 +570,10 @@ impl<'a> Parser<'a> {
     fn close_deeper_indents(&mut self, new_indent: usize) {
         while self.indent_stack.len() > 1 {
             let current_indent = *self.indent_stack.last().unwrap();
-            if current_indent >= new_indent {
+            // Only close containers that are DEEPER than the new indent.
+            // Containers at the same level should stay open so new entries
+            // can be added to them.
+            if current_indent > new_indent {
                 self.indent_stack.pop();
                 self.type_stack.pop();
                 self.write_bp_close();
@@ -633,14 +636,16 @@ impl<'a> Parser<'a> {
     fn parse_mapping_entry(&mut self, indent: usize) -> Result<(), YamlError> {
         let _entry_start = self.pos;
 
-        // Check if we need to open a new mapping
+        // First close any containers that are deeper than our indent level.
+        // This ensures we return to the appropriate context before deciding
+        // whether to open a new mapping or add to an existing one.
+        self.close_deeper_indents(indent);
+
+        // Now check if we need to open a new mapping
         let need_new_mapping = self.type_stack.last() != Some(&NodeType::Mapping)
             || self.indent_stack.last().copied() != Some(indent);
 
         if need_new_mapping {
-            // Close any deeper containers first
-            self.close_deeper_indents(indent);
-
             // Open new mapping (virtual - no IB bit, children will have IB)
             self.write_bp_open();
             self.write_ty(false); // 0 = mapping
@@ -680,12 +685,15 @@ impl<'a> Parser<'a> {
         // Parse value
         if self.at_line_end() {
             // Value is on next line (nested structure or explicit null)
-            // Open a placeholder value node
-            self.set_ib();
-            self.write_bp_open();
+            // Don't create a placeholder - the nested structure that follows
+            // will become the value directly. If no nested structure follows
+            // at a deeper indent, the value is implicitly null (handled by
+            // the BP structure where key has no sibling value).
             self.skip_to_eol();
-            self.write_bp_close();
-        } else {
+            return Ok(());
+        }
+
+        {
             self.check_unsupported()?;
 
             // Check for anchor first - it prefixes the actual value

@@ -57,16 +57,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
 
     /// Check if this cursor points to a structural container (mapping or sequence).
     ///
-    /// This checks if the position has a corresponding TY (type) bit, which
-    /// distinguishes real containers from item wrappers and scalars.
+    /// Containers are nodes that have children AND have a valid TY bit.
+    /// This distinguishes real containers from item wrappers and other BP nodes.
     #[inline]
     pub fn is_container(&self) -> bool {
-        // Must have children AND have a valid TY index (be a real container)
         if self.index.bp().first_child(self.bp_pos).is_none() {
             return false;
         }
-        // Check if this position has a TY entry
-        // TY index = rank1(bp_pos), and it must be < ty_len
+        // Check if this position has a valid TY entry
         let ty_idx = self.index.bp().rank1(self.bp_pos);
         ty_idx < self.index.ty_len()
     }
@@ -138,7 +136,32 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             return YamlValue::Mapping(YamlFields::from_mapping_cursor(*self));
         }
 
-        // Check if this is a container by looking at the BP structure
+        // Check for block-style sequence (starts with '- ')
+        // Block sequences are nested containers that appear as values.
+        // We need to distinguish:
+        // - Sequence CONTAINER: Its children are item wrappers (also at '- ')
+        // - Item WRAPPER: Its child is the actual value (not at '- ')
+        //
+        // A sequence container has first_child at '- ', while an item wrapper
+        // has first_child at the actual value position.
+        if byte == b'-' && text_pos + 1 < self.text.len() && self.text[text_pos + 1] == b' ' {
+            if let Some(first_child) = self.first_child() {
+                if let Some(child_text_pos) = first_child.text_position() {
+                    // If the child also starts with '- ', this is a sequence container
+                    if child_text_pos < self.text.len()
+                        && self.text[child_text_pos] == b'-'
+                        && child_text_pos + 1 < self.text.len()
+                        && self.text[child_text_pos + 1] == b' '
+                    {
+                        return YamlValue::Sequence(YamlElements::from_sequence_cursor(*self));
+                    }
+                }
+            }
+        }
+
+        // Check if this is a container with a TY bit (structural container)
+        // This must come BEFORE the heuristic checks to ensure we use the authoritative
+        // TY bits for containers that have them (like document sequences).
         if self.is_container() {
             // Determine if mapping or sequence using the TY bits
             // (This handles virtual containers like the document root wrapper)
@@ -146,6 +169,29 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
                 return YamlValue::Sequence(YamlElements::from_sequence_cursor(*self));
             } else {
                 return YamlValue::Mapping(YamlFields::from_mapping_cursor(*self));
+            }
+        }
+
+        // Check for block-style mapping (content that looks like a key: value)
+        // This heuristic is for nodes that don't have TY bits (like item wrappers).
+        // A block mapping's first child is a key node, which has a sibling (the value).
+        // Key nodes don't have BP children - they're just open/close pairs.
+        // We detect a mapping by:
+        // 1. Has a first_child (the key)
+        // 2. That first_child has a next_sibling (the value)
+        // 3. The text at first_child's position is not '-' (not a sequence)
+        if let Some(first_child) = self.first_child() {
+            if first_child.next_sibling().is_some() {
+                // First child has a sibling - this could be a mapping (key, value)
+                if let Some(first_child_text_pos) = first_child.text_position() {
+                    if first_child_text_pos < self.text.len() {
+                        let first_byte = self.text[first_child_text_pos];
+                        // If first child text doesn't start with '-', this is a mapping key
+                        if first_byte != b'-' {
+                            return YamlValue::Mapping(YamlFields::from_mapping_cursor(*self));
+                        }
+                    }
+                }
             }
         }
 
@@ -1929,6 +1975,124 @@ mod tests {
                 }
             }
             panic!("did not find bad field");
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_block_nested_sequence() {
+        // Block-style nested sequence (value on next line)
+        let yaml = b"items:\n  - one\n  - two";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = first_doc(root) {
+            for field in fields {
+                let key = field.key();
+                let val = field.value();
+
+                if let YamlValue::String(k) = key {
+                    if k.as_str().unwrap() == "items" {
+                        if let YamlValue::Sequence(elements) = val {
+                            let items: Vec<_> = elements.collect();
+                            assert_eq!(items.len(), 2, "expected 2 items, got: {:?}", items);
+                            if let YamlValue::String(s) = &items[0] {
+                                assert_eq!(&*s.as_str().unwrap(), "one");
+                            }
+                            return;
+                        } else {
+                            panic!("expected sequence for items, got: {:?}", val);
+                        }
+                    }
+                }
+            }
+            panic!("did not find items field");
+        } else {
+            panic!("expected mapping, got: {:?}", first_doc(root));
+        }
+    }
+
+    #[test]
+    fn test_block_nested_mapping() {
+        // Block-style nested mapping (value on next line)
+        let yaml = b"person:\n  name: Alice\n  age: 30";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(fields) = first_doc(root) {
+            if let Some(YamlValue::Mapping(person_fields)) = fields.find("person") {
+                // Check name
+                if let Some(YamlValue::String(s)) = person_fields.find("name") {
+                    assert_eq!(&*s.as_str().unwrap(), "Alice");
+                } else {
+                    panic!("expected name field");
+                }
+
+                // Check age
+                if let Some(YamlValue::String(s)) = person_fields.find("age") {
+                    assert_eq!(&*s.as_str().unwrap(), "30");
+                } else {
+                    panic!("expected age field");
+                }
+            } else {
+                panic!("expected mapping for person");
+            }
+        } else {
+            panic!("expected mapping");
+        }
+    }
+
+    #[test]
+    fn test_multiple_toplevel_nested_mappings() {
+        // Multiple top-level keys, each with nested block-style mappings
+        let yaml = b"server:\n  host: localhost\ndatabase:\n  host: db.example.com";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Get the first document (should be a mapping)
+        if let YamlValue::Mapping(fields) = first_doc(root) {
+            let all_fields: Vec<_> = fields.into_iter().collect();
+            assert_eq!(
+                all_fields.len(),
+                2,
+                "expected 2 fields (server, database), got {} fields",
+                all_fields.len()
+            );
+
+            // Check field keys
+            if let YamlValue::String(k) = all_fields[0].key() {
+                assert_eq!(&*k.as_str().unwrap(), "server");
+            } else {
+                panic!("expected string key for first field");
+            }
+
+            if let YamlValue::String(k) = all_fields[1].key() {
+                assert_eq!(&*k.as_str().unwrap(), "database");
+            } else {
+                panic!("expected string key for second field");
+            }
+
+            // Check that values are nested mappings
+            if let YamlValue::Mapping(server_fields) = all_fields[0].value() {
+                if let Some(YamlValue::String(s)) = server_fields.find("host") {
+                    assert_eq!(&*s.as_str().unwrap(), "localhost");
+                } else {
+                    panic!("expected host field in server");
+                }
+            } else {
+                panic!("expected mapping for server value");
+            }
+
+            if let YamlValue::Mapping(db_fields) = all_fields[1].value() {
+                if let Some(YamlValue::String(s)) = db_fields.find("host") {
+                    assert_eq!(&*s.as_str().unwrap(), "db.example.com");
+                } else {
+                    panic!("expected host field in database");
+                }
+            } else {
+                panic!("expected mapping for database value");
+            }
         } else {
             panic!("expected mapping");
         }
