@@ -128,7 +128,7 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
 - Block scalars (`|`, `|+`, `|-`, `>`, `>+`, `>-`)
 - Explicit keys (`? key`)
 
-**Dependencies**: Requires YAML parser Phase 2 from [yaml.md](parsing/yaml.md).
+**Dependencies**: Requires YAML parser Phase 2 from [yaml.md](../parsing/yaml.md).
 
 **Deliverables**:
 1. Handle flow/block distinction in `yaml_to_owned_value()`
@@ -151,7 +151,7 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
 - `--explode-anchors` flag
 - `--preserve-comments` flag (YAML output only)
 
-**Dependencies**: Requires YAML parser Phase 3 from [yaml.md](parsing/yaml.md).
+**Dependencies**: Requires YAML parser Phase 3 from [yaml.md](../parsing/yaml.md).
 
 **Implementation Decisions**:
 
@@ -189,7 +189,7 @@ fn output_yaml(value: &OwnedValue, indent: usize) -> String {
 - `--all-documents` to process each document
 - Default: process first document only
 
-**Dependencies**: Requires YAML parser Phase 4 from [yaml.md](parsing/yaml.md).
+**Dependencies**: Requires YAML parser Phase 4 from [yaml.md](../parsing/yaml.md).
 
 **Behavior Matrix**:
 
@@ -402,7 +402,7 @@ EXAMPLES:
 
 ## Timeline Dependency
 
-This plan depends on the YAML parser implementation phases defined in [parsing/yaml.md](parsing/yaml.md):
+This plan depends on the YAML parser implementation phases defined in [parsing/yaml.md](../parsing/yaml.md):
 
 | yq Phase | Requires YAML Parser Phase |
 |----------|---------------------------|
