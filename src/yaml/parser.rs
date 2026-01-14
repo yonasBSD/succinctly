@@ -106,8 +106,8 @@ pub struct SemiIndex {
     pub ty_len: usize,
     /// Anchor definitions: anchor name → BP position of the anchored value
     pub anchors: BTreeMap<String, usize>,
-    /// Alias references: BP position of alias → anchor name being referenced
-    pub aliases: BTreeMap<usize, String>,
+    /// Alias references: BP position of alias → target BP position (resolved at parse time)
+    pub aliases: BTreeMap<usize, usize>,
 }
 
 /// Parser state for the YAML-lite oracle.
@@ -136,8 +136,8 @@ struct Parser<'a> {
     // Anchor and alias tracking
     /// Anchors collected during parsing: name → bp_pos of anchored value
     anchors: BTreeMap<String, usize>,
-    /// Aliases collected during parsing: bp_pos → anchor name referenced
-    aliases: BTreeMap<usize, String>,
+    /// Aliases collected during parsing: bp_pos → target bp_pos (resolved at parse time)
+    aliases: BTreeMap<usize, usize>,
 
     // Document tracking
     /// Whether we're currently inside a document
@@ -1022,6 +1022,19 @@ impl<'a> Parser<'a> {
         // Open key node
         self.write_bp_open();
 
+        // Check for anchor on key - record it pointing to this key BP
+        // The key BP was just opened, so bp_pos is now one past the key's position
+        if self.peek() == Some(b'&') {
+            // Consume `&`
+            self.advance();
+            // Parse anchor name
+            let name = self.parse_anchor_name()?;
+            // Skip whitespace after anchor name
+            self.skip_inline_whitespace();
+            // Record anchor pointing to the key (bp_pos - 1, since we just opened the key BP)
+            self.anchors.insert(name, self.bp_pos - 1);
+        }
+
         // Parse the key - check for empty key first (colon at start)
         if self.peek() == Some(b':') {
             // Empty key - check that it's followed by proper terminator
@@ -1121,6 +1134,11 @@ impl<'a> Parser<'a> {
                     self.pos = saved_pos;
                     return Ok(());
                 }
+                Some(b'&') | Some(b'*') => {
+                    // Anchor or alias on its own line - will be handled by main loop
+                    self.pos = saved_pos;
+                    return Ok(());
+                }
                 _ => {
                     // Check if this looks like a mapping entry
                     if self.looks_like_mapping_entry() {
@@ -1150,10 +1168,55 @@ impl<'a> Parser<'a> {
 
             // After anchor, check if value continues on next line
             if self.at_line_end() {
-                // Anchor followed by nested structure (value on next line)
-                // The anchor already recorded bp_pos, which will be the nested structure
-                // that gets created when we continue parsing. Don't create a placeholder.
+                // Need to check if the next line has content for this value,
+                // or if the value is null (same or lower indent on next line)
                 self.skip_to_eol();
+
+                // Save position to look ahead
+                let saved_pos = self.pos;
+                let saved_line = self.line;
+
+                // Look at next content line
+                self.skip_newlines();
+                if self.peek().is_none() {
+                    // EOF - value is null, create explicit null node for anchor
+                    self.pos = saved_pos;
+                    self.line = saved_line;
+                    self.set_ib();
+                    self.write_bp_open();
+                    self.write_bp_close();
+                    return Ok(());
+                }
+
+                let next_indent = self.count_indent().unwrap_or(0);
+
+                // Check if next line is a sequence at same indent as key
+                // Sequences can be at same indent as their parent mapping key
+                let pos_before_check = self.pos;
+                let is_sequence_at_same_indent = {
+                    // Skip past indent spaces to check what follows
+                    while self.peek() == Some(b' ') {
+                        self.advance();
+                    }
+                    matches!(self.peek(), Some(b'-'))
+                        && matches!(self.peek_at(1), Some(b' ') | Some(b'\n') | None)
+                };
+                // Restore position after checking
+                self.pos = pos_before_check;
+
+                if next_indent <= indent && !is_sequence_at_same_indent {
+                    // Next line is at same or lower indent and not a sequence - value is null
+                    // Create explicit null node for anchor to point to
+                    self.pos = saved_pos;
+                    self.line = saved_line;
+                    self.set_ib();
+                    self.write_bp_open();
+                    self.write_bp_close();
+                    return Ok(());
+                }
+
+                // Value is on next line (nested structure or same-indent sequence)
+                // Position is at start of content line for main loop to parse
                 return Ok(());
             }
 
@@ -2317,11 +2380,22 @@ impl<'a> Parser<'a> {
         let start = self.pos;
 
         // YAML anchor names can contain any character except flow indicators,
-        // whitespace, and certain special chars
+        // whitespace, and certain special chars.
+        // Colons are allowed if not followed by whitespace (which would make it a key separator).
         while let Some(b) = self.peek() {
             match b {
                 // Stop at flow indicators, whitespace, and newlines
-                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' | b':' => break,
+                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' => break,
+                // Colon is allowed in anchor names if not followed by whitespace
+                b':' => {
+                    if let Some(next) = self.peek_at(1) {
+                        if next == b' ' || next == b'\t' || next == b'\n' || next == b'\r' {
+                            break;
+                        }
+                    }
+                    // Colon followed by non-whitespace - part of anchor name
+                    self.advance();
+                }
                 // High byte indicates start of multi-byte UTF-8 - consume all bytes
                 0x80..=0xFF => {
                     // Multi-byte UTF-8 character - consume continuation bytes
@@ -2371,8 +2445,6 @@ impl<'a> Parser<'a> {
     /// Parse an alias reference (`*name`).
     /// Creates a leaf node in the BP tree pointing to the aliased value.
     fn parse_alias(&mut self) -> Result<(), YamlError> {
-        let alias_offset = self.pos;
-
         // Mark alias position
         self.set_ib();
         self.write_bp_open();
@@ -2383,14 +2455,14 @@ impl<'a> Parser<'a> {
         // Parse anchor name
         let name = self.parse_anchor_name()?;
 
-        // Record alias reference (bp_pos - 1 because we already opened)
+        // Resolve alias to anchor at parse time
+        // This ensures we get the anchor definition that was active at this point
         let alias_bp_pos = self.bp_pos - 1;
-        self.aliases.insert(alias_bp_pos, name.clone());
-
-        // Note: We don't verify the anchor exists at parse time.
-        // This allows forward references (alias before anchor definition).
-        // Validation happens at query time.
-        let _ = alias_offset; // suppress unused warning
+        if let Some(&target_bp_pos) = self.anchors.get(&name) {
+            self.aliases.insert(alias_bp_pos, target_bp_pos);
+        }
+        // Note: If anchor not found, we don't record it.
+        // Forward references (alias before anchor) are not supported.
 
         // Close the alias node
         self.write_bp_close();
@@ -2620,6 +2692,96 @@ impl<'a> Parser<'a> {
                 // Flow mapping or sequence at document root
                 self.close_deeper_indents(indent);
                 self.parse_value(indent)?;
+            }
+            Some(b'&') => {
+                // Anchor - check if this is `&anchor key: value` (anchor on mapping key)
+                // In that case, let parse_mapping_entry handle the anchor so it points
+                // to the key, not the mapping container.
+                self.close_deeper_indents(indent);
+
+                // Look ahead to see if this is `&anchor key:` pattern
+                let is_anchor_on_mapping_key = {
+                    let saved_pos = self.pos;
+                    // Skip `&`
+                    self.advance();
+                    // Skip anchor name
+                    while let Some(b) = self.peek() {
+                        match b {
+                            b' ' | b'\t' | b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' => {
+                                break
+                            }
+                            b':' => {
+                                if let Some(next) = self.peek_at(1) {
+                                    if next == b' '
+                                        || next == b'\t'
+                                        || next == b'\n'
+                                        || next == b'\r'
+                                    {
+                                        break;
+                                    }
+                                }
+                                self.advance();
+                            }
+                            _ => self.advance(),
+                        }
+                    }
+                    // Skip whitespace after anchor
+                    while self.peek() == Some(b' ') || self.peek() == Some(b'\t') {
+                        self.advance();
+                    }
+                    // Check if what follows looks like a mapping entry
+                    let result = self.looks_like_mapping_entry();
+                    self.pos = saved_pos;
+                    result
+                };
+
+                if is_anchor_on_mapping_key {
+                    // Let parse_mapping_entry handle the anchor
+                    self.parse_mapping_entry(indent)?;
+                } else {
+                    // Parse anchor here for non-mapping-key cases
+                    let _anchor_name = self.parse_anchor()?;
+                    // Skip any whitespace after anchor
+                    self.skip_inline_whitespace();
+                    // Check what follows
+                    match self.peek() {
+                        Some(b'\n') | None => {
+                            // Anchor with value on next line - will be parsed in next iteration
+                        }
+                        Some(b'-')
+                            if matches!(self.peek_at(1), Some(b' ') | Some(b'\n') | None) =>
+                        {
+                            // Anchor before block sequence on same line
+                            self.parse_sequence_item(indent)?;
+                        }
+                        Some(b'{') | Some(b'[') => {
+                            // Anchor before flow collection
+                            self.parse_value(indent)?;
+                        }
+                        _ => {
+                            // Scalar value
+                            self.set_ib();
+                            self.write_bp_open();
+                            match self.peek() {
+                                Some(b'"') => {
+                                    self.parse_double_quoted()?;
+                                }
+                                Some(b'\'') => {
+                                    self.parse_single_quoted()?;
+                                }
+                                _ => {
+                                    self.parse_unquoted_value_with_indent(indent);
+                                }
+                            }
+                            self.write_bp_close();
+                        }
+                    }
+                }
+            }
+            Some(b'*') => {
+                // Alias - this IS the value
+                self.close_deeper_indents(indent);
+                self.parse_alias()?;
             }
             Some(_) => {
                 // Check if this looks like a mapping entry (has `: ` on this line)

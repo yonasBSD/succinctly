@@ -45,8 +45,8 @@ pub struct YamlIndex<W = Vec<u64>> {
     seq_items: W,
     /// Anchor definitions: anchor name → BP position of the anchored value
     anchors: BTreeMap<String, usize>,
-    /// Alias references: BP position of alias → anchor name being referenced
-    aliases: BTreeMap<usize, String>,
+    /// Alias references: BP position of alias → target BP position (resolved at parse time)
+    aliases: BTreeMap<usize, usize>,
 }
 
 /// Build cumulative popcount index for IB.
@@ -103,7 +103,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         bp_to_text: Vec<u32>,
         seq_items: W,
         anchors: BTreeMap<String, usize>,
-        aliases: BTreeMap<usize, String>,
+        aliases: BTreeMap<usize, usize>,
     ) -> Self {
         let ib_rank = build_ib_rank(ib.as_ref());
 
@@ -262,12 +262,12 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         &self.bp_to_text
     }
 
-    /// Get the anchor name for an alias at the given BP position.
+    /// Get the target BP position for an alias at the given BP position.
     ///
     /// Returns `None` if the position is not an alias.
     #[inline]
-    pub fn get_alias_anchor(&self, bp_pos: usize) -> Option<&str> {
-        self.aliases.get(&bp_pos).map(|s| s.as_str())
+    pub fn get_alias_target(&self, bp_pos: usize) -> Option<usize> {
+        self.aliases.get(&bp_pos).copied()
     }
 
     /// Get the BP position of an anchor by name.
@@ -285,8 +285,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     /// - The position is not an alias
     /// - The referenced anchor is not defined
     pub fn resolve_alias<'a>(&'a self, bp_pos: usize, text: &'a [u8]) -> Option<YamlCursor<'a, W>> {
-        let anchor_name = self.aliases.get(&bp_pos)?;
-        let target_bp_pos = self.anchors.get(anchor_name)?;
+        let target_bp_pos = self.aliases.get(&bp_pos)?;
         Some(YamlCursor::new(self, text, *target_bp_pos))
     }
 

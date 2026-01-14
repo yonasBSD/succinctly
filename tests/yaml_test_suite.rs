@@ -71,6 +71,29 @@ fn value_to_json<W: AsRef<[u64]>>(value: &YamlValue<'_, W>) -> String {
             for field in *fields {
                 let key = match field.key() {
                     YamlValue::String(s) => s.as_str().unwrap_or_default().to_string(),
+                    YamlValue::Alias { target, .. } => {
+                        // Resolve alias to get the actual key string
+                        if let Some(t) = target {
+                            match t.value() {
+                                YamlValue::String(s) => s.as_str().unwrap_or_default().to_string(),
+                                other => {
+                                    // For non-string alias targets, use JSON representation
+                                    let json = value_to_json(&other);
+                                    // Remove surrounding quotes if present
+                                    if json.starts_with('"')
+                                        && json.ends_with('"')
+                                        && json.len() >= 2
+                                    {
+                                        json[1..json.len() - 1].to_string()
+                                    } else {
+                                        json
+                                    }
+                                }
+                            }
+                        } else {
+                            "null".to_string()
+                        }
+                    }
                     other => value_to_json(&other),
                 };
                 let val = value_to_json(&field.value());

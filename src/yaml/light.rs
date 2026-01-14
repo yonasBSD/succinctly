@@ -148,6 +148,21 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             return self.parse_alias_value(text_pos);
         }
 
+        // Check for anchor - if present, skip past it to get the actual value
+        // Anchors look like: &anchor_name value
+        let effective_text_pos = if byte == b'&' {
+            self.skip_anchor_and_whitespace(text_pos)
+        } else {
+            text_pos
+        };
+
+        // If we're past the end after skipping anchor, this is an anchored null
+        if effective_text_pos >= self.text.len() {
+            return YamlValue::Null;
+        }
+
+        let byte = self.text[effective_text_pos];
+
         // Check for flow containers by looking at the text
         // (empty flow containers may not have children, so check text first)
         if byte == b'[' {
@@ -167,7 +182,10 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         //
         // A sequence container has first_child at '- ', while an item wrapper
         // has first_child at the actual value position.
-        if byte == b'-' && text_pos + 1 < self.text.len() && self.text[text_pos + 1] == b' ' {
+        if byte == b'-'
+            && effective_text_pos + 1 < self.text.len()
+            && self.text[effective_text_pos + 1] == b' '
+        {
             if let Some(first_child) = self.first_child() {
                 if let Some(child_text_pos) = first_child.text_position() {
                     // If the child also starts with '- ', this is a sequence container
@@ -217,42 +235,42 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         }
 
         // Scalar value
-        match self.text[text_pos] {
+        match self.text[effective_text_pos] {
             b'"' => YamlValue::String(YamlString::DoubleQuoted {
                 text: self.text,
-                start: text_pos,
+                start: effective_text_pos,
             }),
             b'\'' => YamlValue::String(YamlString::SingleQuoted {
                 text: self.text,
-                start: text_pos,
+                start: effective_text_pos,
             }),
             b'|' => {
                 // Block literal scalar
-                let (chomping, explicit_indent) = self.parse_block_header(text_pos);
+                let (chomping, explicit_indent) = self.parse_block_header(effective_text_pos);
                 YamlValue::String(YamlString::BlockLiteral {
                     text: self.text,
-                    indicator_pos: text_pos,
+                    indicator_pos: effective_text_pos,
                     chomping,
                     explicit_indent,
                 })
             }
             b'>' => {
                 // Block folded scalar
-                let (chomping, explicit_indent) = self.parse_block_header(text_pos);
+                let (chomping, explicit_indent) = self.parse_block_header(effective_text_pos);
                 YamlValue::String(YamlString::BlockFolded {
                     text: self.text,
-                    indicator_pos: text_pos,
+                    indicator_pos: effective_text_pos,
                     chomping,
                     explicit_indent,
                 })
             }
             _ => {
                 // Unquoted (plain) scalar - may span multiple lines
-                let base_indent = self.compute_base_indent_for_plain(text_pos);
-                let end = self.find_plain_scalar_end(text_pos, base_indent);
+                let base_indent = self.compute_base_indent_for_plain(effective_text_pos);
+                let end = self.find_plain_scalar_end(effective_text_pos, base_indent);
                 YamlValue::String(YamlString::Unquoted {
                     text: self.text,
-                    start: text_pos,
+                    start: effective_text_pos,
                     end,
                     base_indent,
                 })
@@ -284,6 +302,34 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             anchor_name,
             target,
         }
+    }
+
+    /// Skip past an anchor definition and any following whitespace.
+    ///
+    /// Anchor syntax: `&name` where name can contain alphanumerics, underscores,
+    /// hyphens, and colons.
+    ///
+    /// Returns the position of the first non-whitespace character after the anchor,
+    /// or the end of text if nothing follows.
+    fn skip_anchor_and_whitespace(&self, start: usize) -> usize {
+        // Skip the '&'
+        let mut pos = start + 1;
+
+        // Skip anchor name characters (per YAML spec, anchors can contain
+        // alphanumerics, underscores, hyphens, and also colons in some contexts)
+        while pos < self.text.len() {
+            match self.text[pos] {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b':' => pos += 1,
+                _ => break,
+            }
+        }
+
+        // Skip whitespace after anchor name
+        while pos < self.text.len() && (self.text[pos] == b' ' || self.text[pos] == b'\t') {
+            pos += 1;
+        }
+
+        pos
     }
 
     /// Parse block scalar header (chomping and explicit indentation indicators).
