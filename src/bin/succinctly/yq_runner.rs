@@ -179,6 +179,7 @@ fn yaml_to_owned_value<W: AsRef<[u64]>>(value: YamlValue<'_, W>) -> Result<Owned
             }
         }
         YamlValue::Error(msg) => Err(anyhow::anyhow!("YAML error: {}", msg)),
+        YamlValue::Null => Ok(OwnedValue::Null),
     }
 }
 

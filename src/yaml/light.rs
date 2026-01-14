@@ -433,6 +433,8 @@ impl<'a, W: AsRef<[u64]>> Iterator for YamlChildren<'a, W> {
 /// A YAML value with lazy decoding.
 #[derive(Clone, Debug)]
 pub enum YamlValue<'a, W = Vec<u64>> {
+    /// A YAML null value (empty entry)
+    Null,
     /// A YAML string (various quote styles)
     String(YamlString<'a>),
     /// A YAML mapping (object-like)
@@ -615,25 +617,32 @@ impl<'a, W: AsRef<[u64]>> YamlElements<'a, W> {
         // 2. The element is NOT itself a container (containers starting with `-` are sequences)
         //
         // If the element is a container (like a nested sequence or mapping), use it directly.
-        let value_cursor = if element_cursor.is_container() {
+        let value = if element_cursor.is_container() {
             // This is a container (mapping or sequence) - use it directly
-            element_cursor
+            element_cursor.value()
         } else if let Some(text_pos) = element_cursor.text_position() {
             // Not a container - check if it's a block sequence item wrapper
             if text_pos < element_cursor.text.len()
                 && element_cursor.text[text_pos] == b'-'
-                && element_cursor.first_child().is_some()
+                && text_pos + 1 < element_cursor.text.len()
+                && element_cursor.text[text_pos + 1] == b' '
             {
-                // Block sequence item with content - unwrap to get the actual value
-                element_cursor.first_child().unwrap()
+                // This is a block sequence item marker `- `
+                if let Some(child) = element_cursor.first_child() {
+                    // Block sequence item with content - unwrap to get the actual value
+                    child.value()
+                } else {
+                    // Empty sequence item (like `- # comment` or `- ` with nothing)
+                    // This should be null
+                    YamlValue::Null
+                }
             } else {
-                // Scalar value or empty item
-                element_cursor
+                // Scalar value
+                element_cursor.value()
             }
         } else {
-            element_cursor
+            element_cursor.value()
         };
-        let value = value_cursor.value();
         Some((value, rest))
     }
 

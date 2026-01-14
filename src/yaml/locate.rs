@@ -316,6 +316,7 @@ pub fn locate_offset_detailed<W: AsRef<[u64]>>(
     };
 
     let value_type = match cursor.value() {
+        YamlValue::Null => "null",
         YamlValue::Mapping(_) => "mapping",
         YamlValue::Sequence(_) => "sequence",
         YamlValue::String(_) => "string",

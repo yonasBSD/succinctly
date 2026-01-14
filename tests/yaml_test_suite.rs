@@ -29,6 +29,7 @@ fn yaml_to_json(yaml: &[u8]) -> Result<String, String> {
 /// Convert a YamlValue to JSON string.
 fn value_to_json<W: AsRef<[u64]>>(value: &YamlValue<'_, W>) -> String {
     match value {
+        YamlValue::Null => "null".to_string(),
         YamlValue::String(s) => {
             let str_val = s.as_str().unwrap_or_default();
             let is_unquoted = s.is_unquoted();
