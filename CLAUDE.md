@@ -13,6 +13,8 @@ Detailed guidance is organized into skills in `.claude/skills/`. Claude will aut
 | **simd-optimization**  | "SIMD", "AVX", "NEON", "vectorization"      | SIMD patterns and learnings                |
 | **bit-optimization**   | "rank", "select", "popcount", "lookup table"| Bit-level optimization patterns            |
 | **json-semi-indexing** | "JSON index", "semi-index", "cursor"        | JSON parsing implementation details        |
+| **yaml-semi-indexing** | "YAML index", "YAML parser", "sequence item"| YAML parsing and debugging patterns        |
+| **testing**            | "test", "assert", "coverage", "regression"  | Test quality patterns and anti-patterns    |
 | **commit-msg**         | "commit message", "amend commit"            | Conventional commits format                |
 
 ## AI Scratch Directory
