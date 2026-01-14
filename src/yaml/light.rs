@@ -63,11 +63,23 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// `value()` handles them before calling `is_container()`.
     #[inline]
     pub fn is_container(&self) -> bool {
+        // Sequence item wrappers are NOT containers - they have BP open/close
+        // but no TY entry. They exist to wrap the item's content.
+        if self.index.is_seq_item(self.bp_pos) {
+            return false;
+        }
+
         if self.index.bp().first_child(self.bp_pos).is_none() {
             return false;
         }
-        // Check if this position has a valid TY entry
-        let ty_idx = self.index.bp().rank1(self.bp_pos);
+
+        // Check if this position has a valid TY entry.
+        // We need to account for sequence items when computing the TY index:
+        // TY index = count of BP opens before this position - count of seq item opens before
+        let bp_opens_before = self.index.bp().rank1(self.bp_pos);
+        let seq_items_before = self.index.count_seq_items_before(self.bp_pos);
+        let ty_idx = bp_opens_before.saturating_sub(seq_items_before);
+
         ty_idx < self.index.ty_len()
     }
 
@@ -212,20 +224,22 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             }),
             b'|' => {
                 // Block literal scalar
-                let chomping = self.parse_chomping_indicator(text_pos);
+                let (chomping, explicit_indent) = self.parse_block_header(text_pos);
                 YamlValue::String(YamlString::BlockLiteral {
                     text: self.text,
                     indicator_pos: text_pos,
                     chomping,
+                    explicit_indent,
                 })
             }
             b'>' => {
                 // Block folded scalar
-                let chomping = self.parse_chomping_indicator(text_pos);
+                let (chomping, explicit_indent) = self.parse_block_header(text_pos);
                 YamlValue::String(YamlString::BlockFolded {
                     text: self.text,
                     indicator_pos: text_pos,
                     chomping,
+                    explicit_indent,
                 })
             }
             _ => {
@@ -266,22 +280,35 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         }
     }
 
-    /// Parse chomping indicator from block scalar header.
-    fn parse_chomping_indicator(&self, indicator_pos: usize) -> ChompingIndicator {
+    /// Parse block scalar header (chomping and explicit indentation indicators).
+    /// Returns (ChompingIndicator, Option<explicit_indent>).
+    fn parse_block_header(&self, indicator_pos: usize) -> (ChompingIndicator, Option<u8>) {
         let mut pos = indicator_pos + 1;
-        // Check next 2 characters for chomping indicator
+        let mut chomping = ChompingIndicator::Clip;
+        let mut explicit_indent = None;
+
+        // Check next 2 characters for chomping and indent indicators
         for _ in 0..2 {
             if pos >= self.text.len() {
                 break;
             }
             match self.text[pos] {
-                b'-' => return ChompingIndicator::Strip,
-                b'+' => return ChompingIndicator::Keep,
-                b'0'..=b'9' => pos += 1, // Skip explicit indent
+                b'-' => {
+                    chomping = ChompingIndicator::Strip;
+                    pos += 1;
+                }
+                b'+' => {
+                    chomping = ChompingIndicator::Keep;
+                    pos += 1;
+                }
+                b'1'..=b'9' => {
+                    explicit_indent = Some(self.text[pos] - b'0');
+                    pos += 1;
+                }
                 _ => break,
             }
         }
-        ChompingIndicator::Clip
+        (chomping, explicit_indent)
     }
 
     /// Find the end of an unquoted scalar.
@@ -678,16 +705,27 @@ pub enum YamlString<'a> {
         text: &'a [u8],
         indicator_pos: usize,
         chomping: ChompingIndicator,
+        /// Explicit indentation indicator (1-9), or None for auto-detect
+        explicit_indent: Option<u8>,
     },
     /// Block folded scalar (`>`): folds newlines to spaces
     BlockFolded {
         text: &'a [u8],
         indicator_pos: usize,
         chomping: ChompingIndicator,
+        /// Explicit indentation indicator (1-9), or None for auto-detect
+        explicit_indent: Option<u8>,
     },
 }
 
 impl<'a> YamlString<'a> {
+    /// Returns true if this is an unquoted (plain) scalar.
+    /// Unquoted scalars like `null`, `~`, or empty values should be treated
+    /// as YAML null, while quoted or block scalars should remain strings.
+    pub fn is_unquoted(&self) -> bool {
+        matches!(self, YamlString::Unquoted { .. })
+    }
+
     /// Get the raw bytes of the string (including quotes if applicable).
     pub fn raw_bytes(&self) -> &'a [u8] {
         match self {
@@ -704,14 +742,20 @@ impl<'a> YamlString<'a> {
                 text,
                 indicator_pos,
                 chomping,
+                explicit_indent,
             }
             | YamlString::BlockFolded {
                 text,
                 indicator_pos,
                 chomping,
+                explicit_indent,
             } => {
-                let (_, content_end) =
-                    Self::find_block_content_range(text, *indicator_pos, *chomping);
+                let (_, content_end) = Self::find_block_content_range(
+                    text,
+                    *indicator_pos,
+                    *chomping,
+                    *explicit_indent,
+                );
                 &text[*indicator_pos..content_end]
             }
         }
@@ -756,12 +800,14 @@ impl<'a> YamlString<'a> {
                 text,
                 indicator_pos,
                 chomping,
-            } => decode_block_literal(text, *indicator_pos, *chomping),
+                explicit_indent,
+            } => decode_block_literal(text, *indicator_pos, *chomping, *explicit_indent),
             YamlString::BlockFolded {
                 text,
                 indicator_pos,
                 chomping,
-            } => decode_block_folded(text, *indicator_pos, *chomping),
+                explicit_indent,
+            } => decode_block_folded(text, *indicator_pos, *chomping, *explicit_indent),
         }
     }
 
@@ -799,7 +845,17 @@ impl<'a> YamlString<'a> {
         text: &[u8],
         indicator_pos: usize,
         chomping: ChompingIndicator,
+        explicit_indent: Option<u8>,
     ) -> (usize, usize) {
+        // Compute the base indent for block scalar termination.
+        // This is the indent of the mapping key (for `key: |`) or the line indent.
+        // For `- key: |`, the key is at indent 2 (after `- `), not 0.
+        let base_indent = Self::compute_key_indent(text, indicator_pos);
+
+        // Check if we're on a document-start line (--- or %directive)
+        // In this case, content can be at indent 0 (zero-indented block scalar)
+        let on_document_start_line = Self::is_document_start_line(text, indicator_pos);
+
         // Skip indicator and modifiers to find newline
         let mut pos = indicator_pos + 1;
         while pos < text.len() && text[pos] != b'\n' {
@@ -812,15 +868,78 @@ impl<'a> YamlString<'a> {
 
         let content_start = pos;
 
-        // Determine content indentation from first non-empty line
-        let content_indent = Self::detect_block_indent(text, pos);
-        if content_indent == 0 {
-            return (content_start, content_start); // Empty block scalar
-        }
+        // Determine content indentation:
+        // - If explicit_indent is specified (e.g., >2), use base_indent + explicit_indent
+        // - Otherwise, auto-detect from first non-empty line
+        let content_indent = if let Some(indent) = explicit_indent {
+            // Explicit indentation: content is at base_indent + N spaces
+            base_indent + indent as usize
+        } else {
+            // Auto-detect from first non-empty line
+            // For zero-indented block scalars (after ---), content at indent 0 is valid
+            match Self::detect_block_indent(text, pos) {
+                Some(indent) if indent > base_indent || (on_document_start_line && indent == 0) => {
+                    indent
+                }
+                Some(_) | None => {
+                    // Content is not more indented than indicator line = empty block scalar
+                    // Per YAML spec: for keep chomping on empty block scalar, content is "\n"
+                    // We need to find any trailing newlines starting from content_start
+                    if chomping == ChompingIndicator::Keep {
+                        // Find all trailing newlines/empty lines from content_start
+                        let mut end = content_start;
+                        while end < text.len() {
+                            // Count spaces
+                            let mut spaces = 0;
+                            while end + spaces < text.len() && text[end + spaces] == b' ' {
+                                spaces += 1;
+                            }
+                            // Check if it's an empty line or EOF
+                            if end + spaces >= text.len() {
+                                break;
+                            }
+                            match text[end + spaces] {
+                                b'\n' => {
+                                    end += spaces + 1;
+                                }
+                                b'\r' => {
+                                    end += spaces + 1;
+                                    if end < text.len() && text[end] == b'\n' {
+                                        end += 1;
+                                    }
+                                }
+                                _ => {
+                                    // Non-empty line at same or lower indent = end of block
+                                    break;
+                                }
+                            }
+                        }
+                        // If no trailing newlines found but we're at EOF, the content
+                        // area includes the newline that terminated the indicator line.
+                        // Check if there was a newline before content_start.
+                        if end == content_start && content_start > 0 {
+                            let prev = content_start - 1;
+                            if text[prev] == b'\n'
+                                || (text[prev] == b'\r'
+                                    && (content_start >= text.len()
+                                        || text[content_start] != b'\n'))
+                            {
+                                // The indicator line ended with a newline - include it
+                                // by adjusting content_start back to include that newline
+                                return (prev, content_start);
+                            }
+                        }
+                        return (content_start, end);
+                    } else {
+                        return (content_start, content_start);
+                    }
+                }
+            }
+        };
 
         // Find end of block scalar content
         let mut last_content_end = pos;
-        let mut trailing_newline_start = pos;
+        let mut has_content = false;
 
         while pos < text.len() {
             let line_start = pos;
@@ -839,12 +958,10 @@ impl<'a> YamlString<'a> {
 
             match text[pos] {
                 b'\n' => {
-                    // Empty line
-                    trailing_newline_start = line_start;
+                    // Empty line - include in content area
                     pos += 1;
                 }
                 b'\r' => {
-                    trailing_newline_start = line_start;
                     pos += 1;
                     if pos < text.len() && text[pos] == b'\n' {
                         pos += 1;
@@ -862,7 +979,7 @@ impl<'a> YamlString<'a> {
                         pos += 1;
                     }
                     last_content_end = pos;
-                    trailing_newline_start = pos;
+                    has_content = true;
 
                     if pos < text.len() {
                         if text[pos] == b'\r' {
@@ -882,11 +999,9 @@ impl<'a> YamlString<'a> {
         let content_end = match chomping {
             ChompingIndicator::Strip => last_content_end,
             ChompingIndicator::Clip => {
-                if last_content_end < text.len()
-                    && trailing_newline_start >= last_content_end
-                    && trailing_newline_start < text.len()
-                {
-                    // Include one newline
+                // Clip: Include exactly one trailing newline if there was content
+                if has_content {
+                    // Include one newline after last content
                     let mut end = last_content_end;
                     if end < text.len() && text[end] == b'\n' {
                         end += 1;
@@ -901,19 +1016,106 @@ impl<'a> YamlString<'a> {
                     last_content_end
                 }
             }
-            ChompingIndicator::Keep => pos,
+            ChompingIndicator::Keep => pos, // Include all trailing newlines
         };
 
         (content_start, content_end)
     }
 
+    /// Compute the indentation of the line containing a given position.
+    /// Scans backwards to find line start, then counts spaces.
+    #[allow(dead_code)]
+    fn compute_line_indent(text: &[u8], pos: usize) -> usize {
+        // Find start of line
+        let mut line_start = pos;
+        while line_start > 0 && text[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+
+        // Count spaces at start of line
+        let mut indent = 0;
+        while line_start + indent < text.len() && text[line_start + indent] == b' ' {
+            indent += 1;
+        }
+        indent
+    }
+
+    /// Compute the indentation of the mapping key associated with a block scalar.
+    /// For `key: |`, returns the indent of `key`.
+    /// For `- key: |`, returns indent 2 (after `- `), not 0.
+    /// For `- |` (direct block scalar in sequence), returns 0.
+    fn compute_key_indent(text: &[u8], indicator_pos: usize) -> usize {
+        // Find start of line
+        let mut line_start = indicator_pos;
+        while line_start > 0 && text[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+
+        // Scan forward to find the key's indent
+        // Skip leading spaces
+        let mut pos = line_start;
+        while pos < text.len() && text[pos] == b' ' {
+            pos += 1;
+        }
+
+        let line_indent = pos - line_start;
+
+        // Check if we start with `-` (sequence item indicator)
+        if pos < text.len() && text[pos] == b'-' {
+            // Check if followed by space (block sequence indicator)
+            if pos + 1 < text.len() && (text[pos + 1] == b' ' || text[pos + 1] == b'\n') {
+                // Check if there's a `:` between `-` and the indicator
+                // If so, it's `- key: |` and we should return line_indent + 2
+                // If not, it's `- |` and we should return line_indent
+                let has_colon = text[(pos + 2)..indicator_pos].contains(&b':');
+                if has_colon {
+                    return line_indent + 2;
+                } else {
+                    return line_indent;
+                }
+            }
+        }
+
+        // Otherwise, key indent is the line's leading spaces
+        line_indent
+    }
+
+    /// Check if the given position is on a document-start line (begins with ---).
+    /// This allows zero-indented block scalars per YAML spec.
+    fn is_document_start_line(text: &[u8], pos: usize) -> bool {
+        // Find start of line
+        let mut line_start = pos;
+        while line_start > 0 && text[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+
+        // Check if line starts with "---" (optionally preceded by spaces)
+        let mut check_pos = line_start;
+        while check_pos < text.len() && text[check_pos] == b' ' {
+            check_pos += 1;
+        }
+
+        // Check for "---"
+        if check_pos + 2 < text.len()
+            && text[check_pos] == b'-'
+            && text[check_pos + 1] == b'-'
+            && text[check_pos + 2] == b'-'
+        {
+            return true;
+        }
+
+        false
+    }
+
     /// Detect content indentation from first non-empty line.
-    fn detect_block_indent(text: &[u8], start: usize) -> usize {
+    /// Returns None if no content lines found, Some(indent) otherwise.
+    /// Note: indent can be 0 for content at column 0.
+    fn detect_block_indent(text: &[u8], start: usize) -> Option<usize> {
         let mut pos = start;
 
         loop {
             if pos >= text.len() {
-                return 0;
+                return None;
             }
 
             // Count spaces
@@ -924,7 +1126,7 @@ impl<'a> YamlString<'a> {
             }
 
             if pos >= text.len() {
-                return 0;
+                return None;
             }
 
             match text[pos] {
@@ -937,17 +1139,10 @@ impl<'a> YamlString<'a> {
                         pos += 1;
                     }
                 }
-                b'#' => {
-                    // Comment line - skip
-                    while pos < text.len() && text[pos] != b'\n' {
-                        pos += 1;
-                    }
-                    if pos < text.len() {
-                        pos += 1;
-                    }
-                }
+                // Note: '#' is NOT treated as a comment here because this function
+                // is used for block scalar content detection, where '#' is content.
                 _ => {
-                    return indent;
+                    return Some(indent);
                 }
             }
         }
@@ -1217,9 +1412,10 @@ fn decode_block_literal<'a>(
     text: &'a [u8],
     indicator_pos: usize,
     chomping: ChompingIndicator,
+    explicit_indent: Option<u8>,
 ) -> Result<Cow<'a, str>, YamlStringError> {
     let (content_start, content_end) =
-        YamlString::find_block_content_range(text, indicator_pos, chomping);
+        YamlString::find_block_content_range(text, indicator_pos, chomping, explicit_indent);
 
     if content_start >= content_end {
         return Ok(Cow::Borrowed(""));
@@ -1227,8 +1423,15 @@ fn decode_block_literal<'a>(
 
     let content = &text[content_start..content_end];
 
-    // Detect the common indentation to strip
-    let indent = YamlString::detect_block_indent(text, content_start);
+    // Determine indentation to strip:
+    // - If explicit_indent is specified, use base_indent + explicit_indent
+    // - Otherwise, auto-detect from first non-empty line
+    let base_indent = YamlString::compute_key_indent(text, indicator_pos);
+    let indent = if let Some(ei) = explicit_indent {
+        base_indent + ei as usize
+    } else {
+        YamlString::detect_block_indent(text, content_start).unwrap_or(0)
+    };
     if indent == 0 {
         // No indentation to strip - just convert to string
         let s = core::str::from_utf8(content).map_err(|_| YamlStringError::InvalidUtf8)?;
@@ -1284,9 +1487,10 @@ fn decode_block_folded<'a>(
     text: &'a [u8],
     indicator_pos: usize,
     chomping: ChompingIndicator,
+    explicit_indent: Option<u8>,
 ) -> Result<Cow<'a, str>, YamlStringError> {
     let (content_start, content_end) =
-        YamlString::find_block_content_range(text, indicator_pos, chomping);
+        YamlString::find_block_content_range(text, indicator_pos, chomping, explicit_indent);
 
     if content_start >= content_end {
         return Ok(Cow::Borrowed(""));
@@ -1294,8 +1498,15 @@ fn decode_block_folded<'a>(
 
     let content = &text[content_start..content_end];
 
-    // Detect the common indentation to strip
-    let indent = YamlString::detect_block_indent(text, content_start);
+    // Determine indentation to strip:
+    // - If explicit_indent is specified, use base_indent + explicit_indent
+    // - Otherwise, auto-detect from first non-empty line
+    let base_indent = YamlString::compute_key_indent(text, indicator_pos);
+    let indent = if let Some(ei) = explicit_indent {
+        base_indent + ei as usize
+    } else {
+        YamlString::detect_block_indent(text, content_start).unwrap_or(0)
+    };
 
     // Build result by folding newlines
     let mut result = String::with_capacity(content.len());
@@ -1343,7 +1554,10 @@ fn decode_block_folded<'a>(
             pos += skip;
 
             // Check if more indented (relative to content indent)
-            let is_more_indented = line_indent > indent;
+            // A line is "more indented" if it has extra spaces OR starts with a tab
+            // Per YAML spec 8.1.3: "Lines starting with white space characters (more-indented lines) are not folded."
+            let is_more_indented =
+                line_indent > indent || (pos < content.len() && content[pos] == b'\t');
 
             // Find end of line
             let line_start = pos;

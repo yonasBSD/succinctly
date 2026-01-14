@@ -44,6 +44,8 @@ pub enum NodeType {
     /// Scalar value (string, number, etc.)
     #[allow(dead_code)]
     Scalar,
+    /// Sequence item (tracks open items awaiting their value)
+    SequenceItem,
 }
 
 /// Block scalar style (literal or folded).
@@ -91,6 +93,9 @@ pub struct SemiIndex {
     /// For each BP open (1-bit), this stores the corresponding byte offset.
     /// Containers may share position with first child.
     pub bp_to_text: Vec<u32>,
+    /// Sequence item marker bits: 1 if this BP position is a sequence item wrapper.
+    /// Sequence items have BP open/close but no TY entry.
+    pub seq_items: Vec<u64>,
     /// Number of valid bits in IB (= input length)
     #[allow(dead_code)]
     pub ib_len: usize,
@@ -115,6 +120,7 @@ struct Parser<'a> {
     ib_words: Vec<u64>,
     bp_words: Vec<u64>,
     ty_words: Vec<u64>,
+    seq_item_words: Vec<u64>,
     bp_pos: usize,
     ty_pos: usize,
 
@@ -143,6 +149,7 @@ impl<'a> Parser<'a> {
         let ib_words = vec![0u64; input.len().div_ceil(64).max(1)];
         let bp_words = vec![0u64; input.len().div_ceil(32).max(1)]; // ~2x IB for BP
         let ty_words = vec![0u64; input.len().div_ceil(64).max(1)];
+        let seq_item_words = vec![0u64; input.len().div_ceil(32).max(1)]; // Same size as BP
 
         Self {
             input,
@@ -151,6 +158,7 @@ impl<'a> Parser<'a> {
             ib_words,
             bp_words,
             ty_words,
+            seq_item_words,
             bp_pos: 0,
             ty_pos: 0,
             bp_to_text: Vec::new(),
@@ -214,6 +222,19 @@ impl<'a> Parser<'a> {
         }
         // Close is 0, which is default, so just increment position
         self.bp_pos += 1;
+    }
+
+    /// Mark the current BP position as a sequence item.
+    /// Call this BEFORE write_bp_open for sequence items.
+    #[inline]
+    fn mark_seq_item(&mut self) {
+        let bp_pos = self.bp_pos;
+        let word_idx = bp_pos / 64;
+        let bit_idx = bp_pos % 64;
+        while word_idx >= self.seq_item_words.len() {
+            self.seq_item_words.push(0);
+        }
+        self.seq_item_words[word_idx] |= 1u64 << bit_idx;
     }
 
     /// Write a type bit: 0 = mapping, 1 = sequence.
@@ -480,14 +501,84 @@ impl<'a> Parser<'a> {
         self.peek_at(3) == Some(b' ') || self.peek_at(3) == Some(b'\n') || self.peek_at(3).is_none()
     }
 
-    /// Skip past a document marker (`---` or `...`) and any trailing content on the line.
+    /// Skip past a document marker (`---` or `...`).
+    /// Does NOT skip content after the marker - that should be parsed.
     fn skip_document_marker(&mut self) {
         // Skip the 3-character marker
         self.advance();
         self.advance();
         self.advance();
-        // Skip to end of line (any content after marker is ignored)
-        self.skip_to_eol();
+        // Skip trailing space after marker if present
+        if self.peek() == Some(b' ') {
+            self.advance();
+        }
+    }
+
+    /// Check if there's parseable content on the current line (not just whitespace/comment).
+    fn has_content_on_line(&self) -> bool {
+        let mut i = 0;
+        loop {
+            match self.peek_at(i) {
+                Some(b' ') | Some(b'\t') => i += 1,
+                Some(b'\n') | Some(b'\r') | Some(b'#') | None => return false,
+                _ => return true,
+            }
+        }
+    }
+
+    /// Parse content after a document marker on the same line (e.g., `--- >` or `--- value`).
+    fn parse_inline_document_value(&mut self) -> Result<(), YamlError> {
+        // Skip leading whitespace
+        while self.peek() == Some(b' ') || self.peek() == Some(b'\t') {
+            self.advance();
+        }
+
+        match self.peek() {
+            Some(b'|') | Some(b'>') => {
+                // Block scalar
+                self.parse_block_scalar(0)?;
+            }
+            Some(b'"') => {
+                // Quoted string
+                self.set_ib();
+                self.write_bp_open();
+                self.parse_double_quoted()?;
+                self.write_bp_close();
+            }
+            Some(b'\'') => {
+                // Single-quoted string
+                self.set_ib();
+                self.write_bp_open();
+                self.parse_single_quoted()?;
+                self.write_bp_close();
+            }
+            Some(b'[') | Some(b'{') => {
+                // Flow collection
+                self.parse_value(0)?;
+            }
+            Some(b'-')
+                if self.peek_at(1) == Some(b' ')
+                    || self.peek_at(1) == Some(b'\n')
+                    || self.peek_at(1).is_none() =>
+            {
+                // Block sequence item
+                self.parse_sequence_item(0)?;
+            }
+            Some(_) if self.looks_like_mapping_entry() => {
+                // Mapping entry
+                self.parse_mapping_entry(0)?;
+            }
+            Some(_) => {
+                // Plain scalar
+                self.set_ib();
+                self.write_bp_open();
+                self.parse_unquoted_value_with_indent(0);
+                self.write_bp_close();
+            }
+            None => {}
+        }
+
+        Ok(())
     }
 
     /// Start a new document within the virtual root sequence.
@@ -749,14 +840,15 @@ impl<'a> Parser<'a> {
         // Mark the `-` position
         self.set_ib();
 
-        // Check if we need to open a new sequence
+        // First close any deeper containers. This might reveal an existing sequence
+        // at this indent level that we can reuse.
+        self.close_deeper_indents(indent);
+
+        // Now check if we need to open a new sequence (check AFTER closing)
         let need_new_sequence = self.type_stack.last() != Some(&NodeType::Sequence)
             || self.indent_stack.last().copied() != Some(indent);
 
         if need_new_sequence {
-            // Close any deeper containers first
-            self.close_deeper_indents(indent);
-
             // Open new sequence
             self.write_bp_open();
             self.write_ty(true); // 1 = sequence
@@ -765,6 +857,7 @@ impl<'a> Parser<'a> {
         }
 
         // Open the sequence item node
+        self.mark_seq_item();
         self.write_bp_open();
 
         // Skip `- `
@@ -773,29 +866,55 @@ impl<'a> Parser<'a> {
 
         self.check_unsupported()?;
 
+        // Track the sequence item on the stack so close_deeper_indents can close it.
+        // We use indent + 1 as a virtual indent - any content at indent > indent
+        // is considered part of this item.
+        //
+        // NOTE: This means for `- foo`, the item is at virtual indent 1, so content
+        // at indent 2 would be part of the item. But the sequence itself is at indent 0.
+        self.indent_stack.push(indent + 1);
+        self.type_stack.push(NodeType::SequenceItem);
+
         // Check what follows
         if self.at_line_end() {
-            // Empty item or nested content on next line
-            // The value is implicit null or will be a nested structure
-            self.write_bp_close(); // Close the item
+            // Content is on the next line(s) at greater indentation.
+            // Leave the item open - subsequent content at indent > this item's
+            // indent will be parsed as the item's value. The item will be closed
+            // by close_deeper_indents when we see content at indent <= sequence indent.
             return Ok(());
         }
 
-        // Check for compact mapping: `- key: value`
-        // This is a mapping entry directly as the sequence item value
-        if self.looks_like_mapping_entry() {
-            // The sequence item contains a mapping
-            // Use a virtual indent for this inline mapping (item_indent + 1)
-            let compact_indent = indent + 1;
+        // Check for nested sequence: `- - item` (sequence item containing a sequence)
+        if self.peek() == Some(b'-')
+            && matches!(
+                self.peek_at(1),
+                Some(b' ') | Some(b'\n') | Some(b'\r') | None
+            )
+        {
+            // Nested sequence - the item value is another sequence.
+            // Use indent + 2 as the virtual indent for the nested sequence.
+            self.parse_sequence_item(indent + 2)?;
+            // Don't close the outer item - it will be closed when we return
+            // to a lower indent level.
+        } else if self.looks_like_mapping_entry() {
+            // Check for compact mapping: `- key: value`
+            // This is a mapping entry directly as the sequence item value
+            // The sequence item contains a mapping.
+            // Use indent + 2 so that entries at actual indent >= indent+2 are
+            // considered part of this mapping.
+            let compact_indent = indent + 2;
             self.parse_compact_mapping_entry(compact_indent)?;
+            // Don't close anything - mapping and item will be closed by
+            // close_deeper_indents when we see content at lower indent.
         } else {
             // Parse the item value normally
             // Pass structure indent for block scalars (content must be > this)
             self.parse_value(indent)?;
+            // Close the sequence item for simple values
+            self.indent_stack.pop();
+            self.type_stack.pop();
+            self.write_bp_close();
         }
-
-        // Close the sequence item
-        self.write_bp_close();
 
         Ok(())
     }
@@ -859,12 +978,9 @@ impl<'a> Parser<'a> {
             self.write_bp_close();
         }
 
-        // Close mapping
-        self.write_bp_close();
-
-        // Pop the mapping from stacks
-        self.indent_stack.pop();
-        self.type_stack.pop();
+        // Don't close the mapping here - leave it open so subsequent lines
+        // at compatible indent levels can add more entries. The mapping will
+        // be closed by close_deeper_indents when we return to a lower indent.
 
         Ok(())
     }
@@ -2254,6 +2370,7 @@ impl<'a> Parser<'a> {
             bp: self.bp_words.clone(),
             ty: self.ty_words.clone(),
             bp_to_text: self.bp_to_text.clone(),
+            seq_items: self.seq_item_words.clone(),
             ib_len: self.input.len(),
             bp_len: self.bp_pos,
             ty_len: self.ty_pos,
@@ -2267,7 +2384,15 @@ impl<'a> Parser<'a> {
         // Skip leading `---` if present (optional for first doc)
         if self.is_document_start() {
             self.skip_document_marker();
-            self.skip_newlines();
+
+            // Check for inline content after `---` (e.g., `--- >` or `--- value`)
+            if self.has_content_on_line() {
+                self.start_document();
+                self.parse_inline_document_value()?;
+                // Don't skip newlines yet - let the main loop handle it
+            } else {
+                self.skip_newlines();
+            }
         }
 
         // Check if file is empty after markers
@@ -2276,8 +2401,10 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
-        // Start first document
-        self.start_document();
+        // Start first document if not already started
+        if !self.in_document {
+            self.start_document();
+        }
 
         // Parse document content
         loop {
@@ -2291,21 +2418,30 @@ impl<'a> Parser<'a> {
             if self.is_document_end() {
                 self.end_document();
                 self.skip_document_marker();
-                self.skip_newlines();
+
+                // Check for inline content after `...` (shouldn't normally have content)
+                if !self.has_content_on_line() {
+                    self.skip_newlines();
+                }
 
                 // Check for another document or EOF
                 if self.peek().is_none() {
                     break;
                 }
 
-                // If there's a document start marker, skip it
+                // If there's a document start marker, skip it and check for inline content
                 if self.is_document_start() {
                     self.skip_document_marker();
-                    self.skip_newlines();
+                    if self.has_content_on_line() {
+                        self.start_document();
+                        self.parse_inline_document_value()?;
+                    } else {
+                        self.skip_newlines();
+                    }
                 }
 
-                // Start new document if there's content
-                if self.peek().is_some() && !self.is_document_end() {
+                // Start new document if there's content and not already started
+                if self.peek().is_some() && !self.is_document_end() && !self.in_document {
                     self.start_document();
                 }
                 continue;
@@ -2315,11 +2451,17 @@ impl<'a> Parser<'a> {
             if self.is_document_start() {
                 self.end_document();
                 self.skip_document_marker();
-                self.skip_newlines();
 
-                // Start new document if there's content
-                if self.peek().is_some() {
+                // Check for inline content after `---` (e.g., `--- >` or `--- value`)
+                if self.has_content_on_line() {
                     self.start_document();
+                    self.parse_inline_document_value()?;
+                } else {
+                    self.skip_newlines();
+                    // Start new document if there's content
+                    if self.peek().is_some() {
+                        self.start_document();
+                    }
                 }
                 continue;
             }
@@ -2371,6 +2513,9 @@ impl<'a> Parser<'a> {
         for _ in 0..indent {
             self.advance();
         }
+
+        // close_deeper_indents will handle closing any SequenceItem entries
+        // when we return to a lower indent level
 
         // Check what kind of content this is
         match self.peek() {

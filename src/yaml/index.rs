@@ -41,6 +41,8 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Direct BP open index to text position mapping.
     /// Entry i = text byte offset for the i-th BP open.
     bp_to_text: Vec<u32>,
+    /// Sequence item markers - 1 if BP position is a sequence item wrapper
+    seq_items: W,
     /// Anchor definitions: anchor name → BP position of the anchored value
     anchors: BTreeMap<String, usize>,
     /// Alias references: BP position of alias → anchor name being referenced
@@ -79,6 +81,7 @@ impl YamlIndex<Vec<u64>> {
             ty: semi.ty,
             ty_len: semi.ty_len,
             bp_to_text: semi.bp_to_text,
+            seq_items: semi.seq_items,
             anchors: semi.anchors,
             aliases: semi.aliases,
         })
@@ -98,6 +101,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         ty: W,
         ty_len: usize,
         bp_to_text: Vec<u32>,
+        seq_items: W,
         anchors: BTreeMap<String, usize>,
         aliases: BTreeMap<usize, String>,
     ) -> Self {
@@ -111,6 +115,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             ty,
             ty_len,
             bp_to_text,
+            seq_items,
             anchors,
             aliases,
         }
@@ -193,12 +198,12 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     /// Returns `true` for sequence, `false` for mapping.
     #[inline]
     pub fn is_sequence_at_bp(&self, bp_pos: usize) -> bool {
-        // The TY index equals the number of 1-bits (opens) in BP at positions 0..bp_pos-1.
-        // For BP position 0: ty_idx = 0 (it's the first container)
-        // For BP position p > 0: ty_idx = rank1(p) which counts bits at positions 0..p-1
-        //
-        // Note: rank1(p) counts 1-bits at positions 0..p-1, so rank1(1) counts position 0.
-        let ty_idx = self.bp.rank1(bp_pos);
+        // The TY index equals the number of container opens before this position.
+        // Since sequence items have BP opens but no TY entries, we need to
+        // subtract the count of sequence items from the BP rank.
+        let bp_opens_before = self.bp.rank1(bp_pos);
+        let seq_items_before = self.count_seq_items_before(bp_pos);
+        let ty_idx = bp_opens_before.saturating_sub(seq_items_before);
         self.is_sequence_at(ty_idx)
     }
 
@@ -206,6 +211,49 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     #[inline]
     pub fn is_alias(&self, bp_pos: usize) -> bool {
         self.aliases.contains_key(&bp_pos)
+    }
+
+    /// Check if a BP position is a sequence item wrapper.
+    ///
+    /// Sequence items have BP open/close but no TY entry.
+    /// They are wrapper nodes around the item's content.
+    #[inline]
+    pub fn is_seq_item(&self, bp_pos: usize) -> bool {
+        let word_idx = bp_pos / 64;
+        let bit_idx = bp_pos % 64;
+        let seq_item_words = self.seq_items.as_ref();
+        if word_idx < seq_item_words.len() {
+            (seq_item_words[word_idx] >> bit_idx) & 1 == 1
+        } else {
+            false
+        }
+    }
+
+    /// Count sequence items at BP positions 0..bp_pos.
+    ///
+    /// This is used to adjust TY index calculations since sequence items
+    /// have BP opens but no TY entries.
+    #[inline]
+    pub fn count_seq_items_before(&self, bp_pos: usize) -> usize {
+        let seq_item_words = self.seq_items.as_ref();
+        if seq_item_words.is_empty() {
+            return 0;
+        }
+
+        let word_idx = bp_pos / 64;
+        let bit_idx = bp_pos % 64;
+
+        let mut count = 0usize;
+        for word in seq_item_words.iter().take(word_idx) {
+            count += word.count_ones() as usize;
+        }
+
+        if word_idx < seq_item_words.len() && bit_idx > 0 {
+            let mask = (1u64 << bit_idx) - 1;
+            count += (seq_item_words[word_idx] & mask).count_ones() as usize;
+        }
+
+        count
     }
 
     /// Debug helper to get bp_to_text array.

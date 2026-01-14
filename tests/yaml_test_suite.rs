@@ -31,32 +31,39 @@ fn value_to_json<W: AsRef<[u64]>>(value: &YamlValue<'_, W>) -> String {
     match value {
         YamlValue::String(s) => {
             let str_val = s.as_str().unwrap_or_default();
-            // Check for special YAML values
-            match str_val.as_ref() {
-                "null" | "~" | "" => "null".to_string(),
-                "true" | "True" | "TRUE" => "true".to_string(),
-                "false" | "False" | "FALSE" => "false".to_string(),
-                s => {
-                    // Try to parse as number
-                    if let Ok(n) = s.parse::<i64>() {
-                        return n.to_string();
-                    }
-                    if let Ok(f) = s.parse::<f64>() {
-                        if !f.is_nan() && !f.is_infinite() {
-                            return format!("{}", f);
+            let is_unquoted = s.is_unquoted();
+
+            // Only convert to null/bool/number for unquoted scalars
+            // Quoted strings and block scalars should remain as strings
+            if is_unquoted {
+                match str_val.as_ref() {
+                    "null" | "~" | "" => return "null".to_string(),
+                    "true" | "True" | "TRUE" => return "true".to_string(),
+                    "false" | "False" | "FALSE" => return "false".to_string(),
+                    s => {
+                        // Try to parse as number
+                        if let Ok(n) = s.parse::<i64>() {
+                            return n.to_string();
+                        }
+                        if let Ok(f) = s.parse::<f64>() {
+                            if !f.is_nan() && !f.is_infinite() {
+                                return format!("{}", f);
+                            }
                         }
                     }
-                    // It's a string - JSON escape it
-                    format!(
-                        "\"{}\"",
-                        s.replace('\\', "\\\\")
-                            .replace('"', "\\\"")
-                            .replace('\n', "\\n")
-                            .replace('\r', "\\r")
-                            .replace('\t', "\\t")
-                    )
                 }
             }
+
+            // It's a string - JSON escape it
+            let s = str_val.as_ref();
+            format!(
+                "\"{}\"",
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t")
+            )
         }
         YamlValue::Mapping(fields) => {
             let mut entries = Vec::new();
@@ -87,7 +94,23 @@ fn value_to_json<W: AsRef<[u64]>>(value: &YamlValue<'_, W>) -> String {
 
 /// Normalize JSON for comparison (remove whitespace).
 fn normalize_json(json: &str) -> String {
-    json.chars().filter(|c| !c.is_whitespace()).collect()
+    // Only normalize whitespace OUTSIDE of strings, not inside them
+    // This simple approach handles basic cases but not nested quotes
+    let mut result = String::new();
+    let mut in_string = false;
+    let mut prev_char = '\0';
+
+    for c in json.chars() {
+        if c == '"' && prev_char != '\\' {
+            in_string = !in_string;
+        }
+
+        if in_string || !c.is_whitespace() {
+            result.push(c);
+        }
+        prev_char = c;
+    }
+    result
 }
 
 // ============================================================================
@@ -103,6 +126,25 @@ fn test_229Q_spec_example_24_sequence_of_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"name\": \"Mark McGwire\",
+    \"hr\": 65,
+    \"avg\": 0.278
+  },
+  {
+    \"name\": \"Sammy Sosa\",
+    \"hr\": 63,
+    \"avg\": 0.288
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.4. Sequence of Mappings"
+    );
 }
 
 /// Whitespace around colon in mappings
@@ -114,6 +156,31 @@ fn test_26DV_whitespace_around_colon_in_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"top1\": {
+    \"key1\": \"scalar1\"
+  },
+  \"top2\": {
+    \"key2\": \"scalar2\"
+  },
+  \"top3\": {
+    \"scalar1\": \"scalar3\"
+  },
+  \"top4\": {
+    \"scalar2\": \"scalar4\"
+  },
+  \"top5\": \"scalar5\",
+  \"top6\": {
+    \"key6\": \"scalar6\"
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Whitespace around colon in mappings"
+    );
 }
 
 /// Allowed characters in keys
@@ -125,6 +192,20 @@ fn test_2EBW_allowed_characters_in_keys() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a!\\\"#$%&'()*+,-./09:;<=>?@AZ[\\\\]^_`az{|}~\": \"safe\",
+  \"?foo\": \"safe question mark\",
+  \":foo\": \"safe colon\",
+  \"-foo\": \"safe dash\",
+  \"this is#not\": \"a comment\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Allowed characters in keys"
+    );
 }
 
 /// Block Mapping with Missing Keys
@@ -147,6 +228,16 @@ fn test_36F6_multiline_plain_scalar_with_empty_line() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"plain\": \"a b\\nc\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline plain scalar with empty line"
+    );
 }
 
 /// Block Sequence in Block Sequence
@@ -158,6 +249,20 @@ fn test_3ALJ_block_sequence_in_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  [
+    \"s1_i1\",
+    \"s1_i2\"
+  ],
+  \"s2\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Sequence in Block Sequence"
+    );
 }
 
 /// Spec Example 7.1. Alias Nodes
@@ -169,6 +274,19 @@ fn test_3GZX_spec_example_71_alias_nodes() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"First occurrence\": \"Foo\",
+  \"Second occurrence\": \"Foo\",
+  \"Override anchor\": \"Bar\",
+  \"Reuse anchor\": \"Bar\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.1. Alias Nodes"
+    );
 }
 
 /// Plain Scalar looking like key, comment, anchor and tag
@@ -180,6 +298,14 @@ fn test_3MYT_plain_scalar_looking_like_key_comment_anchor_and_tag() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"k:#foo &a !t s\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Plain Scalar looking like key, comment, anchor and tag"
+    );
 }
 
 /// Single block sequence with anchor
@@ -191,6 +317,16 @@ fn test_3R3P_single_block_sequence_with_anchor() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"a\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Single block sequence with anchor"
+    );
 }
 
 /// Leading tabs in double quoted
@@ -202,6 +338,14 @@ fn test_3RLN_leading_tabs_in_double_quoted() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"6 leading tab\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Leading tabs in double quoted"
+    );
 }
 
 /// Escaped slash in double quotes
@@ -213,6 +357,16 @@ fn test_3UYS_escaped_slash_in_double_quotes() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"escaped slash\": \"a/b\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Escaped slash in double quotes"
+    );
 }
 
 /// Flow Mapping Separate Values
@@ -235,6 +389,17 @@ fn test_4CQQ_spec_example_218_multiline_flow_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"plain\": \"This unquoted scalar spans many lines.\",
+  \"quoted\": \"So does this quoted scalar.\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.18. Multi-line Flow Scalars"
+    );
 }
 
 /// Nested implicit complex keys
@@ -257,17 +422,40 @@ fn test_4MUZ_flow_mapping_colon_on_line_after_key() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": \"bar\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow mapping colon on line after key"
+    );
 }
 
 /// Folded Block Scalar [1.3]
 /// Tags: folded scalar 1.3-mod whitespace
 #[test]
 fn test_4Q9F_folded_block_scalar_13() {
+    // NOTE: The original test suite has two blank lines between ef and gh,
+    // but our test only has one. With one blank line, yq produces:
+    // "ab cd\n\nef gh\n" which is what we expect.
     let yaml = b"--- >\n ab\n cd\n \n ef\n gh";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    // Expected matches yq output for this YAML input (single blank line)
+    let expected_json = "\"ab cd\\n\\nef gh\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Folded Block Scalar [1.3]"
+    );
 }
 
 /// Spec Example 8.2. Block Indentation Indicator [1.3]
@@ -279,6 +467,19 @@ fn test_4QFQ_spec_example_82_block_indentation_indicator_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"detected\\n\",
+  \"\\n\\n# detected\\n\",
+  \" explicit\\n\",
+  \"detected\\n\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.2. Block Indentation Indicator [1.3]"
+    );
 }
 
 /// Trailing spaces after flow collection
@@ -313,17 +514,39 @@ fn test_4V8U_plain_scalar_with_backslashes() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"plain\\\\value\\\\with\\\\backslashes\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Plain scalar with backslashes"
+    );
 }
 
 /// Literal scalars
 /// Tags: indent literal
 #[test]
 fn test_4WA9_literal_scalars() {
-    let yaml = b"- aaa: |2\n    xxx\n  bbb: |\n    xxx";
+    // Note: official test has trailing newline after final xxx
+    let yaml = b"- aaa: |2\n    xxx\n  bbb: |\n    xxx\n";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"aaa\" : \"xxx\\n\",
+    \"bbb\" : \"xxx\\n\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Literal scalars"
+    );
 }
 
 /// Spec Example 6.4. Line Prefixes
@@ -335,6 +558,18 @@ fn test_4ZYM_spec_example_64_line_prefixes() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"plain\": \"text lines\",
+  \"quoted\": \"text lines\",
+  \"block\": \"text\\n \\tlines\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.4. Line Prefixes"
+    );
 }
 
 /// Flow Mapping
@@ -346,6 +581,17 @@ fn test_54T7_flow_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": \"you\",
+  \"bar\": \"far\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow Mapping"
+    );
 }
 
 /// Flow mapping edge cases
@@ -357,6 +603,16 @@ fn test_58MP_flow_mapping_edge_cases() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"x\": \":x\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow mapping edge cases"
+    );
 }
 
 /// Spec Example 5.7. Block Scalar Indicators
@@ -368,6 +624,17 @@ fn test_5BVJ_spec_example_57_block_scalar_indicators() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"literal\": \"some\\ntext\\n\",
+  \"folded\": \"some text\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 5.7. Block Scalar Indicators"
+    );
 }
 
 /// Spec Example 7.15. Flow Mappings
@@ -379,6 +646,23 @@ fn test_5C5M_spec_example_715_flow_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"one\": \"two\",
+    \"three\": \"four\"
+  },
+  {
+    \"five\": \"six\",
+    \"seven\": \"eight\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.15. Flow Mappings"
+    );
 }
 
 /// Spec Example 6.5. Empty Lines
@@ -390,6 +674,17 @@ fn test_5GBF_spec_example_65_empty_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"Folding\": \"Empty line\\nas a line feed\",
+  \"Chomping\": \"Clipped empty lines\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.5. Empty Lines"
+    );
 }
 
 /// Spec Example 7.13. Flow Sequence
@@ -401,6 +696,23 @@ fn test_5KJE_spec_example_713_flow_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  [
+    \"one\",
+    \"two\"
+  ],
+  [
+    \"three\",
+    \"four\"
+  ]
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.13. Flow Sequence"
+    );
 }
 
 /// Colon and adjacent value on next line
@@ -412,6 +724,16 @@ fn test_5MUD_colon_and_adjacent_value_on_next_line() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": \"bar\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Colon and adjacent value on next line"
+    );
 }
 
 /// Spec Example 6.9. Separated Comment
@@ -423,6 +745,16 @@ fn test_5NYZ_spec_example_69_separated_comment() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": \"value\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.9. Separated Comment"
+    );
 }
 
 /// Colon at the beginning of adjacent flow scalar
@@ -434,6 +766,21 @@ fn test_5T43_colon_at_the_beginning_of_adjacent_flow_scalar() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"key\": \"value\"
+  },
+  {
+    \"key\": \":value\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Colon at the beginning of adjacent flow scalar"
+    );
 }
 
 /// Spec Example 8.17. Explicit Block Mapping Entries
@@ -445,6 +792,20 @@ fn test_5WE3_spec_example_817_explicit_block_mapping_entries() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"explicit key\": null,
+  \"block key\\n\": [
+    \"one\",
+    \"two\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.17. Explicit Block Mapping Entries"
+    );
 }
 
 /// Question mark at start of flow key
@@ -456,6 +817,17 @@ fn test_652Z_question_mark_at_start_of_flow_key() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"?foo\" : \"bar\",
+  \"bar\" : 42
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Question mark at start of flow key"
+    );
 }
 
 /// Single Entry Block Sequence
@@ -467,6 +839,16 @@ fn test_65WH_single_entry_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"foo\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Single Entry Block Sequence"
+    );
 }
 
 /// Spec Example 6.3. Separation Spaces
@@ -478,6 +860,22 @@ fn test_6BCT_spec_example_63_separation_spaces() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"foo\": \"bar\"
+  },
+  [
+    \"baz\",
+    \"baz\"
+  ]
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.3. Separation Spaces"
+    );
 }
 
 /// Mapping, key and flow sequence item anchors
@@ -519,6 +917,14 @@ fn test_6FWR_block_scalar_keep() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"ab\\n\\n \\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Scalar Keep"
+    );
 }
 
 /// Backslashes in singlequotes
@@ -530,6 +936,16 @@ fn test_6H3V_backslashes_in_singlequotes() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo: bar\\\\\": \"baz'\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Backslashes in singlequotes"
+    );
 }
 
 /// Spec Example 6.1. Indentation Spaces
@@ -541,17 +957,42 @@ fn test_6HB6_spec_example_61_indentation_spaces() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"Not indented\": {
+    \"By one space\": \"By four\\n  spaces\\n\",
+    \"Flow style\": [
+      \"By two\",
+      \"Also by two\",
+      \"Still by two\"
+    ]
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.1. Indentation Spaces"
+    );
 }
 
 /// Spec Example 2.13. In literals, newlines are preserved
 /// Tags: spec scalar literal comment
 #[test]
 fn test_6JQW_spec_example_213_in_literals_newlines_are_preserved() {
-    let yaml = b"# ASCII Art\n--- |\n  \\//||\\/||\n  // ||  ||__";
+    let yaml = b"# ASCII Art\n--- |\n  \\//||\\/||\n  // ||  ||__\n";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"\\\\//||\\\\/||\\n// ||  ||__\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.13. In literals, newlines are preserved"
+    );
 }
 
 /// Anchor for empty node
@@ -563,6 +1004,17 @@ fn test_6KGN_anchor_for_empty_node() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": null,
+  \"b\": null
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Anchor for empty node"
+    );
 }
 
 /// Aliases in Explicit Block Mapping
@@ -596,6 +1048,17 @@ fn test_6SLA_allowed_characters_in_quoted_mapping_key() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\\nbar:baz\\tx \\\\$%^&*()x\": 23,
+  \"x\\\\ny:z\\\\tx $%^&*()x\": 24
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Allowed characters in quoted mapping key"
+    );
 }
 
 /// Spec Example 6.8. Flow Folding [1.3]
@@ -607,6 +1070,14 @@ fn test_6WPF_spec_example_68_flow_folding_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\" foo\\nbar\\nbaz \"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.8. Flow Folding [1.3]"
+    );
 }
 
 /// Block Scalar Strip [1.3]
@@ -618,6 +1089,14 @@ fn test_753E_block_scalar_strip_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"ab\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Scalar Strip [1.3]"
+    );
 }
 
 /// Spec Example 7.6. Double Quoted Lines
@@ -629,6 +1108,14 @@ fn test_7A4E_spec_example_76_double_quoted_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\" 1st non-empty\\n2nd non-empty 3rd non-empty \"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.6. Double Quoted Lines"
+    );
 }
 
 /// Node and Mapping Key Anchors [1.3]
@@ -640,6 +1127,32 @@ fn test_7BMT_node_and_mapping_key_anchors_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"top1\": {
+    \"key1\": \"one\"
+  },
+  \"top2\": {
+    \"key2\": \"two\"
+  },
+  \"top3\": {
+    \"key3\": \"three\"
+  },
+  \"top4\": {
+    \"key4\": \"four\"
+  },
+  \"top5\": {
+    \"key5\": \"five\"
+  },
+  \"top6\": \"six\",
+  \"top7\": \"seven\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Node and Mapping Key Anchors [1.3]"
+    );
 }
 
 /// Spec Example 2.10. Node for “Sammy Sosa” appears twice in this document
@@ -651,6 +1164,23 @@ fn test_7BUB_spec_example_210_node_for_sammy_sosa_appears_twice_in_this_d() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"hr\": [
+    \"Mark McGwire\",
+    \"Sammy Sosa\"
+  ],
+  \"rbi\": [
+    \"Sammy Sosa\",
+    \"Ken Griffey\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.10. Node for “Sammy Sosa” appears twice in this document"
+    );
 }
 
 /// Comment in flow sequence before comma
@@ -662,6 +1192,17 @@ fn test_7TMG_comment_in_flow_sequence_before_comma() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"word1\",
+  \"word2\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Comment in flow sequence before comma"
+    );
 }
 
 /// Block Mapping with Missing Values
@@ -673,6 +1214,18 @@ fn test_7W2P_block_mapping_with_missing_values() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": null,
+  \"b\": null,
+  \"c\": null
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Mapping with Missing Values"
+    );
 }
 
 /// Empty flow collections
@@ -684,6 +1237,29 @@ fn test_7ZZ5_empty_flow_collections() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"nested sequences\": [
+    [
+      [
+        []
+      ]
+    ],
+    [
+      [
+        {}
+      ]
+    ]
+  ],
+  \"key1\": [],
+  \"key2\": {}
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Empty flow collections"
+    );
 }
 
 /// Spec Example 7.8. Single Quoted Implicit Keys
@@ -695,6 +1271,20 @@ fn test_87E4_spec_example_78_single_quoted_implicit_keys() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"implicit block key\": [
+    {
+      \"implicit flow key\": \"value\"
+    }
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.8. Single Quoted Implicit Keys"
+    );
 }
 
 /// Plain mapping key ending with colon
@@ -706,6 +1296,16 @@ fn test_8CWC_plain_mapping_key_ending_with_colon() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key ends with two colons::\": \"value\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Plain mapping key ending with colon"
+    );
 }
 
 /// Spec Example 6.10. Comment Lines
@@ -728,6 +1328,23 @@ fn test_8KB6_multiline_plain_flow_mapping_key_without_value() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"single line\": null,
+    \"a\": \"b\"
+  },
+  {
+    \"multi line\": null,
+    \"a\": \"b\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline plain flow mapping key without value"
+    );
 }
 
 /// Block Sequence in Block Mapping
@@ -739,6 +1356,19 @@ fn test_8QBE_block_sequence_in_block_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": [
+    \"item1\",
+    \"item2\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Sequence in Block Mapping"
+    );
 }
 
 /// Spec Example 7.14. Flow Sequence Entries
@@ -750,6 +1380,24 @@ fn test_8UDB_spec_example_714_flow_sequence_entries() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"double quoted\",
+  \"single quoted\",
+  \"plain text\",
+  [
+    \"nested\"
+  ],
+  {
+    \"single\": \"pair\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.14. Flow Sequence Entries"
+    );
 }
 
 /// Anchor with unicode character
@@ -761,6 +1409,16 @@ fn test_8XYN_anchor_with_unicode_character() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"unicode anchor\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Anchor with unicode character"
+    );
 }
 
 /// Block Mappings in Block Sequence
@@ -772,6 +1430,22 @@ fn test_93JH_block_mappings_in_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"key\": \"value\",
+    \"key2\": \"value2\"
+  },
+  {
+    \"key3\": \"value3\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Mappings in Block Sequence"
+    );
 }
 
 /// Spec Example 6.6. Line Folding [1.3]
@@ -783,6 +1457,14 @@ fn test_93WF_spec_example_66_line_folding_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"trimmed\\n\\n\\nas space\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.6. Line Folding [1.3]"
+    );
 }
 
 /// Spec Example 2.14. In the folded scalars, newlines become spaces
@@ -794,17 +1476,33 @@ fn test_96L6_spec_example_214_in_the_folded_scalars_newlines_become_space() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"Mark McGwire's year was crippled by a knee injury.\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.14. In the folded scalars, newlines become spaces"
+    );
 }
 
 /// Leading tab content in literals
 /// Tags: indent literal whitespace
 #[test]
 fn test_96NN_leading_tab_content_in_literals() {
-    let yaml = b"foo: |-\n \t\t\tbar";
+    let yaml = b"foo: |-\n \tbar";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{\"foo\":\"\\tbar\"}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Leading tab content in literals"
+    );
 }
 
 /// Spec Example 5.5. Comment Indicator
@@ -827,6 +1525,23 @@ fn test_9BXH_multiline_doublequoted_flow_mapping_key_without_value() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"single line\": null,
+    \"a\": \"b\"
+  },
+  {
+    \"multi line\": null,
+    \"a\": \"b\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline doublequoted flow mapping key without value"
+    );
 }
 
 /// Multi-level Mapping Indent
@@ -838,6 +1553,24 @@ fn test_9FMG_multilevel_mapping_indent() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": {
+    \"b\": {
+      \"c\": \"d\"
+    },
+    \"e\": {
+      \"f\": \"g\"
+    }
+  },
+  \"h\": \"i\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multi-level Mapping Indent"
+    );
 }
 
 /// Simple Mapping Indent
@@ -849,6 +1582,18 @@ fn test_9J7A_simple_mapping_indent() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": {
+    \"bar\": \"baz\"
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Simple Mapping Indent"
+    );
 }
 
 /// Single Pair Implicit Entries
@@ -871,6 +1616,14 @@ fn test_9MQT_scalar_doc_with_in_content() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"a ...x b\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Scalar doc with '...' in content"
+    );
 }
 
 /// Multiline double quoted flow mapping key
@@ -882,6 +1635,21 @@ fn test_9SA2_multiline_double_quoted_flow_mapping_key() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"single line\": \"value\"
+  },
+  {
+    \"multi line\": \"value\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline double quoted flow mapping key"
+    );
 }
 
 /// Spec Example 5.8. Quoted Scalar Indicators
@@ -893,6 +1661,17 @@ fn test_9SHH_spec_example_58_quoted_scalar_indicators() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"single\": \"text\",
+  \"double\": \"text\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 5.8. Quoted Scalar Indicators"
+    );
 }
 
 /// Spec Example 7.6. Double Quoted Lines [1.3]
@@ -904,6 +1683,14 @@ fn test_9TFX_spec_example_76_double_quoted_lines_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\" 1st non-empty\\n2nd non-empty 3rd non-empty \"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.6. Double Quoted Lines [1.3]"
+    );
 }
 
 /// Spec Example 2.12. Compact Nested Mapping
@@ -915,6 +1702,27 @@ fn test_9U5K_spec_example_212_compact_nested_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"item\": \"Super Hoop\",
+    \"quantity\": 1
+  },
+  {
+    \"item\": \"Basketball\",
+    \"quantity\": 4
+  },
+  {
+    \"item\": \"Big Shoes\",
+    \"quantity\": 1
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.12. Compact Nested Mapping"
+    );
 }
 
 /// Spec Example 6.2. Indentation Indicators
@@ -926,17 +1734,45 @@ fn test_A2M4_spec_example_62_indentation_indicators() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": [
+    \"b\",
+    [
+      \"c\",
+      \"d\"
+    ]
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.2. Indentation Indicators"
+    );
 }
 
 /// Spec Example 8.4. Chomping Final Line Break
 /// Tags: spec literal scalar
 #[test]
 fn test_A6F9_spec_example_84_chomping_final_line_break() {
-    let yaml = b"strip: |-\n  text\nclip: |\n  text\nkeep: |+\n  text";
+    let yaml = b"strip: |-\n  text\nclip: |\n  text\nkeep: |+\n  text\n";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"strip\": \"text\",
+  \"clip\": \"text\\n\",
+  \"keep\": \"text\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.4. Chomping Final Line Break"
+    );
 }
 
 /// Multiline Scalar in Mapping
@@ -948,6 +1784,17 @@ fn test_A984_multiline_scalar_in_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \"b c\",
+  \"d\": \"e f\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline Scalar in Mapping"
+    );
 }
 
 /// Sequence entry that looks like two with wrong indentation
@@ -959,6 +1806,16 @@ fn test_AB8U_sequence_entry_that_looks_like_two_with_wrong_indentation() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"single multiline - sequence entry\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Sequence entry that looks like two with wrong indentation"
+    );
 }
 
 /// Sequence With Same Indentation as Parent Mapping
@@ -970,6 +1827,20 @@ fn test_AZ63_sequence_with_same_indentation_as_parent_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"one\": [
+    2,
+    3
+  ],
+  \"four\": 5
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Sequence With Same Indentation as Parent Mapping"
+    );
 }
 
 /// Lookahead test cases
@@ -981,6 +1852,21 @@ fn test_AZW3_lookahead_test_cases() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"bla\\\"keks\": \"foo\"
+  },
+  {
+    \"bla]keks\": \"foo\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Lookahead test cases"
+    );
 }
 
 /// Spec Example 8.9. Folded Scalar [1.3]
@@ -992,6 +1878,14 @@ fn test_B3HG_spec_example_89_folded_scalar_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"folded text\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.9. Folded Scalar [1.3]"
+    );
 }
 
 /// Spec Example 7.18. Flow Mapping Adjacent Values
@@ -1003,6 +1897,18 @@ fn test_C2DT_spec_example_718_flow_mapping_adjacent_values() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"adjacent\": \"value\",
+  \"readable\": \"value\",
+  \"empty\": null
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.18. Flow Mapping Adjacent Values"
+    );
 }
 
 /// Empty implicit key in single pair flow sequences
@@ -1025,6 +1931,27 @@ fn test_CN3R_various_location_of_anchors_in_flow_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"a\": \"b\"
+  },
+  {
+    \"c\": \"d\"
+  },
+  {
+    \"e\": \"f\"
+  },
+  {
+    \"g\": \"h\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Various location of anchors in flow sequence"
+    );
 }
 
 /// Doublequoted scalar starting with a tab
@@ -1036,6 +1963,16 @@ fn test_CPZ3_doublequoted_scalar_starting_with_a_tab() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"tab\": \"\\tstring\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Doublequoted scalar starting with a tab"
+    );
 }
 
 /// Spec Example 7.20. Single Pair Explicit Entry
@@ -1047,6 +1984,18 @@ fn test_CT4Q_spec_example_720_single_pair_explicit_entry() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"foo bar\": \"baz\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.20. Single Pair Explicit Entry"
+    );
 }
 
 /// Block scalar indicator order
@@ -1058,6 +2007,17 @@ fn test_D83L_block_scalar_indicator_order() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"explicit indent and chomp\",
+  \"chomp and explicit indent\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block scalar indicator order"
+    );
 }
 
 /// Flow Sequence in Block Mapping
@@ -1069,6 +2029,19 @@ fn test_D88J_flow_sequence_in_block_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": [
+    \"b\",
+    \"c\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow Sequence in Block Mapping"
+    );
 }
 
 /// Single Pair Block Mapping
@@ -1080,6 +2053,16 @@ fn test_D9TU_single_pair_block_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": \"bar\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Single Pair Block Mapping"
+    );
 }
 
 /// Spec Example 7.10. Plain Characters
@@ -1091,6 +2074,27 @@ fn test_DBG4_spec_example_710_plain_characters() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"::vector\",
+  \": - ()\",
+  \"Up, up, and away!\",
+  -123,
+  \"http://example.com/foo#bar\",
+  [
+    \"::vector\",
+    \": - ()\",
+    \"Up, up and away!\",
+    -123,
+    \"http://example.com/foo#bar\"
+  ]
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.10. Plain Characters"
+    );
 }
 
 /// Various trailing tabs
@@ -1102,6 +2106,20 @@ fn test_DC7X_various_trailing_tabs() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \"b\",
+  \"seq\": [
+    \"a\"
+  ],
+  \"c\": \"d\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Various trailing tabs"
+    );
 }
 
 /// Trailing tabs in double quoted
@@ -1113,6 +2131,14 @@ fn test_DE56_trailing_tabs_in_double_quoted() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"6 trailing tab\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Trailing tabs in double quoted"
+    );
 }
 
 /// Spec Example 7.16. Flow Mapping Entries
@@ -1135,6 +2161,18 @@ fn test_DHP8_flow_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"foo\",
+  \"bar\",
+  42
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow Sequence"
+    );
 }
 
 /// Zero indented block scalar with line that looks like a comment
@@ -1146,6 +2184,14 @@ fn test_DK3J_zero_indented_block_scalar_with_line_that_looks_like_a_comme() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"line1 # no comment line3\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Zero indented block scalar with line that looks like a comment"
+    );
 }
 
 /// Tabs that look like indentation
@@ -1157,6 +2203,16 @@ fn test_DK95_tabs_that_look_like_indentation() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\" : \"bar baz \\t \\t \"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Tabs that look like indentation"
+    );
 }
 
 /// Aliases in Implicit Block Mapping
@@ -1168,6 +2224,17 @@ fn test_E76Z_aliases_in_implicit_block_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \"b\",
+  \"b\": \"a\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Aliases in Implicit Block Mapping"
+    );
 }
 
 /// Multiline Scalar at Top Level [1.3]
@@ -1179,6 +2246,14 @@ fn test_EX5H_multiline_scalar_at_top_level_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"a b c d\\ne\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline Scalar at Top Level [1.3]"
+    );
 }
 
 /// Three dashes and content without space [1.3]
@@ -1190,6 +2265,14 @@ fn test_EXG3_three_dashes_and_content_without_space_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"---word1 word2\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Three dashes and content without space [1.3]"
+    );
 }
 
 /// Nested flow collections on one line
@@ -1201,17 +2284,47 @@ fn test_F3CP_nested_flow_collections_on_one_line() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": [
+    \"b\",
+    \"c\",
+    {
+      \"d\": [
+        \"e\",
+        \"f\"
+      ]
+    }
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Nested flow collections on one line"
+    );
 }
 
 /// More indented lines at the beginning of folded block scalars
 /// Tags: folded indent
 #[test]
 fn test_F6MC_more_indented_lines_at_the_beginning_of_folded_block_scalars() {
-    let yaml = b"---\na: >2\n   more indented\n  regular\nb: >2\n   more indented\n  regular";
+    let yaml = b"---\na: >2\n   more indented\n  regular\nb: >2\n\n\n   more indented\n  regular\n";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \" more indented\\nregular\\n\",
+  \"b\": \"\\n\\n more indented\\nregular\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for More indented lines at the beginning of folded block scalars"
+    );
 }
 
 /// Spec Example 8.5. Chomping Trailing Lines
@@ -1223,6 +2336,18 @@ fn test_F8F9_spec_example_85_chomping_trailing_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"strip\": \"# text\",
+  \"clip\": \"# text\\n\",
+  \"keep\": \"# text\\n\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.5. Chomping Trailing Lines"
+    );
 }
 
 /// Allowed characters in plain scalars
@@ -1234,6 +2359,19 @@ fn test_FBC9_allowed_characters_in_plain_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"safe\": \"a!\\\"#$%&'()*+,-./09:;<=>?@AZ[\\\\]^_`az{|}~ !\\\"#$%&'()*+,-./09:;<=>?@AZ[\\\\]^_`az{|}~\",
+  \"safe question mark\": \"?foo\",
+  \"safe colon\": \":foo\",
+  \"safe dash\": \"-foo\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Allowed characters in plain scalars"
+    );
 }
 
 /// Zero indented block scalar
@@ -1245,6 +2383,14 @@ fn test_FP8R_zero_indented_block_scalar() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"line1 line2 line3\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Zero indented block scalar"
+    );
 }
 
 /// Spec Example 2.1. Sequence of Scalars
@@ -1256,6 +2402,18 @@ fn test_FQ7F_spec_example_21_sequence_of_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"Mark McGwire\",
+  \"Sammy Sosa\",
+  \"Ken Griffey\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.1. Sequence of Scalars"
+    );
 }
 
 /// Spec Example 7.3. Completely Empty Flow Nodes
@@ -1278,6 +2436,20 @@ fn test_FUP4_flow_sequence_in_flow_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"a\",
+  [
+    \"b\",
+    \"c\"
+  ]
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow Sequence in Flow Sequence"
+    );
 }
 
 /// Spec Example 2.17. Quoted Scalars
@@ -1289,6 +2461,21 @@ fn test_G4RS_spec_example_217_quoted_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"unicode\": \"Sosa did fine.☺\",
+  \"control\": \"\\b1998\\t1999\\t2000\\n\",
+  \"hex esc\": \"\\r\\n is \\r\\n\",
+  \"single\": \"\\\"Howdy!\\\" he cried.\",
+  \"quoted\": \" # Not a 'comment'.\",
+  \"tie-fighter\": \"|\\\\-*-/|\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.17. Quoted Scalars"
+    );
 }
 
 /// Mixed Block Mapping (explicit to implicit)
@@ -1300,6 +2487,17 @@ fn test_GH63_mixed_block_mapping_explicit_to_implicit() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": 1.3,
+  \"fifteen\": \"d\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Mixed Block Mapping (explicit to implicit)"
+    );
 }
 
 /// Blank lines
@@ -1311,6 +2509,18 @@ fn test_H2RW_blank_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": 1,
+  \"bar\": 2,
+  \"text\": \"a\\n  \\nb\\n\\nc\\n\\nd\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Blank lines"
+    );
 }
 
 /// Literal unicode
@@ -1322,6 +2532,16 @@ fn test_H3Z8_literal_unicode() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"wanted\": \"love ♥ and peace ☮\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Literal unicode"
+    );
 }
 
 /// Scalars in flow start with syntax char
@@ -1333,6 +2553,16 @@ fn test_HM87_scalars_in_flow_start_with_syntax_char() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"?x\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Scalars in flow start with syntax char"
+    );
 }
 
 /// Spec Example 2.16. Indentation determines scope
@@ -1344,6 +2574,18 @@ fn test_HMK4_spec_example_216_indentation_determines_scope() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"name\": \"Mark McGwire\",
+  \"accomplishment\": \"Mark set a major league home run record in 1998.\\n\",
+  \"stats\": \"65 Home Runs\\n0.278 Batting Average\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.16. Indentation determines scope"
+    );
 }
 
 /// Spec Example 7.12. Plain Lines
@@ -1355,6 +2597,14 @@ fn test_HS5T_spec_example_712_plain_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"1st non-empty\\n2nd non-empty 3rd non-empty\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.12. Plain Lines"
+    );
 }
 
 /// Spec Example 5.12. Tabs and Spaces
@@ -1366,6 +2616,17 @@ fn test_J3BT_spec_example_512_tabs_and_spaces() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"quoted\": \"Quoted \\t\",
+  \"block\": \"void main() {\\n\\tprintf(\\\"Hello, world!\\\\n\\\");\\n}\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 5.12. Tabs and Spaces"
+    );
 }
 
 /// Multiple Pair Block Mapping
@@ -1377,6 +2638,18 @@ fn test_J5UC_multiple_pair_block_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": \"blue\",
+  \"bar\": \"arrr\",
+  \"baz\": \"jazz\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiple Pair Block Mapping"
+    );
 }
 
 /// Empty Lines Between Mapping Elements
@@ -1388,6 +2661,17 @@ fn test_J7VC_empty_lines_between_mapping_elements() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"one\": 2,
+  \"three\": 4
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Empty Lines Between Mapping Elements"
+    );
 }
 
 /// Spec Example 2.9. Single Document with Two Comments
@@ -1399,6 +2683,23 @@ fn test_J9HZ_spec_example_29_single_document_with_two_comments() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"hr\": [
+    \"Mark McGwire\",
+    \"Sammy Sosa\"
+  ],
+  \"rbi\": [
+    \"Sammy Sosa\",
+    \"Ken Griffey\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.9. Single Document with Two Comments"
+    );
 }
 
 /// Trailing whitespace in streams
@@ -1410,6 +2711,16 @@ fn test_JEF9_trailing_whitespace_in_streams() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"\\n\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Trailing whitespace in streams"
+    );
 }
 
 /// Spec Example 8.14. Block Sequence
@@ -1421,6 +2732,21 @@ fn test_JQ4R_spec_example_814_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"block sequence\": [
+    \"one\",
+    {
+      \"two\": \"three\"
+    }
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.14. Block Sequence"
+    );
 }
 
 /// Question marks in scalars
@@ -1432,6 +2758,35 @@ fn test_JR7V_question_marks_in_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"a?string\",
+  \"another ? string\",
+  {
+    \"key\": \"value?\"
+  },
+  [
+    \"a?string\"
+  ],
+  [
+    \"another ? string\"
+  ],
+  {
+    \"key\": \"value?\"
+  },
+  {
+    \"key\": \"value?\"
+  },
+  {
+    \"key?\": \"value\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Question marks in scalars"
+    );
 }
 
 /// Spec Example 6.29. Node Anchors
@@ -1443,6 +2798,17 @@ fn test_JS2J_spec_example_629_node_anchors() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"First occurrence\": \"Value\",
+  \"Second occurrence\": \"Value\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.29. Node Anchors"
+    );
 }
 
 /// Block Mapping with Multiline Scalars
@@ -1454,6 +2820,17 @@ fn test_JTV5_block_mapping_with_multiline_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a true\": \"null d\",
+  \"e 42\": null
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Mapping with Multiline Scalars"
+    );
 }
 
 /// Colon and adjacent value after comment on next line
@@ -1465,6 +2842,16 @@ fn test_K3WX_colon_and_adjacent_value_after_comment_on_next_line() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": \"bar\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Colon and adjacent value after comment on next line"
+    );
 }
 
 /// Multiple Entry Block Sequence
@@ -1476,17 +2863,42 @@ fn test_K4SU_multiple_entry_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"foo\",
+  \"bar\",
+  42
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiple Entry Block Sequence"
+    );
 }
 
 /// Spec Example 8.6. Empty Scalar Chomping
 /// Tags: spec folded literal whitespace
 #[test]
 fn test_K858_spec_example_86_empty_scalar_chomping() {
-    let yaml = b"strip: >-\nclip: >\nkeep: |+";
+    // Official test has empty lines after each block scalar indicator
+    let yaml = b"strip: >-\n\nclip: >\n\nkeep: |+\n";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"strip\": \"\",
+  \"clip\": \"\",
+  \"keep\": \"\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.6. Empty Scalar Chomping"
+    );
 }
 
 /// Inline tabs in double quoted
@@ -1498,6 +2910,14 @@ fn test_KH5V_inline_tabs_in_double_quoted() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"3 inline\\ttab\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Inline tabs in double quoted"
+    );
 }
 
 /// Various combinations of explicit block mappings
@@ -1520,6 +2940,19 @@ fn test_KMK3_block_submapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": {
+    \"bar\": 1
+  },
+  \"baz\": 2
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block Submapping"
+    );
 }
 
 /// Trailing line of spaces
@@ -1531,6 +2964,16 @@ fn test_L24T_trailing_line_of_spaces() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\" : \"x\\n \\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Trailing line of spaces"
+    );
 }
 
 /// Two scalar docs with trailing comments
@@ -1542,6 +2985,15 @@ fn test_L383_two_scalar_docs_with_trailing_comments() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"foo\"
+\"foo\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Two scalar docs with trailing comments"
+    );
 }
 
 /// Spec Example 7.11. Plain Implicit Keys
@@ -1553,6 +3005,20 @@ fn test_L9U5_spec_example_711_plain_implicit_keys() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"implicit block key\": [
+    {
+      \"implicit flow key\": \"value\"
+    }
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.11. Plain Implicit Keys"
+    );
 }
 
 /// Whitespace After Scalars in Flow
@@ -1564,6 +3030,26 @@ fn test_LP6E_whitespace_after_scalars_in_flow() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  [
+    \"a\",
+    \"b\",
+    \"c\"
+  ],
+  {
+    \"a\": \"b\",
+    \"c\": \"d\",
+    \"e\": \"f\"
+  },
+  []
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Whitespace After Scalars in Flow"
+    );
 }
 
 /// Spec Example 7.4. Double Quoted Implicit Keys
@@ -1575,6 +3061,20 @@ fn test_LQZ7_spec_example_74_double_quoted_implicit_keys() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"implicit block key\": [
+    {
+      \"implicit flow key\": \"value\"
+    }
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.4. Double Quoted Implicit Keys"
+    );
 }
 
 /// Literal Block Scalar
@@ -1586,6 +3086,16 @@ fn test_M29M_literal_block_scalar() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \"ab\\n\\ncd\\nef\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Literal Block Scalar"
+    );
 }
 
 /// Question mark edge cases
@@ -1619,6 +3129,22 @@ fn test_M6YH_block_sequence_indentation() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"x\\n\",
+  {
+    \"foo\" : \"bar\"
+  },
+  [
+    42
+  ]
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Block sequence indentation"
+    );
 }
 
 /// Nested flow collections
@@ -1630,6 +3156,25 @@ fn test_M7NX_nested_flow_collections() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": [
+    \"b\",
+    \"c\",
+    {
+      \"d\": [
+        \"e\",
+        \"f\"
+      ]
+    }
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Nested flow collections"
+    );
 }
 
 /// Flow Mapping in Block Sequence
@@ -1641,6 +3186,18 @@ fn test_MXS3_flow_mapping_in_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"a\": \"b\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Flow Mapping in Block Sequence"
+    );
 }
 
 /// Non-Specific Tags on Scalars
@@ -1652,6 +3209,20 @@ fn test_MZX3_nonspecific_tags_on_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"plain\",
+  \"double quoted\",
+  \"single quoted\",
+  \"block\\n\",
+  \"plain again\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Non-Specific Tags on Scalars"
+    );
 }
 
 /// Various empty or newline only quoted strings
@@ -1663,6 +3234,23 @@ fn test_NAT4_various_empty_or_newline_only_quoted_strings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \" \",
+  \"b\": \" \",
+  \"c\": \" \",
+  \"d\": \" \",
+  \"e\": \"\\n\",
+  \"f\": \"\\n\",
+  \"g\": \"\\n\\n\",
+  \"h\": \"\\n\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Various empty or newline only quoted strings"
+    );
 }
 
 /// Multiline plain value with tabs on empty lines
@@ -1674,6 +3262,16 @@ fn test_NB6Z_multiline_plain_value_with_tabs_on_empty_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": \"value with\\ntabs\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline plain value with tabs on empty lines"
+    );
 }
 
 /// Empty Lines at End of Document
@@ -1696,6 +3294,21 @@ fn test_NJ66_multiline_plain_flow_mapping_key() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"single line\": \"value\"
+  },
+  {
+    \"multi line\": \"value\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Multiline plain flow mapping key"
+    );
 }
 
 /// Empty keys in block and flow mapping
@@ -1718,17 +3331,38 @@ fn test_NP9H_spec_example_75_double_quoted_line_breaks() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"folded to a space,\\nto a line feed, or \\t \\tnon-content\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.5. Double Quoted Line Breaks"
+    );
 }
 
 /// Spec Example 8.1. Block Scalar Header
 /// Tags: spec literal folded comment scalar
 #[test]
 fn test_P2AD_spec_example_81_block_scalar_header() {
-    let yaml = b"- | # Empty header\xe2\x86\x93\n literal\n- >1 # Indentation indicator\xe2\x86\x93\n  folded\n- |+ # Chomping indicator\xe2\x86\x93\n keep\n- >1- # Both indicators\xe2\x86\x93\n  strip";
+    let yaml = b"- | # Empty header\xe2\x86\x93\n literal\n- >1 # Indentation indicator\xe2\x86\x93\n  folded\n- |+ # Chomping indicator\xe2\x86\x93\n keep\n\n- >1- # Both indicators\xe2\x86\x93\n  strip";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"literal\\n\",
+  \" folded\\n\",
+  \"keep\\n\\n\",
+  \" strip\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.1. Block Scalar Header"
+    );
 }
 
 /// Spec Example 6.11. Multi-Line Comments
@@ -1740,6 +3374,16 @@ fn test_P94K_spec_example_611_multiline_comments() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": \"value\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.11. Multi-Line Comments"
+    );
 }
 
 /// Spec Example 2.3. Mapping Scalars to Sequences
@@ -1751,6 +3395,25 @@ fn test_PBJ2_spec_example_23_mapping_scalars_to_sequences() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"american\": [
+    \"Boston Red Sox\",
+    \"Detroit Tigers\",
+    \"New York Yankees\"
+  ],
+  \"national\": [
+    \"New York Mets\",
+    \"Chicago Cubs\",
+    \"Atlanta Braves\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.3. Mapping Scalars to Sequences"
+    );
 }
 
 /// Spec Example 7.9. Single Quoted Lines
@@ -1762,6 +3425,14 @@ fn test_PRH3_spec_example_79_single_quoted_lines() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\" 1st non-empty\\n2nd non-empty 3rd non-empty \"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.9. Single Quoted Lines"
+    );
 }
 
 /// Anchors on Empty Scalars
@@ -1803,6 +3474,25 @@ fn test_Q88A_spec_example_723_flow_content() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  [
+    \"a\",
+    \"b\"
+  ],
+  {
+    \"a\": \"b\"
+  },
+  \"a\",
+  \"b\",
+  \"c\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.23. Flow Content"
+    );
 }
 
 /// Spec Example 7.5. Double Quoted Line Breaks [1.3]
@@ -1814,6 +3504,14 @@ fn test_Q8AD_spec_example_75_double_quoted_line_breaks_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"folded to a space,\\nto a line feed, or \\t \\tnon-content\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.5. Double Quoted Line Breaks [1.3]"
+    );
 }
 
 /// Spec Example 7.19. Single Pair Flow Mappings
@@ -1825,18 +3523,42 @@ fn test_QF4Y_spec_example_719_single_pair_flow_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"foo\": \"bar\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.19. Single Pair Flow Mappings"
+    );
 }
 
 /// Spec Example 8.2. Block Indentation Indicator
 /// Tags: spec literal folded scalar whitespace libyaml-err upto-1.2
 #[test]
 fn test_R4YG_spec_example_82_block_indentation_indicator() {
-    let yaml =
-        b"- |\n detected\n- >\n \n  \n  # detected\n- |1\n  explicit\n- >\n \t\t\t\n detected";
+    let yaml = b"- |\n detected\n- >\n \n  \n  # detected\n- |1\n  explicit\n- >\n \t\n detected";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"detected\\n\",
+  \"\\n\\n# detected\\n\",
+  \" explicit\\n\",
+  \"\\t\\ndetected\\n\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.2. Block Indentation Indicator"
+    );
 }
 
 /// Nested flow mapping sequence and mappings
@@ -1848,6 +3570,23 @@ fn test_R52L_nested_flow_mapping_sequence_and_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"top1\": [
+    \"item1\",
+    {
+      \"key2\": \"value2\"
+    },
+    \"item3\"
+  ],
+  \"top2\": \"value2\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Nested flow mapping sequence and mappings"
+    );
 }
 
 /// Sequence Indent
@@ -1859,6 +3598,21 @@ fn test_RLU9_sequence_indent() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"foo\": [
+    42
+  ],
+  \"bar\": [
+    44
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Sequence Indent"
+    );
 }
 
 /// Mixed Block Mapping (implicit to explicit)
@@ -1870,6 +3624,17 @@ fn test_RR7F_mixed_block_mapping_implicit_to_explicit() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"d\": 23,
+  \"a\": 4.2
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Mixed Block Mapping (implicit to explicit)"
+    );
 }
 
 /// Various Trailing Comments [1.3]
@@ -1903,6 +3668,16 @@ fn test_S7BG_colon_followed_by_comma() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \":,\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Colon followed by comma"
+    );
 }
 
 /// Spec Example 5.3. Block Structure Indicators
@@ -1914,6 +3689,23 @@ fn test_S9E8_spec_example_53_block_structure_indicators() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"sequence\": [
+    \"one\",
+    \"two\"
+  ],
+  \"mapping\": {
+    \"sky\": \"blue\",
+    \"sea\": \"green\"
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 5.3. Block Structure Indicators"
+    );
 }
 
 /// Flow Sequence in Flow Mapping
@@ -1936,6 +3728,19 @@ fn test_SKE5_anchor_before_zero_indented_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"seq\": [
+    \"a\",
+    \"b\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Anchor before zero indented sequence"
+    );
 }
 
 /// Single character streams
@@ -1958,6 +3763,14 @@ fn test_SSW6_spec_example_77_single_quoted_characters_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"here's to \\\"quotes\\\"\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.7. Single Quoted Characters [1.3]"
+    );
 }
 
 /// Spec Example 2.2. Mapping Scalars to Scalars
@@ -1969,6 +3782,18 @@ fn test_SYW4_spec_example_22_mapping_scalars_to_scalars() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"hr\": 65,
+  \"avg\": 0.278,
+  \"rbi\": 147
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.2. Mapping Scalars to Scalars"
+    );
 }
 
 /// Spec Example 8.8. Literal Content [1.3]
@@ -1980,6 +3805,14 @@ fn test_T26H_spec_example_88_literal_content_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"\\n\\nliteral\\n \\n\\ntext\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.8. Literal Content [1.3]"
+    );
 }
 
 /// Spec Example 7.9. Single Quoted Lines [1.3]
@@ -1991,17 +3824,33 @@ fn test_T4YY_spec_example_79_single_quoted_lines_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\" 1st non-empty\\n2nd non-empty 3rd non-empty \"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 7.9. Single Quoted Lines [1.3]"
+    );
 }
 
 /// Spec Example 8.7. Literal Scalar [1.3]
 /// Tags: spec literal scalar whitespace 1.3-mod
 #[test]
 fn test_T5N4_spec_example_87_literal_scalar_13() {
-    let yaml = b"--- |\n literal\n \t\t\ttext";
+    let yaml = b"--- |\n literal\n \ttext\n\n";
 
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\"literal\\n\\ttext\\n\"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.7. Literal Scalar [1.3]"
+    );
 }
 
 /// Spec Example 8.16. Block Mappings
@@ -2013,6 +3862,18 @@ fn test_TE2A_spec_example_816_block_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"block mapping\": {
+    \"key\": \"value\"
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.16. Block Mappings"
+    );
 }
 
 /// Spec Example 6.8. Flow Folding
@@ -2024,6 +3885,14 @@ fn test_TL85_spec_example_68_flow_folding() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "\" foo\\nbar\\nbaz \"";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.8. Flow Folding"
+    );
 }
 
 /// Plain URL in flow mapping
@@ -2035,6 +3904,18 @@ fn test_UDM2_plain_url_in_flow_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  {
+    \"url\": \"http://example.org\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Plain URL in flow mapping"
+    );
 }
 
 /// Spec Example 5.4. Flow Collection Indicators
@@ -2046,6 +3927,23 @@ fn test_UDR7_spec_example_54_flow_collection_indicators() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"sequence\": [
+    \"one\",
+    \"two\"
+  ],
+  \"mapping\": {
+    \"sky\": \"blue\",
+    \"sea\": \"green\"
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 5.4. Flow Collection Indicators"
+    );
 }
 
 /// Syntax character edge cases
@@ -2068,6 +3966,18 @@ fn test_UV7Q_legal_tab_after_indentation() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"x\": [
+    \"x x\"
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Legal tab after indentation"
+    );
 }
 
 /// Aliases in Block Sequence
@@ -2079,6 +3989,19 @@ fn test_V55R_aliases_in_block_sequence() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  \"a\",
+  \"b\",
+  \"a\",
+  \"b\"
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Aliases in Block Sequence"
+    );
 }
 
 /// Spec Example 8.19. Compact Block Mappings
@@ -2101,6 +4024,24 @@ fn test_W42U_spec_example_815_block_sequence_entry_types() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  null,
+  \"block node\\n\",
+  [
+    \"one\",
+    \"two\"
+  ],
+  {
+    \"one\": \"two\"
+  }
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 8.15. Block Sequence Entry Types"
+    );
 }
 
 /// Aliases in Flow Objects
@@ -2123,6 +4064,16 @@ fn test_X8DW_explicit_key_and_value_seperated_by_comment() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": \"value\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Explicit key and value seperated by comment"
+    );
 }
 
 /// Spec Example 6.5. Empty Lines [1.3]
@@ -2135,6 +4086,17 @@ fn test_XV9V_spec_example_65_empty_lines_13() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"Folding\": \"Empty line\\nas a line feed\",
+  \"Chomping\": \"Clipped empty lines\\n\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 6.5. Empty Lines [1.3]"
+    );
 }
 
 /// Anchor with colon in the middle
@@ -2146,6 +4108,16 @@ fn test_Y2GN_anchor_with_colon_in_the_middle() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": \"value\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Anchor with colon in the middle"
+    );
 }
 
 /// Spec Example 2.5. Sequence of Sequences
@@ -2158,6 +4130,30 @@ fn test_YD5X_spec_example_25_sequence_of_sequences() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "[
+  [
+    \"name\",
+    \"hr\",
+    \"avg\"
+  ],
+  [
+    \"Mark McGwire\",
+    65,
+    0.278
+  ],
+  [
+    \"Sammy Sosa\",
+    63,
+    0.288
+  ]
+]";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.5. Sequence of Sequences"
+    );
 }
 
 /// Spec Example 2.6. Mapping of Mappings
@@ -2170,6 +4166,23 @@ fn test_ZF4X_spec_example_26_mapping_of_mappings() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"Mark McGwire\": {
+    \"hr\": 65,
+    \"avg\": 0.278
+  },
+  \"Sammy Sosa\": {
+    \"hr\": 63,
+    \"avg\": 0.288
+  }
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Spec Example 2.6. Mapping of Mappings"
+    );
 }
 
 /// Anchors in Mapping
@@ -2181,6 +4194,17 @@ fn test_ZH7C_anchors_in_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": \"b\",
+  \"c\": \"d\"
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Anchors in Mapping"
+    );
 }
 
 /// Nested top level flow mapping
@@ -2192,6 +4216,22 @@ fn test_ZK9H_nested_top_level_flow_mapping() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"key\": [
+    [
+      [
+        \"value\"
+      ]
+    ]
+  ]
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Nested top level flow mapping"
+    );
 }
 
 /// Key with anchor after missing explicit mapping value
@@ -2203,6 +4243,18 @@ fn test_ZWK4_key_with_anchor_after_missing_explicit_mapping_value() {
     // Should parse without error
     let result = YamlIndex::build(yaml);
     assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+
+    let expected_json = "{
+  \"a\": 1,
+  \"b\": null,
+  \"c\": 3
+}";
+    let actual_json = yaml_to_json(yaml).unwrap();
+    assert_eq!(
+        normalize_json(&actual_json),
+        normalize_json(expected_json),
+        "JSON mismatch for Key with anchor after missing explicit mapping value"
+    );
 }
 
 // ============================================================================
