@@ -388,19 +388,6 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// Compute base indent for plain scalar continuation checking.
     /// Returns (base_indent, is_document_root) where is_document_root is true
     /// if this scalar is the document root content (right after --- or at start).
-    #[allow(dead_code)]
-    fn compute_base_indent_for_plain(&self, value_pos: usize) -> usize {
-        let (indent, _is_root) = self.compute_base_indent_and_root_flag(value_pos);
-        indent
-    }
-
-    /// Check if value is at document root level (right after --- or at document start).
-    #[allow(dead_code)]
-    fn is_document_root_scalar(&self, value_pos: usize) -> bool {
-        let (_indent, is_root) = self.compute_base_indent_and_root_flag(value_pos);
-        is_root
-    }
-
     fn compute_base_indent_and_root_flag(&self, value_pos: usize) -> (usize, bool) {
         // Find start of current line
         let mut line_start = value_pos;
@@ -2116,7 +2103,9 @@ impl<'a> YamlString<'a> {
                 // Check if there's a `:` between `-` and the indicator
                 // If so, it's `- key: |` and we should return line_indent + 2
                 // If not, it's `- |` and we should return line_indent
-                let has_colon = text[(pos + 2)..indicator_pos].contains(&b':');
+                let has_colon = text
+                    .get((pos + 2)..indicator_pos)
+                    .is_some_and(|slice| slice.contains(&b':'));
                 if has_colon {
                     return line_indent + 2;
                 } else {
@@ -2902,6 +2891,240 @@ impl core::fmt::Display for YamlNumberError {
             YamlNumberError::InvalidUtf8 => write!(f, "invalid UTF-8 in number"),
             YamlNumberError::InvalidNumber => write!(f, "invalid number format"),
         }
+    }
+}
+
+// ============================================================================
+// Document trait implementations
+// ============================================================================
+
+use crate::jq::document::{
+    DocumentCursor, DocumentElements, DocumentField, DocumentFields, DocumentValue,
+};
+
+impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
+    type Value = YamlValue<'a, W>;
+
+    #[inline]
+    fn value(&self) -> Self::Value {
+        YamlCursor::value(self)
+    }
+
+    #[inline]
+    fn first_child(&self) -> Option<Self> {
+        YamlCursor::first_child(self)
+    }
+
+    #[inline]
+    fn next_sibling(&self) -> Option<Self> {
+        YamlCursor::next_sibling(self)
+    }
+
+    #[inline]
+    fn parent(&self) -> Option<Self> {
+        YamlCursor::parent(self)
+    }
+
+    #[inline]
+    fn is_container(&self) -> bool {
+        YamlCursor::is_container(self)
+    }
+
+    #[inline]
+    fn text_position(&self) -> Option<usize> {
+        YamlCursor::text_position(self)
+    }
+}
+
+impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
+    type Cursor = YamlCursor<'a, W>;
+    type Fields = YamlFields<'a, W>;
+    type Elements = YamlElements<'a, W>;
+
+    fn is_null(&self) -> bool {
+        match self {
+            YamlValue::Null => true,
+            YamlValue::String(s) if s.is_unquoted() => {
+                // YAML null values: null, ~, empty string
+                if let Ok(str_val) = s.as_str() {
+                    matches!(str_val.as_ref(), "null" | "~" | "")
+                } else {
+                    false
+                }
+            }
+            YamlValue::Alias { target, .. } => {
+                // Resolve alias and check target
+                target.map(|t| t.value().is_null()).unwrap_or(true) // Unresolved alias treated as null
+            }
+            _ => false,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            YamlValue::String(s) if s.is_unquoted() => {
+                let str_val = s.as_str().ok()?;
+                match str_val.as_ref() {
+                    "true" | "True" | "TRUE" => Some(true),
+                    "false" | "False" | "FALSE" => Some(false),
+                    _ => None,
+                }
+            }
+            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_bool()),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            YamlValue::String(s) if s.is_unquoted() => {
+                let str_val = s.as_str().ok()?;
+                str_val.parse().ok()
+            }
+            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_i64()),
+            _ => None,
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            YamlValue::String(s) if s.is_unquoted() => {
+                let str_val = s.as_str().ok()?;
+                // Handle special YAML float values
+                match str_val.as_ref() {
+                    ".inf" | ".Inf" | ".INF" => Some(f64::INFINITY),
+                    "-.inf" | "-.Inf" | "-.INF" => Some(f64::NEG_INFINITY),
+                    ".nan" | ".NaN" | ".NAN" => Some(f64::NAN),
+                    _ => str_val.parse().ok(),
+                }
+            }
+            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_f64()),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<Cow<'_, str>> {
+        match self {
+            YamlValue::String(s) => s.as_str().ok(),
+            YamlValue::Alias { target, .. } => {
+                // For aliases, we need to return an owned string since the
+                // target value is created temporarily
+                target.and_then(|t| {
+                    if let YamlValue::String(s) = t.value() {
+                        s.as_str().ok().map(|cow| Cow::Owned(cow.into_owned()))
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn as_object(&self) -> Option<Self::Fields> {
+        match self {
+            YamlValue::Mapping(fields) => Some(*fields),
+            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_object()),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<Self::Elements> {
+        match self {
+            YamlValue::Sequence(elements) => Some(*elements),
+            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_array()),
+            _ => None,
+        }
+    }
+
+    fn type_name(&self) -> &'static str {
+        match self {
+            YamlValue::Null => "null",
+            YamlValue::String(s) => {
+                // Determine effective type based on content
+                if s.is_unquoted() {
+                    if let Ok(str_val) = s.as_str() {
+                        match str_val.as_ref() {
+                            "null" | "~" | "" => return "null",
+                            "true" | "True" | "TRUE" | "false" | "False" | "FALSE" => {
+                                return "boolean"
+                            }
+                            _ => {
+                                // Check if it's a number
+                                if str_val.parse::<i64>().is_ok() || str_val.parse::<f64>().is_ok()
+                                {
+                                    return "number";
+                                }
+                            }
+                        }
+                    }
+                }
+                "string"
+            }
+            YamlValue::Mapping(_) => "object",
+            YamlValue::Sequence(_) => "array",
+            YamlValue::Alias { target, .. } => {
+                target.map(|t| t.value().type_name()).unwrap_or("null")
+            }
+            YamlValue::Error(_) => "error",
+        }
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, YamlValue::Error(_))
+    }
+
+    fn error_message(&self) -> Option<&'static str> {
+        match self {
+            YamlValue::Error(msg) => Some(msg),
+            _ => None,
+        }
+    }
+}
+
+impl<'a, W: AsRef<[u64]> + Clone> DocumentFields for YamlFields<'a, W> {
+    type Value = YamlValue<'a, W>;
+    type Cursor = YamlCursor<'a, W>;
+
+    fn uncons(&self) -> Option<(DocumentField<Self::Value, Self::Cursor>, Self)> {
+        let (field, rest) = YamlFields::uncons(self)?;
+        Some((
+            DocumentField {
+                key: field.key(),
+                value: field.value(),
+                value_cursor: field.value_cursor(),
+            },
+            rest,
+        ))
+    }
+
+    fn find(&self, name: &str) -> Option<Self::Value> {
+        YamlFields::find(self, name)
+    }
+
+    fn is_empty(&self) -> bool {
+        YamlFields::is_empty(self)
+    }
+}
+
+impl<'a, W: AsRef<[u64]> + Clone> DocumentElements for YamlElements<'a, W> {
+    type Value = YamlValue<'a, W>;
+    type Cursor = YamlCursor<'a, W>;
+
+    fn uncons(&self) -> Option<(Self::Value, Self)> {
+        YamlElements::uncons(self)
+    }
+
+    fn uncons_cursor(&self) -> Option<(Self::Cursor, Self)> {
+        YamlElements::uncons_cursor(self)
+    }
+
+    fn get(&self, index: usize) -> Option<Self::Value> {
+        YamlElements::get(self, index)
+    }
+
+    fn is_empty(&self) -> bool {
+        YamlElements::is_empty(self)
     }
 }
 
@@ -3801,239 +4024,5 @@ mod tests {
         let yaml = b"-\n - inner1\n - inner2";
         let result = YamlIndex::build(yaml);
         assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
-    }
-}
-
-// ============================================================================
-// Document trait implementations
-// ============================================================================
-
-use crate::jq::document::{
-    DocumentCursor, DocumentElements, DocumentField, DocumentFields, DocumentValue,
-};
-
-impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
-    type Value = YamlValue<'a, W>;
-
-    #[inline]
-    fn value(&self) -> Self::Value {
-        YamlCursor::value(self)
-    }
-
-    #[inline]
-    fn first_child(&self) -> Option<Self> {
-        YamlCursor::first_child(self)
-    }
-
-    #[inline]
-    fn next_sibling(&self) -> Option<Self> {
-        YamlCursor::next_sibling(self)
-    }
-
-    #[inline]
-    fn parent(&self) -> Option<Self> {
-        YamlCursor::parent(self)
-    }
-
-    #[inline]
-    fn is_container(&self) -> bool {
-        YamlCursor::is_container(self)
-    }
-
-    #[inline]
-    fn text_position(&self) -> Option<usize> {
-        YamlCursor::text_position(self)
-    }
-}
-
-impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
-    type Cursor = YamlCursor<'a, W>;
-    type Fields = YamlFields<'a, W>;
-    type Elements = YamlElements<'a, W>;
-
-    fn is_null(&self) -> bool {
-        match self {
-            YamlValue::Null => true,
-            YamlValue::String(s) if s.is_unquoted() => {
-                // YAML null values: null, ~, empty string
-                if let Ok(str_val) = s.as_str() {
-                    matches!(str_val.as_ref(), "null" | "~" | "")
-                } else {
-                    false
-                }
-            }
-            YamlValue::Alias { target, .. } => {
-                // Resolve alias and check target
-                target.map(|t| t.value().is_null()).unwrap_or(true) // Unresolved alias treated as null
-            }
-            _ => false,
-        }
-    }
-
-    fn as_bool(&self) -> Option<bool> {
-        match self {
-            YamlValue::String(s) if s.is_unquoted() => {
-                let str_val = s.as_str().ok()?;
-                match str_val.as_ref() {
-                    "true" | "True" | "TRUE" => Some(true),
-                    "false" | "False" | "FALSE" => Some(false),
-                    _ => None,
-                }
-            }
-            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_bool()),
-            _ => None,
-        }
-    }
-
-    fn as_i64(&self) -> Option<i64> {
-        match self {
-            YamlValue::String(s) if s.is_unquoted() => {
-                let str_val = s.as_str().ok()?;
-                str_val.parse().ok()
-            }
-            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_i64()),
-            _ => None,
-        }
-    }
-
-    fn as_f64(&self) -> Option<f64> {
-        match self {
-            YamlValue::String(s) if s.is_unquoted() => {
-                let str_val = s.as_str().ok()?;
-                // Handle special YAML float values
-                match str_val.as_ref() {
-                    ".inf" | ".Inf" | ".INF" => Some(f64::INFINITY),
-                    "-.inf" | "-.Inf" | "-.INF" => Some(f64::NEG_INFINITY),
-                    ".nan" | ".NaN" | ".NAN" => Some(f64::NAN),
-                    _ => str_val.parse().ok(),
-                }
-            }
-            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_f64()),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> Option<Cow<'_, str>> {
-        match self {
-            YamlValue::String(s) => s.as_str().ok(),
-            YamlValue::Alias { target, .. } => {
-                // For aliases, we need to return an owned string since the
-                // target value is created temporarily
-                target.and_then(|t| {
-                    if let YamlValue::String(s) = t.value() {
-                        s.as_str().ok().map(|cow| Cow::Owned(cow.into_owned()))
-                    } else {
-                        None
-                    }
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn as_object(&self) -> Option<Self::Fields> {
-        match self {
-            YamlValue::Mapping(fields) => Some(*fields),
-            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_object()),
-            _ => None,
-        }
-    }
-
-    fn as_array(&self) -> Option<Self::Elements> {
-        match self {
-            YamlValue::Sequence(elements) => Some(*elements),
-            YamlValue::Alias { target, .. } => target.and_then(|t| t.value().as_array()),
-            _ => None,
-        }
-    }
-
-    fn type_name(&self) -> &'static str {
-        match self {
-            YamlValue::Null => "null",
-            YamlValue::String(s) => {
-                // Determine effective type based on content
-                if s.is_unquoted() {
-                    if let Ok(str_val) = s.as_str() {
-                        match str_val.as_ref() {
-                            "null" | "~" | "" => return "null",
-                            "true" | "True" | "TRUE" | "false" | "False" | "FALSE" => {
-                                return "boolean"
-                            }
-                            _ => {
-                                // Check if it's a number
-                                if str_val.parse::<i64>().is_ok() || str_val.parse::<f64>().is_ok()
-                                {
-                                    return "number";
-                                }
-                            }
-                        }
-                    }
-                }
-                "string"
-            }
-            YamlValue::Mapping(_) => "object",
-            YamlValue::Sequence(_) => "array",
-            YamlValue::Alias { target, .. } => {
-                target.map(|t| t.value().type_name()).unwrap_or("null")
-            }
-            YamlValue::Error(_) => "error",
-        }
-    }
-
-    fn is_error(&self) -> bool {
-        matches!(self, YamlValue::Error(_))
-    }
-
-    fn error_message(&self) -> Option<&'static str> {
-        match self {
-            YamlValue::Error(msg) => Some(msg),
-            _ => None,
-        }
-    }
-}
-
-impl<'a, W: AsRef<[u64]> + Clone> DocumentFields for YamlFields<'a, W> {
-    type Value = YamlValue<'a, W>;
-    type Cursor = YamlCursor<'a, W>;
-
-    fn uncons(&self) -> Option<(DocumentField<Self::Value, Self::Cursor>, Self)> {
-        let (field, rest) = YamlFields::uncons(self)?;
-        Some((
-            DocumentField {
-                key: field.key(),
-                value: field.value(),
-                value_cursor: field.value_cursor(),
-            },
-            rest,
-        ))
-    }
-
-    fn find(&self, name: &str) -> Option<Self::Value> {
-        YamlFields::find(self, name)
-    }
-
-    fn is_empty(&self) -> bool {
-        YamlFields::is_empty(self)
-    }
-}
-
-impl<'a, W: AsRef<[u64]> + Clone> DocumentElements for YamlElements<'a, W> {
-    type Value = YamlValue<'a, W>;
-    type Cursor = YamlCursor<'a, W>;
-
-    fn uncons(&self) -> Option<(Self::Value, Self)> {
-        YamlElements::uncons(self)
-    }
-
-    fn uncons_cursor(&self) -> Option<(Self::Cursor, Self)> {
-        YamlElements::uncons_cursor(self)
-    }
-
-    fn get(&self, index: usize) -> Option<Self::Value> {
-        YamlElements::get(self, index)
-    }
-
-    fn is_empty(&self) -> bool {
-        YamlElements::is_empty(self)
     }
 }

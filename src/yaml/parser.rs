@@ -249,20 +249,6 @@ impl<'a> Parser<'a> {
         self.seq_item_words[word_idx] |= 1u64 << bit_idx;
     }
 
-    /// Mark current BP position as a container (has TY entry).
-    /// Call this BEFORE write_bp_open for containers.
-    #[inline]
-    #[allow(dead_code)]
-    fn mark_container(&mut self) {
-        let bp_pos = self.bp_pos;
-        let word_idx = bp_pos / 64;
-        let bit_idx = bp_pos % 64;
-        while word_idx >= self.container_words.len() {
-            self.container_words.push(0);
-        }
-        self.container_words[word_idx] |= 1u64 << bit_idx;
-    }
-
     /// Close a pending explicit key by adding a null value node.
     /// Call this when a new key or end of mapping is encountered without an explicit value.
     fn close_pending_explicit_key(&mut self) {

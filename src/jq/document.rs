@@ -90,6 +90,7 @@ pub trait DocumentFields: Sized + Copy + Clone {
     type Cursor: DocumentCursor;
 
     /// Get the first field and remaining fields.
+    #[allow(clippy::type_complexity)]
     fn uncons(&self) -> Option<(DocumentField<Self::Value, Self::Cursor>, Self)>;
 
     /// Find a field by name.

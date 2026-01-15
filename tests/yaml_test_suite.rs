@@ -4,6 +4,8 @@
 //! These tests verify our YAML parser against the comprehensive
 //! language-independent YAML test suite.
 
+// Test function names include test case IDs (e.g., 229Q, 26DV) which are
+// intentionally non-snake_case.
 #![allow(non_snake_case)]
 
 use succinctly::yaml::{YamlIndex, YamlValue};
