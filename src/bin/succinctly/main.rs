@@ -599,10 +599,25 @@ struct JqCommand {
     build_configuration: bool,
 }
 
-/// Command-line YAML processor (jq-compatible syntax)
+/// Output format for yq command
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// YAML output (default)
+    #[default]
+    #[value(name = "yaml", alias = "y")]
+    Yaml,
+    /// JSON output
+    #[value(name = "json", alias = "j")]
+    Json,
+    /// Auto-detect based on input
+    #[value(name = "auto", alias = "a")]
+    Auto,
+}
+
+/// Command-line YAML processor (yq-compatible)
 #[derive(Debug, Parser)]
 #[command(name = "yq")]
-#[command(about = "Command-line YAML processor", long_about = None)]
+#[command(about = "Command-line YAML processor (yq-compatible)", long_about = None)]
 pub struct YqCommand {
     /// jq filter expression (e.g., ".", ".foo", ".[]")
     /// If not provided, uses "." (identity)
@@ -618,16 +633,21 @@ pub struct YqCommand {
     pub null_input: bool,
 
     /// Read all inputs into an array and use it as the single input value
-    #[arg(short = 's', long)]
+    /// Note: yq uses -s for --split-exp; use --slurp for jq-style slurping
+    #[arg(long)]
     pub slurp: bool,
 
     // === Output Options ===
-    /// Compact output (no pretty printing)
+    /// Output format type [yaml, json, auto] (default: yaml)
+    #[arg(short = 'o', long, value_name = "FORMAT", default_value = "yaml")]
+    pub output_format: OutputFormat,
+
+    /// Compact JSON output (no pretty printing, only with -o json)
     #[arg(short = 'c', long)]
     pub compact_output: bool,
 
-    /// Output raw strings without quotes
-    #[arg(short = 'r', long)]
+    /// Unwrap scalar values, print without quotes (default for YAML)
+    #[arg(short = 'r', long = "unwrapScalar")]
     pub raw_output: bool,
 
     /// Like -r but don't print newline after each output
@@ -638,29 +658,37 @@ pub struct YqCommand {
     #[arg(short = 'a', long)]
     pub ascii_output: bool,
 
-    /// Colorize output (default if stdout is a terminal)
-    #[arg(short = 'C', long)]
+    /// Force colorized output
+    #[arg(short = 'C', long = "colors")]
     pub color_output: bool,
 
     /// Disable colorized output
-    #[arg(short = 'M', long)]
+    #[arg(short = 'M', long = "no-colors")]
     pub monochrome_output: bool,
 
-    /// Sort keys of each object on output
+    /// Sort keys of each object on output (JSON only)
     #[arg(short = 'S', long)]
     pub sort_keys: bool,
+
+    /// Don't print document separators (---)
+    #[arg(short = 'N', long = "no-doc")]
+    pub no_doc: bool,
+
+    /// Pretty print, expand flow styles to block style
+    #[arg(short = 'P', long = "prettyPrint")]
+    pub pretty_print: bool,
 
     /// Use tabs for indentation
     #[arg(long)]
     pub tab: bool,
 
-    /// Use n spaces for indentation (max 7)
-    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=7))]
-    pub indent: Option<u8>,
+    /// Sets indent level for output (default 2)
+    #[arg(short = 'I', long, value_name = "N", default_value = "2", value_parser = clap::value_parser!(u8).range(0..=7))]
+    pub indent: u8,
 
     // === Program Input ===
     /// Read filter from file instead of command line
-    #[arg(short = 'f', long, value_name = "FILE")]
+    #[arg(long = "from-file", value_name = "FILE")]
     pub from_file: Option<PathBuf>,
 
     // === Variables ===

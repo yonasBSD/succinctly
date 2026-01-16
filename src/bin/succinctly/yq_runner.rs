@@ -13,7 +13,7 @@ use succinctly::json::light::StandardJson;
 use succinctly::json::JsonIndex;
 use succinctly::yaml::{YamlIndex, YamlValue};
 
-use super::YqCommand;
+use super::{OutputFormat, YqCommand};
 
 /// Exit codes matching jq/yq behavior
 pub mod exit_codes {
@@ -65,12 +65,14 @@ pub struct EvalContext {
 
 /// Output configuration
 struct OutputConfig {
+    output_format: OutputFormat,
     compact: bool,
     raw_output: bool,
     join_output: bool,
     ascii_output: bool,
     sort_keys: bool,
-    indent: String,
+    no_doc: bool,
+    indent_str: String,
     use_color: bool,
 }
 
@@ -85,21 +87,23 @@ impl OutputConfig {
             atty::is(atty::Stream::Stdout)
         };
 
-        let indent = if args.compact_output {
+        let indent_str = if args.compact_output {
             String::new()
         } else if args.tab {
             "\t".to_string()
         } else {
-            " ".repeat(args.indent.unwrap_or(2) as usize)
+            " ".repeat(args.indent as usize)
         };
 
         OutputConfig {
+            output_format: args.output_format,
             compact: args.compact_output,
             raw_output: args.raw_output || args.join_output,
             join_output: args.join_output,
             ascii_output: args.ascii_output,
             sort_keys: args.sort_keys,
-            indent,
+            no_doc: args.no_doc,
+            indent_str,
             use_color,
         }
     }
@@ -292,6 +296,7 @@ fn standard_json_to_owned<W: Clone + AsRef<[u64]>>(value: &StandardJson<'_, W>) 
 
 /// Format and output a value.
 fn output_value<W: Write>(writer: &mut W, value: &OwnedValue, config: &OutputConfig) -> Result<()> {
+    // Handle raw output for scalars
     if config.raw_output {
         if let OwnedValue::String(s) = value {
             write!(writer, "{}", s)?;
@@ -302,11 +307,27 @@ fn output_value<W: Write>(writer: &mut W, value: &OwnedValue, config: &OutputCon
         }
     }
 
+    // For YAML output format (default)
+    if config.output_format == OutputFormat::Yaml {
+        // For YAML, scalars are printed without quotes by default (like -r in yq)
+        let output = emit_yaml_value(value, config, 0, false);
+        if config.use_color {
+            write!(writer, "{}", colorize_yaml(&output))?;
+        } else {
+            write!(writer, "{}", output)?;
+        }
+        if !config.join_output {
+            writeln!(writer)?;
+        }
+        return Ok(());
+    }
+
+    // JSON output format
     let json_str = if config.compact {
         value.to_json()
     } else {
         // Custom pretty-printing with configurable indent
-        pretty_print_value(value, config, 0)
+        pretty_print_json_value(value, config, 0)
     };
 
     if config.use_color {
@@ -322,8 +343,291 @@ fn output_value<W: Write>(writer: &mut W, value: &OwnedValue, config: &OutputCon
     Ok(())
 }
 
-/// Pretty print a value with configurable indentation.
-fn pretty_print_value(value: &OwnedValue, config: &OutputConfig, depth: usize) -> String {
+/// Emit a YAML value as a string.
+fn emit_yaml_value(
+    value: &OwnedValue,
+    config: &OutputConfig,
+    depth: usize,
+    in_flow: bool,
+) -> String {
+    match value {
+        OwnedValue::Null => "null".to_string(),
+        OwnedValue::Bool(b) => b.to_string(),
+        OwnedValue::Int(n) => n.to_string(),
+        OwnedValue::Float(f) => {
+            if f.is_nan() {
+                ".nan".to_string()
+            } else if f.is_infinite() {
+                if *f > 0.0 {
+                    ".inf".to_string()
+                } else {
+                    "-.inf".to_string()
+                }
+            } else if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                format!("{:.1}", f)
+            } else {
+                f.to_string()
+            }
+        }
+        OwnedValue::String(s) => yaml_quote_string(s),
+        OwnedValue::Array(arr) => {
+            if arr.is_empty() {
+                "[]".to_string()
+            } else if in_flow {
+                // Flow style for nested in flow context
+                let items: Vec<_> = arr
+                    .iter()
+                    .map(|v| emit_yaml_value(v, config, depth, true))
+                    .collect();
+                format!("[{}]", items.join(", "))
+            } else {
+                // Block style sequence
+                let indent = config.indent_str.repeat(depth);
+                let items: Vec<_> = arr
+                    .iter()
+                    .map(|v| {
+                        let item = emit_yaml_value(v, config, depth + 1, false);
+                        // Check if it's a multi-line value (mapping or sequence)
+                        if matches!(v, OwnedValue::Object(_) | OwnedValue::Array(_))
+                            && !item.starts_with('[')
+                            && !item.starts_with('{')
+                        {
+                            // Multi-line value - emit nested content which handles its own indentation
+                            format!("{}-\n{}", indent, item)
+                        } else {
+                            format!("{}- {}", indent, item)
+                        }
+                    })
+                    .collect();
+                items.join("\n")
+            }
+        }
+        OwnedValue::Object(obj) => {
+            if obj.is_empty() {
+                "{}".to_string()
+            } else if in_flow {
+                // Flow style for nested in flow context
+                let entries: Vec<_> = obj
+                    .iter()
+                    .map(|(k, v)| {
+                        let key = yaml_quote_key(k);
+                        let val = emit_yaml_value(v, config, depth, true);
+                        format!("{}: {}", key, val)
+                    })
+                    .collect();
+                format!("{{{}}}", entries.join(", "))
+            } else {
+                // Block style mapping
+                let indent = config.indent_str.repeat(depth);
+                let entries: Vec<_> = if config.sort_keys {
+                    let mut sorted: Vec<_> = obj.iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(b.0));
+                    sorted
+                } else {
+                    obj.iter().collect()
+                };
+
+                let items: Vec<_> = entries
+                    .iter()
+                    .map(|(k, v)| {
+                        let key = yaml_quote_key(k);
+                        // Check if value needs to be on next line
+                        if matches!(v, OwnedValue::Object(m) if !m.is_empty())
+                            || matches!(v, OwnedValue::Array(a) if !a.is_empty())
+                        {
+                            // For nested containers, emit at depth+1 which handles its own indentation
+                            let val = emit_yaml_value(v, config, depth + 1, false);
+                            format!("{}{}:\n{}", indent, key, val)
+                        } else {
+                            let val = emit_yaml_value(v, config, depth + 1, false);
+                            format!("{}{}: {}", indent, key, val)
+                        }
+                    })
+                    .collect();
+                items.join("\n")
+            }
+        }
+    }
+}
+
+/// Quote a YAML string if needed.
+fn yaml_quote_string(s: &str) -> String {
+    // Check if string needs quoting
+    if s.is_empty() {
+        return "''".to_string();
+    }
+
+    // Check for special YAML values that need quoting
+    let lower = s.to_lowercase();
+    let needs_quoting = lower == "null"
+        || lower == "true"
+        || lower == "false"
+        || lower == "~"
+        || lower == ".nan"
+        || lower == ".inf"
+        || lower == "-.inf"
+        || s.parse::<f64>().is_ok()
+        || s.starts_with('*')
+        || s.starts_with('&')
+        || s.starts_with('!')
+        || s.starts_with('%')
+        || s.starts_with('@')
+        || s.starts_with('`')
+        || s.starts_with('|')
+        || s.starts_with('>')
+        || s.starts_with('[')
+        || s.starts_with('{')
+        || s.starts_with('"')
+        || s.starts_with('\'')
+        || s.starts_with('#')
+        || s.starts_with('-') && (s.len() == 1 || s.chars().nth(1) == Some(' '))
+        || s.starts_with('?') && (s.len() == 1 || s.chars().nth(1) == Some(' '))
+        || s.starts_with(':') && (s.len() == 1 || s.chars().nth(1) == Some(' '))
+        || s.contains(": ")
+        || s.contains(" #")
+        || s.contains('\n')
+        || s.contains('\r')
+        || s.contains('\t')
+        || s.ends_with(':')
+        || s.ends_with(' ');
+
+    if needs_quoting {
+        // Use double quotes with escaping
+        let mut result = String::with_capacity(s.len() + 2);
+        result.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if c.is_ascii_control() => {
+                    result.push_str(&format!("\\x{:02x}", c as u32));
+                }
+                _ => result.push(c),
+            }
+        }
+        result.push('"');
+        result
+    } else {
+        s.to_string()
+    }
+}
+
+/// Quote a YAML key if needed.
+fn yaml_quote_key(s: &str) -> String {
+    // Keys have similar rules but are a bit more permissive
+    if s.is_empty() {
+        return "''".to_string();
+    }
+
+    let needs_quoting = s.contains(':')
+        || s.contains('#')
+        || s.contains('\n')
+        || s.contains('\r')
+        || s.starts_with('-')
+        || s.starts_with('?')
+        || s.starts_with('[')
+        || s.starts_with('{')
+        || s.starts_with('"')
+        || s.starts_with('\'')
+        || s.starts_with('*')
+        || s.starts_with('&')
+        || s.starts_with('!')
+        || s.ends_with(' ');
+
+    if needs_quoting {
+        let mut result = String::with_capacity(s.len() + 2);
+        result.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                _ => result.push(c),
+            }
+        }
+        result.push('"');
+        result
+    } else {
+        s.to_string()
+    }
+}
+
+/// Colorize YAML output (basic ANSI colors).
+fn colorize_yaml(yaml: &str) -> String {
+    let mut result = String::with_capacity(yaml.len() * 2);
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut at_key_start = true;
+    let mut in_key = false;
+
+    for c in yaml.chars() {
+        if escape_next {
+            result.push(c);
+            escape_next = false;
+            continue;
+        }
+
+        if c == '\\' && (in_string || in_key) {
+            result.push(c);
+            escape_next = true;
+            continue;
+        }
+
+        match c {
+            '"' | '\'' => {
+                if in_string {
+                    result.push(c);
+                    result.push_str("\x1b[0m");
+                    in_string = false;
+                } else {
+                    result.push_str("\x1b[32m"); // Green for strings
+                    result.push(c);
+                    in_string = true;
+                }
+                at_key_start = false;
+            }
+            ':' if !in_string => {
+                result.push_str("\x1b[0m");
+                result.push(c);
+                in_key = false;
+                at_key_start = false;
+            }
+            '\n' => {
+                result.push(c);
+                at_key_start = true;
+                in_key = false;
+            }
+            '-' if at_key_start => {
+                result.push_str("\x1b[33m"); // Yellow for list markers
+                result.push(c);
+                result.push_str("\x1b[0m");
+                at_key_start = false;
+            }
+            _ if at_key_start && !c.is_whitespace() && !in_string => {
+                result.push_str("\x1b[36m"); // Cyan for keys
+                result.push(c);
+                in_key = true;
+                at_key_start = false;
+            }
+            _ => {
+                result.push(c);
+                if !c.is_whitespace() {
+                    at_key_start = false;
+                }
+            }
+        }
+    }
+    result.push_str("\x1b[0m");
+    result
+}
+
+/// Pretty print a JSON value with configurable indentation.
+fn pretty_print_json_value(value: &OwnedValue, config: &OutputConfig, depth: usize) -> String {
     match value {
         OwnedValue::Null => "null".to_string(),
         OwnedValue::Bool(b) => b.to_string(),
@@ -347,18 +651,24 @@ fn pretty_print_value(value: &OwnedValue, config: &OutputConfig, depth: usize) -
         OwnedValue::Array(arr) => {
             if arr.is_empty() {
                 "[]".to_string()
-            } else if config.compact || config.indent.is_empty() {
+            } else if config.compact || config.indent_str.is_empty() {
                 let items: Vec<_> = arr
                     .iter()
-                    .map(|v| pretty_print_value(v, config, depth + 1))
+                    .map(|v| pretty_print_json_value(v, config, depth + 1))
                     .collect();
                 format!("[{}]", items.join(","))
             } else {
-                let indent = config.indent.repeat(depth + 1);
-                let close_indent = config.indent.repeat(depth);
+                let indent = config.indent_str.repeat(depth + 1);
+                let close_indent = config.indent_str.repeat(depth);
                 let items: Vec<_> = arr
                     .iter()
-                    .map(|v| format!("{}{}", indent, pretty_print_value(v, config, depth + 1)))
+                    .map(|v| {
+                        format!(
+                            "{}{}",
+                            indent,
+                            pretty_print_json_value(v, config, depth + 1)
+                        )
+                    })
                     .collect();
                 format!("[\n{}\n{}]", items.join(",\n"), close_indent)
             }
@@ -375,18 +685,18 @@ fn pretty_print_value(value: &OwnedValue, config: &OutputConfig, depth: usize) -
                     obj.iter().collect()
                 };
 
-                if config.compact || config.indent.is_empty() {
+                if config.compact || config.indent_str.is_empty() {
                     let items: Vec<_> = entries
                         .iter()
                         .map(|(k, v)| {
                             let key = escape_json_string(k);
-                            format!("{}:{}", key, pretty_print_value(v, config, depth + 1))
+                            format!("{}:{}", key, pretty_print_json_value(v, config, depth + 1))
                         })
                         .collect();
                     format!("{{{}}}", items.join(","))
                 } else {
-                    let indent = config.indent.repeat(depth + 1);
-                    let close_indent = config.indent.repeat(depth);
+                    let indent = config.indent_str.repeat(depth + 1);
+                    let close_indent = config.indent_str.repeat(depth);
                     let items: Vec<_> = entries
                         .iter()
                         .map(|(k, v)| {
@@ -395,7 +705,7 @@ fn pretty_print_value(value: &OwnedValue, config: &OutputConfig, depth: usize) -
                                 "{}{}: {}",
                                 indent,
                                 key,
-                                pretty_print_value(v, config, depth + 1)
+                                pretty_print_json_value(v, config, depth + 1)
                             )
                         })
                         .collect();
@@ -592,11 +902,12 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
     let mut last_output: Option<OwnedValue> = None;
     let mut had_output = false;
 
-    // Fast path: identity filter with compact output - stream directly from YAML cursor
+    // Fast path: identity filter with JSON compact output - stream directly from YAML cursor
     // This avoids building OwnedValue DOM and JSON round-trip
     let is_identity = matches!(program.expr, Expr::Identity);
     let can_fast_path = is_identity
         && output_config.compact
+        && output_config.output_format == OutputFormat::Json
         && !args.null_input
         && !args.slurp
         && context.named.is_empty();
@@ -709,8 +1020,18 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
                 output_value(&mut writer, &result, &output_config)?;
             }
         } else {
-            // Process each input
+            // Process each input document
+            let is_multi_doc = inputs.len() > 1;
             for input in inputs {
+                // Add document separator in YAML mode for multi-doc
+                // yq adds --- before each document (including the first one) in multi-doc output
+                if output_config.output_format == OutputFormat::Yaml
+                    && !output_config.no_doc
+                    && is_multi_doc
+                {
+                    writeln!(writer, "---")?;
+                }
+
                 let results = evaluate_input(&input, &program.expr, &context)?;
                 for result in results {
                     last_output = Some(result.clone());
