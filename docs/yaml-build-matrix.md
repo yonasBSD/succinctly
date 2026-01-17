@@ -83,6 +83,18 @@ This means:
 - **aarch64**: Only `neon` is compiled by default; `broadword` requires explicit opt-in via `broadword-yaml`
 - **Other platforms**: Only `broadword` is compiled (automatic fallback)
 
+### Historical Context: Why This Changed
+
+Previous versions compiled the broadword module on ARM64 even when not used, which caused dead code warnings:
+
+| Build Target | Feature Flags | Warning Source                     | Reason                                           |
+|--------------|---------------|------------------------------------|--------------------------------------------------|
+| aarch64      | (none)        | `broadword.rs` functions           | NEON is used; broadword compiled but not called  |
+| aarch64      | (none)        | `neon.rs::classify_yaml_chars_16`  | Infrastructure function not yet integrated       |
+| aarch64      | (none)        | `neon.rs::find_newline_broadword`  | Infrastructure function not yet integrated       |
+
+The old approach allowed easy testing/comparison via feature flag, but at the cost of dead code warnings. The current approach requires explicitly enabling `broadword-yaml` for comparison testing on ARM64.
+
 ## Performance Characteristics
 
 | Implementation   | Throughput           | Best For                        |
