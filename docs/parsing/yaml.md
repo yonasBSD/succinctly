@@ -1261,6 +1261,93 @@ This is the **largest single improvement** in YAML Phase 2!
 
 ---
 
+### P2.8: SIMD Threshold Tuning - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+**Hypothesis:** SIMD functions have setup overhead. By tuning when to use SIMD vs scalar (thresholds), we could avoid paying SIMD cost for inputs too small to benefit.
+
+**Expected Impact:** 2-4% improvement on workloads with many short strings/indentations
+
+**Implementation Details:**
+
+Based on micro-benchmark data, implemented three threshold changes:
+
+1. **`skip_spaces_simd` threshold**: 8 → 12 bytes
+   - Rationale: Micro-benchmarks showed SIMD wins at 16+ spaces, breaks even at 12-14
+
+2. **`find_quote_or_escape` threshold**: None → 16 bytes minimum
+   - Added scalar path for strings < 16 bytes
+   - Rationale: Micro-benchmarks showed SIMD loses 0.58x on < 16 bytes
+
+3. **`find_single_quote` threshold**: None → 16 bytes minimum
+   - Same as find_quote_or_escape
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Operation | Size | Scalar | SIMD | Winner | Speedup |
+|-----------|------|--------|------|--------|---------|
+| count_spaces | 8 | 3.02 ns | 3.24 ns | Scalar | 0.93x |
+| count_spaces | **16** | 5.47 ns | 1.52 ns | **SIMD** | **3.60x** |
+| find_quote | 12 | 3.96 ns | 6.82 ns | Scalar | 0.58x |
+| find_quote | **16** | 5.12 ns | 2.09 ns | **SIMD** | **2.45x** |
+
+Micro-benchmarks suggested SIMD threshold should be 14-16 bytes.
+
+**End-to-End Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Benchmark | Baseline | After Tuning | Change |
+|-----------|----------|--------------|--------|
+| quoted/double/10 | 740 ns | 817 ns | **+10.5%** ❌ |
+| quoted/single/10 | 713 ns | 823 ns | **+15.5%** ❌ |
+| quoted/double/100 | 4.27 µs | 4.61 µs | **+8.0%** ❌ |
+| quoted/single/100 | 4.20 µs | 4.54 µs | **+8.1%** ❌ |
+| quoted/double/1000 | 37.7 µs | 38.8 µs | **+3.0%** ❌ |
+
+**Severe regressions across all workloads!**
+
+**Why It Failed:**
+
+1. **Micro-benchmarks don't match real usage**
+   - Isolated function tests miss compiler optimizations (inlining, devirtualization)
+   - Don't capture branch prediction effects
+   - Artificial inputs (quote at end) ≠ real YAML patterns
+   - Parser state management overhead dominates in practice
+
+2. **Branch misprediction cost**
+   - Adding `if end - start < 16` conditionals to hot paths
+   - Modern CPUs speculatively execute both paths
+   - Misprediction penalty >> SIMD setup cost on Zen 4
+
+3. **Inlining and optimization broken**
+   - SIMD functions are heavily inlined by LLVM
+   - New scalar paths prevent aggressive optimization
+   - Larger code increases icache pressure
+
+4. **Current thresholds were already optimal**
+   - Existing 8-byte threshold for `skip_spaces_simd` works well
+   - Always-SIMD for strings is faster due to inlining
+   - Code was likely empirically tuned during development
+
+5. **Setup cost is negligible on modern CPUs**
+   - AMD Zen 4: Extremely fast SIMD dispatch
+   - Speculative execution hides latency
+   - Fast L1 cache (32KB, 4-cycle latency)
+   - "Setup cost" from micro-benchmarks doesn't materialize in real parsing
+
+**Conclusion:** Threshold tuning based on micro-benchmarks is **counterproductive**. Modern CPUs (branch prediction, speculative execution, fast SIMD) make "obvious" optimizations harmful.
+
+**Lessons Learned:**
+- Micro-benchmark wins ≠ real-world improvements
+- Trust existing well-tuned code
+- Always validate with end-to-end benchmarks
+- Simpler code often performs better on modern CPUs
+- Adding conditionals to hot paths usually hurts performance
+
+**All changes reverted.** Current SIMD thresholds remain unchanged.
+
+---
+
 ### P3: NEON `classify_yaml_chars` Port - REJECTED ❌
 
 **Status:** Tested and rejected 2026-01-17
@@ -1770,12 +1857,12 @@ unsafe fn is_simple_kv_line(line: &[u8]) -> Option<(usize, usize)> {
 | ~~**P2.5**~~ | ~~Cached Type Checking~~ | ~~1-2%~~ | Low | ✅ **DONE** (+1-17%) |
 | ~~**P2.6**~~ | ~~Software Prefetching~~ | ~~5-10%~~ | Low | ❌ **REJECTED** (+30% regression!) |
 | ~~**P2.7**~~ | ~~Block Scalar SIMD~~ | ~~10-20%~~ | Medium | ✅ **DONE** (+19-25%) **← Best!** |
-| **P3** | SIMD Threshold Tuning | 1-3% | Very Low | **Recommended next** |
-| **P4** | Branchless Character Classification | 2-4% | Low | Good candidate |
-| **P5** | Anchor/Alias SIMD | 5-15% (anchor-heavy) | Low | Good for k8s |
-| **P6** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Pending |
-| **P7** | Newline Index | 2-5% | Medium | Pending |
-| **P8** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
+| ~~**P2.8**~~ | ~~SIMD Threshold Tuning~~ | ~~1-3%~~ | Very Low | ❌ **REJECTED** (+8-15% regression!) |
+| **P3** | Branchless Character Classification | 2-4% | Low | **Recommended next** |
+| **P4** | Anchor/Alias SIMD | 5-15% (anchor-heavy) | Medium | Good for k8s |
+| **P5** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Experimental |
+| **P6** | Newline Index | 2-5% | Medium | Pending |
+| **P7** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
 
 **Achieved So Far:** P0 + P0+ + P2 + P2.5 + P2.7 = **+28-42% overall** improvement, **largest single gain: Block Scalar SIMD (+19-25%)**
 

@@ -209,6 +209,7 @@ For detailed documentation on optimisation techniques used in this project, see 
 - Caching hot values eliminates repeated lookups (type checking: 1-17% improvement)
 - Hardware prefetchers beat software prefetch for sequential access (prefetch: +30% regression!)
 - SIMD newline scanning + indentation checking enables fast block boundary detection (block scalars: 19-25% improvement!)
+- Micro-benchmark wins ≠ real-world improvements (threshold tuning: +8-15% regression despite micro-bench suggesting improvement)
 
 **Recent YAML optimizations:**
 - ✅ P2.5 (Cached Type Checking): 1-17% improvement depending on nesting depth
@@ -223,3 +224,8 @@ For detailed documentation on optimisation techniques used in this project, see 
   - 100x100 lines: 247 µs → 195 µs (-21%, 1.27x faster)
   - Throughput: 1.39 GiB/s → 1.76 GiB/s (+27%)
   - See [docs/parsing/yaml.md#p27-block-scalar-simd---accepted-](docs/parsing/yaml.md#p27-block-scalar-simd---accepted-) for full analysis
+- ❌ P2.8 (SIMD Threshold Tuning): **REJECTED** - 8-15% regression on quoted strings
+  - Micro-benchmarks suggested SIMD threshold tuning would help (showed 2-4% gain)
+  - End-to-end tests showed severe regressions instead
+  - Modern CPUs (branch prediction, inlining) make threshold tuning counterproductive
+  - See [docs/parsing/yaml.md#p28-simd-threshold-tuning---rejected-](docs/parsing/yaml.md#p28-simd-threshold-tuning---rejected-) for full analysis
