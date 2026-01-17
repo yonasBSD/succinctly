@@ -2000,6 +2000,142 @@ Having parsing and indexing in the same codebase enables optimizations impossibl
 
 ---
 
+## Succinct Index Optimization Opportunities
+
+### Pipeline Phase Analysis
+
+Profiling the end-to-end pipeline on 1MB YAML files reveals:
+
+| Phase | Time | Throughput | Description |
+|-------|------|------------|-------------|
+| **Read** | 0.2ms | - | File I/O |
+| **Build** | 3.0ms | 329 MiB/s | Parse + index construction |
+| **Cursor** | ~0ms | - | Create root cursor |
+| **To JSON** | 28.9ms | 35 MiB/s | Traverse + serialize |
+
+**Key insight**: The To JSON phase takes **10x longer** than Build. Optimization efforts should focus on traversal and serialization, not parsing.
+
+### Current Succinct Data Structures
+
+| Structure | Description | Rank/Select Index |
+|-----------|-------------|-------------------|
+| **IB** (Interest Bits) | Mark structural positions | ✓ `ib_rank` cumulative |
+| **BP** (Balanced Parens) | Tree structure | ✓ RangeMin for O(1) `find_close` |
+| **TY** (Type Bits) | 0=mapping, 1=sequence | ✗ Linear scan |
+| **seq_items** | Sequence item markers | ✗ Linear scan |
+| **containers** | Container markers | ✗ Linear scan |
+| **bp_to_text** | BP position → text offset | ✓ Dense array O(1) |
+
+### Opportunity 1: Cumulative Index for `containers`
+
+**Current**: `count_containers_before(bp_pos)` iterates word-by-word:
+```rust
+for word in container_words.iter().take(word_idx) {
+    count += word.count_ones() as usize;
+}
+```
+
+**Proposed**: Add `containers_rank: Vec<u32>` cumulative popcount index (like `ib_rank`).
+
+**Impact**: `is_sequence_at_bp()` called for every container during traversal becomes O(1).
+
+**Cost**: ~16KB overhead per 1MB file (one u32 per 64 BP positions).
+
+### Opportunity 2: Cumulative Index for `seq_items`
+
+Same pattern as containers. Lower priority since seq_items is checked less frequently.
+
+### Opportunity 3: Pack `is_container` Flag into `bp_to_text`
+
+**Current**: Separate bitvector lookup per node.
+
+**Proposed**: Use top bit of `bp_to_text` entries as is_container flag:
+```rust
+// Entry format: (is_container << 31) | text_offset
+// Text offsets < 2GB, so top bit is available
+pub fn bp_to_text_pos(&self, bp_pos: usize) -> (usize, bool) {
+    let entry = self.bp_to_text[idx];
+    let text_pos = (entry & 0x7FFF_FFFF) as usize;
+    let is_container = (entry >> 31) != 0;
+    (text_pos, is_container)
+}
+```
+
+**Impact**: Eliminates separate bitvector lookup, improves cache locality.
+
+**Cost**: None (uses existing storage).
+
+### Opportunity 4: String Boundary Pre-computation
+
+The To JSON phase spends significant time in:
+1. `YamlString::as_str()` - decodes quoted strings, handles escapes
+2. `write_json_string()` - re-escapes for JSON output
+
+**Proposed**: During Build phase, record:
+- String start/end byte offsets
+- "Escape-free" flag (string contains no escapes → can copy directly)
+
+```rust
+pub struct StringInfo {
+    start: u32,
+    end: u32,
+    flags: u8,  // bit 0: has_escapes, bit 1: is_quoted, etc.
+}
+```
+
+**Impact**: Skip escape processing for ~90% of strings that don't contain escapes.
+
+### Opportunity 5: SIMD JSON String Escaping
+
+The JSON output path processes strings byte-by-byte for escaping.
+
+**Proposed**: Use SIMD to scan for characters needing escape (`"`, `\`, control chars):
+```rust
+// Find first byte needing escape in 32-byte chunks
+let needs_escape = vpcmpeqb(chunk, quote) | vpcmpeqb(chunk, backslash) | ...;
+let mask = movemask(needs_escape);
+if mask == 0 {
+    // Fast path: copy 32 bytes directly
+    output.push_str(unsafe { str::from_utf8_unchecked(&chunk) });
+}
+```
+
+**Impact**: 2-4x faster string serialization for clean strings.
+
+### Opportunity 6: Streaming Identity Output
+
+For identity queries (`.`), the current fast path still builds intermediate cursors:
+```rust
+while let Some((cursor, rest)) = docs.uncons_cursor() {
+    let json = cursor.to_json();  // Still traverses tree
+    writeln!(writer, "{}", json)?;
+}
+```
+
+**Proposed**: Direct streaming with position tracking:
+```rust
+// Stream-copy text segments between structural positions
+for (start, end) in structural_segments {
+    // Validate segment, copy directly to output
+    output.write_all(&input[start..end])?;
+}
+```
+
+**Impact**: Near-zero traversal cost for identity queries.
+
+### Priority Ranking
+
+| Opportunity | Effort | Impact | Priority |
+|-------------|--------|--------|----------|
+| 1. `containers_rank` | Low | Medium | **P1** |
+| 4. String boundaries | Medium | High | **P1** |
+| 3. Pack flag in bp_to_text | Low | Low | **P2** |
+| 5. SIMD JSON escaping | Medium | Medium | **P2** |
+| 2. `seq_items_rank` | Low | Low | **P3** |
+| 6. Streaming identity | High | High | **P3** |
+
+---
+
 ## References
 
 ### YAML Specification
