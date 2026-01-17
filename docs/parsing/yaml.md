@@ -1671,6 +1671,167 @@ Analyzing real data sizes BEFORE implementation saved significant development ti
 
 ---
 
+### P6: BMI2 Operations (PDEP/PEXT) - REJECTED ❌
+
+**Status:** Analyzed and rejected 2026-01-17 (not implemented)
+
+**Goal:** Use BMI2 instructions (PDEP/PEXT) for bit manipulation in escape sequence handling, similar to successful DSV quote masking.
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+| String Size | Type | Scalar | SIMD+Scalar | BMI2 | BMI2 vs SIMD |
+|-------------|------|--------|-------------|------|--------------|
+| **12B** | no escape | 5.99ns | **3.51ns** | 3.83ns | **1.1x slower** ❌ |
+| **30B** | dense escape | 7.44ns | 8.87ns | **7.22ns** | 1.2x vs scalar |
+| **102B** | no escape | 55.97ns | 4.76ns | **3.25ns** | **1.5x faster** ✅ |
+| **103B** | sparse escape | 62.84ns | 4.88ns | **4.08ns** | **1.2x faster** ✅ |
+| **1002B** | no escape | 561.58ns | **26.84ns** | 29.82ns | **1.1x slower** ❌ |
+
+**BMI2 Sweet Spot:** 100-200 byte strings (1.2-1.5x faster than SIMD+Scalar)
+
+**Real YAML Benchmark Strings:**
+```yaml
+key1: "This is a quoted string with value 1"  # 45 bytes total, 36 bytes content
+```
+- Typical quoted strings: **32-45 bytes** (at threshold, minimal benefit)
+- String content only: **32-36 bytes**
+- Estimated distribution:
+  - < 50 bytes: ~70% of strings
+  - 50-100 bytes: ~20% of strings
+  - 100+ bytes: ~10% of strings
+
+**Critical Issues:**
+
+1. **Size Mismatch** (Same pattern as P5):
+   - BMI2 sweet spot: 100-200 bytes (1.2-1.5x win)
+   - Real data: 32-50 bytes (at threshold, minimal benefit)
+   - Weighted average: **likely 0-5% gain at best**
+
+2. **Correctness Bug:**
+   ```rust
+   // Prototype implementation (WRONG):
+   unsafe fn compute_escaped_positions_bmi2(backslash_mask: u64) -> u64 {
+       backslash_mask << 1  // Too simplistic!
+   }
+   ```
+   This doesn't handle:
+   - Consecutive backslashes: `\\` (second `\` is escaped, not an escaper)
+   - Escape sequences spanning chunk boundaries
+   - Fixing would add overhead, eliminating marginal wins
+
+3. **Early-Exit Disadvantage:**
+   For long strings (1KB+), SIMD+Scalar wins because:
+   - It finds the closing quote and returns immediately
+   - BMI2 processes full 32-byte chunks regardless
+   - Result: **1.1x regression** on 1KB strings
+
+**Comparison to DSV (Where BMI2 Succeeded):**
+
+| Aspect | DSV (Success) | YAML (Cannot Apply) |
+|--------|---------------|---------------------|
+| **Use case** | Build quote state index | Individual string parsing |
+| **Quote grammar** | Context-free (`""` escape) | Context-sensitive (`\"` escape) |
+| **Index feasibility** | ✅ One pass | ❌ Needs escape preprocessing |
+| **BMI2 application** | `toggle64` for quote state | Would need escape mask first |
+| **Algorithm** | PDEP scatter + carry | Circular dependency |
+| **Data independence** | Processes all data | Early-exit on individual strings |
+
+**Why DSV BMI2 Works But YAML Cannot Use Same Approach:**
+
+**DSV builds a global quote index:**
+```csv
+field1,"field,2",field3
+Quotes: ------^-------^--------
+Index:  000000111111110000000000  (BMI2 toggle64 builds this in one pass)
+```
+- Quote escaping: `""` is still two quote characters (detectable in bitmask)
+- Context-free: Every `"` is either start or end of quote region
+- One pass: Scan document once, build index using BMI2
+- Index answers: "Is position X inside quotes?" (O(1) with rank/select)
+
+**YAML cannot build quote index (grammar prevents it):**
+```yaml
+key: "value with \" escape"
+     ^-----------------^
+```
+
+**Fundamental problem:** Need escape mask before quote mask
+1. Find all `"` positions → `00000100000000001000000000`
+2. Find all `\` positions → `00000000000000010000000000`
+3. Mark escaped bytes → `00000000000000001000000000` (the `"` after `\`)
+4. Remove escaped quotes → Needs carry logic (what we're trying to avoid!)
+5. Run BMI2 toggle → Would work, but step 4 already required similar complexity
+
+**Additional YAML complications:**
+- **Two quote types**: `"` (backslash escape) vs `'` (doubled quote escape)
+- **Block scalars**: `|` and `>` aren't quotes but need indentation tracking
+- **Context-dependent**: Quote meaning depends on block vs flow context
+
+**Why this matters:**
+- DSV: Build index faster than parsing sequentially
+- YAML: Building index requires most of the parsing work anyway
+- YAML's current approach (early-exit SIMD) is optimal for its grammar
+
+**Alternative considered:** Multi-pass approach
+1. Pass 1: Build backslash mask
+2. Pass 2: Build quote mask (excluding escaped quotes)
+3. Pass 3: Parse using masks
+
+Result: 3 passes slower than current 1 pass with early-exit SIMD
+
+**Comparison to P5:**
+
+| Aspect | P5 (Flow SIMD) | P6 (BMI2) |
+|--------|---------------|-----------|
+| **Sweet spot** | 64-128 bytes (8-14x win) | 100-200 bytes (1.2-1.5x win) |
+| **Real data** | 10-30 bytes | 32-50 bytes |
+| **Mismatch severity** | Severe (10x gap) | Moderate (3x gap) |
+| **Correctness** | Correct | Has bugs |
+| **Expected gain** | Regression | 0-5% |
+
+P6 is less severe than P5, but still not worth implementing.
+
+**Decision: ABORT P6**
+
+**Primary reason: YAML's grammar prevents DSV-style quote indexing**
+
+YAML cannot use BMI2 like DSV does because:
+
+1. ❌ **Grammar incompatibility** - YAML needs escape preprocessing before quote detection
+   - DSV: `""` is still two quote characters (context-free)
+   - YAML: `\"` is backslash + quote (different characters)
+   - Cannot build quote bitmask without already handling escapes
+
+2. ❌ **Circular dependency** - Escape handling is what we're trying to optimize
+   - DSV: Build quote index in one pass using BMI2 `toggle64`
+   - YAML: Need escape mask → quote mask → parse (3 passes)
+   - Current approach (early-exit SIMD) is already optimal for YAML's grammar
+
+3. ❌ **Wrong use case tested** - Micro-benchmarks tested individual string parsing
+   - DSV BMI2: Builds global index for entire document
+   - My P6 test: Per-string parsing (early-exit SIMD wins on short strings)
+   - Comparison was apples-to-oranges
+
+**Secondary reasons (from micro-benchmark analysis):**
+
+4. ❌ **Size mismatch** - Real strings (32-50B) below sweet spot (100-200B)
+5. ❌ **Marginal wins** - Even at 100B, only 1.2-1.5x faster (vs DSV's 10x)
+6. ❌ **Correctness issues** - Prototype has bugs requiring complex fixes
+
+**Key Lessons:**
+
+1. **Grammar matters**: BMI2 quote indexing works for DSV because quotes are context-free. YAML's backslash escaping breaks this assumption.
+
+2. **Use case alignment**: DSV builds an index (scans everything once). YAML parses sequentially (early-exit optimization). Can't directly apply index-building techniques to sequential parsing.
+
+3. **When to use BMI2 for quotes**: Only when quote escaping is context-free (CSV's `""`, not YAML's `\"`).
+
+**No implementation or end-to-end benchmarks performed.** Optimization rejected at analysis stage after:
+1. Micro-benchmarks revealed size mismatch for per-string parsing approach
+2. Grammar analysis showed quote indexing (DSV approach) is impossible for YAML
+
+---
+
 ### P4: NEON `classify_yaml_chars` Port - REJECTED ❌
 
 **Status:** Tested and rejected 2026-01-17
@@ -2338,7 +2499,7 @@ unsafe fn is_simple_kv_line(line: &[u8]) -> Option<(usize, usize)> {
 | ~~**P3**~~ | ~~Branchless Character Classification~~ | ~~2-4%~~ | Low | ❌ **REJECTED** (+25-44% regression!) |
 | ~~**P4**~~ | ~~Anchor/Alias SIMD~~ | ~~5-15%~~ | Medium | ✅ **DONE** (+6-17%) |
 | ~~**P5**~~ | ~~Flow Collection Fast Path~~ | ~~10-20%~~ | Medium | ❌ **REJECTED** (size mismatch - aborted at analysis) |
-| **P6** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Experimental |
+| ~~**P6**~~ | ~~BMI2 operations (PDEP/PEXT)~~ | ~~3-8%~~ | Medium | ❌ **REJECTED** (size mismatch + bugs - aborted at analysis) |
 | **P7** | Newline Index | 2-5% | Medium | Pending |
 | **P8** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
 

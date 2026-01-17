@@ -253,3 +253,16 @@ For detailed documentation on optimisation techniques used in this project, see 
   - **Lessons from P2.6/P2.8/P3 applied** - rejected during analysis to avoid predicted regression
   - Key insight: Micro-benchmark wins only translate when optimizing inputs that exist in real workloads
   - See [docs/parsing/yaml.md#p5-flow-collection-fast-path---rejected-](docs/parsing/yaml.md#p5-flow-collection-fast-path---rejected-) for full analysis
+- ❌ P6 (BMI2 Operations): **REJECTED** - YAML's grammar prevents DSV-style quote indexing
+  - **Primary reason**: YAML cannot use BMI2 like DSV does (grammar incompatibility)
+    - DSV: Quotes are context-free (`""` escape), can build global quote index in one pass using BMI2 `toggle64`
+    - YAML: Backslash escaping (`\"`) requires escape preprocessing BEFORE quote detection
+    - Circular dependency: Need escape mask to build quote mask, but escape handling is what we're optimizing
+    - Multi-pass approach (escape → quote → parse) slower than current early-exit SIMD
+  - **Wrong approach tested**: Micro-benchmarks tested per-string parsing (not index building)
+    - DSV BMI2 builds global document index (scans everything once)
+    - Tested YAML per-string parsing (early-exit SIMD wins on short strings)
+    - Apples-to-oranges comparison revealed fundamental grammar difference
+  - **Key insight**: BMI2 quote indexing only works when escaping is context-free (CSV's `""`, not YAML's `\"`)
+  - **Additional context-sensitivity**: YAML has two quote types (`"` vs `'`), block scalars (`|` `>`), and context-dependent quote meaning
+  - See [docs/parsing/yaml.md#p6-bmi2-operations-pdeppext---rejected-](docs/parsing/yaml.md#p6-bmi2-operations-pdeppext---rejected-) for full analysis
