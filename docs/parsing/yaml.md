@@ -1064,6 +1064,100 @@ fn pop_type(&mut self) -> Option<NodeType> {
 
 ---
 
+### P3: NEON `classify_yaml_chars` Port - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+Attempted to port x86's successful P0 `classify_yaml_chars` optimization to ARM64 NEON, expecting similar benefits for bulk character classification.
+
+**Implementation Details:**
+- Ported `YamlCharClass` struct with 8 u16 bitmasks (16 bytes per classification)
+- Implemented `classify_yaml_chars_neon()` using NEON intrinsics
+- Added `find_newline_neon()` for completeness
+- Integrated into parser with `skip_unquoted_simd()` for ARM64
+- All tests passed ✅
+
+**Performance Results (Apple M1 Max):**
+
+| Benchmark           | Baseline     | NEON Classify | Change       |
+|---------------------|--------------|---------------|--------------|
+| simple_kv/100       | 3.74 µs      | 4.50 µs       | **+20.3%** ❌ |
+| simple_kv/1000      | 33.8 µs      | 42.0 µs       | **+24.3%** ❌ |
+| simple_kv/10000     | 333 µs       | 416 µs        | **+25.0%** ❌ |
+| nested/d5_w2        | 4.98 µs      | 5.52 µs       | **+10.8%** ❌ |
+| large/10kb          | 21.9 µs      | 26.4 µs       | **+20.3%** ❌ |
+| large/100kb         | 196 µs       | 230 µs        | **+17.3%** ❌ |
+| large/1mb           | 1.91 ms      | 2.22 ms       | **+16.2%** ❌ |
+
+**Root Cause: NEON lacks native `movemask`**
+
+The x86 `_mm_movemask_epi8` instruction extracts the high bit of each byte into a 16/32-bit integer in **1 instruction, 1 cycle**. NEON has no equivalent, requiring expensive emulation:
+
+```rust
+// NEON movemask emulation (~10 instructions, 5-8 cycles)
+unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
+    // Step 1: Shift right by 7 to get 0 or 1 in each byte
+    let high_bits = vshrq_n_u8::<7>(v);
+
+    // Step 2: Extract 16 bytes as two u64 values (SIMD→scalar transfer!)
+    let low_u64 = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(high_bits));
+    let high_u64 = vgetq_lane_u64::<1>(vreinterpretq_u64_u8(high_bits));
+
+    // Step 3: Multiplication trick to pack 8 bits from each u64
+    const MAGIC: u64 = 0x0102040810204080;
+    let low_packed = (low_u64.wrapping_mul(MAGIC) >> 56) as u8;
+    let high_packed = (high_u64.wrapping_mul(MAGIC) >> 56) as u8;
+
+    (low_packed as u16) | ((high_packed as u16) << 8)
+}
+```
+
+**Cost Analysis:**
+
+| Platform | Instruction | Cost       | Operations for 8-class classify |
+|----------|-------------|------------|--------------------------------|
+| x86_64   | `movemask`  | 1 cycle    | 8 movemask = ~8 cycles         |
+| ARM64    | Emulation   | 5-8 cycles | 8 emulations = **40-64 cycles** |
+
+The `classify_yaml_chars` function calls `neon_movemask` 8 times (once per character class), making the overhead **5-8x worse** than x86.
+
+**Why NEON Classify Failed:**
+
+| Factor                    | x86_64 (Success)           | ARM64 (Failure)              |
+|---------------------------|----------------------------|------------------------------|
+| `movemask` cost           | 1 instruction              | ~10 instructions             |
+| 8-class classification    | ~8 cycles                  | ~40-64 cycles                |
+| SIMD→scalar transfers     | Cheap (`movemask` is fast) | Expensive (lane extraction)  |
+| Multiplication overhead   | None                       | 2 multiplies per movemask    |
+| Break-even point          | ~4 bytes                   | >64 bytes (if at all)        |
+
+**Attempted Mitigations (All Failed):**
+
+1. **Raised threshold to 32 bytes** - Still 15-20% slower
+2. **Process 2×16-byte chunks** - Marginal improvement, still slower than scalar
+3. **Conditional SIMD activation** - Added branching overhead without benefit
+
+**Conclusion:** Rejected because:
+
+1. ❌ **10-25% performance regression** - NEON movemask emulation too expensive
+2. ❌ **Fundamental architectural mismatch** - x86 `movemask` has no NEON equivalent
+3. ❌ **SIMD→scalar transfer cost** - Lane extraction + multiplication negates SIMD benefit
+4. ❌ **Existing NEON functions are optimal** - `find_quote_or_escape_neon` and `count_leading_spaces_neon` work because they exit on first match (1 movemask call), not bulk classification (8 calls)
+
+**Recommendation:** For ARM64, stick with:
+- Single-purpose NEON functions (`find_quote_or_escape`, `find_single_quote`, `count_leading_spaces`)
+- These work because they only need **one** movemask call per chunk
+- Bulk classification should remain scalar on ARM64
+
+**Alternative Considered: Pure Broadword (SWAR)**
+
+A pure u128 arithmetic approach without NEON intrinsics was considered but rejected:
+- Still requires ~15-20 arithmetic operations
+- No better than the NEON emulation
+- ARM64 has excellent scalar performance, making SIMD overhead harder to recoup
+
+---
+
 ## x86_64 Optimization Implementation Plan
 
 This section details planned and implemented SIMD optimizations for x86_64 (AMD Ryzen 9 7950X and similar).
