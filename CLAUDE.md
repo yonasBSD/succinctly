@@ -246,3 +246,10 @@ For detailed documentation on optimisation techniques used in this project, see 
   - **First successful optimization since P2.7** - proves SIMD string searching wins when targeting real bottlenecks
   - Best for: Kubernetes manifests, CI/CD configs with many anchors/aliases
   - See [docs/parsing/yaml.md#p4-anchoralias-simd---accepted-](docs/parsing/yaml.md#p4-anchoralias-simd---accepted-) for full analysis
+- ❌ P5 (Flow Collection Fast Path): **REJECTED** - aborted at analysis stage before implementation
+  - Micro-benchmarks showed 8-14x SIMD wins for 64-128 byte flow collections
+  - Real YAML flow collections are typically 10-30 bytes (too small for SIMD to win)
+  - SIMD only wins at 32+ bytes, but 90% of real flow collections are < 30 bytes
+  - **Lessons from P2.6/P2.8/P3 applied** - rejected during analysis to avoid predicted regression
+  - Key insight: Micro-benchmark wins only translate when optimizing inputs that exist in real workloads
+  - See [docs/parsing/yaml.md#p5-flow-collection-fast-path---rejected-](docs/parsing/yaml.md#p5-flow-collection-fast-path---rejected-) for full analysis

@@ -1058,7 +1058,7 @@ fn pop_type(&mut self) -> Option<NodeType> {
 **Code Locations:**
 - Implementation: [`src/yaml/parser.rs:187-200`](../../src/yaml/parser.rs#L187-L200)
 - Micro-benchmarks: [`benches/yaml_type_stack_micro.rs`](../../benches/yaml_type_stack_micro.rs)
-- Full analysis: [/tmp/cached_type_benchmark_analysis.md](/tmp/cached_type_benchmark_analysis.md)
+- Full analysis: See benchmark output above
 
 **Complexity:** Very low - only 2 helper methods and 1 cached field. All type stack operations now go through `push_type()` and `pop_type()`.
 
@@ -1587,6 +1587,90 @@ This is the **first optimization since P2.7 (Block Scalar SIMD)** to show end-to
 
 ---
 
+### P5: Flow Collection Fast Path - REJECTED ❌
+
+**Status:** Analyzed and rejected 2026-01-17 (not implemented)
+
+**Hypothesis:** Use SIMD techniques from JSON parser to accelerate flow collection parsing (`[a, b, c]` and `{key: value}`), since flow collections are structurally similar to JSON.
+
+**Expected Impact:** 10-20% improvement on flow-heavy YAML files
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+**Skip Whitespace:**
+
+| Size | Scalar | SIMD | Speedup |
+|------|--------|------|---------|
+| 4 bytes | 1.37 ns | 1.50 ns | 0.91x (scalar wins) ❌ |
+| 16 bytes | 6.43 ns | 6.48 ns | 0.99x (tie) |
+| 64 bytes | 25.9 ns | 1.84 ns | **14.1x faster** ✅ |
+| 128 bytes | 43.3 ns | 3.48 ns | **12.4x faster** ✅ |
+
+**Find Structural Characters:**
+
+| Size | Scalar | SIMD | Speedup |
+|------|--------|------|---------|
+| 8 bytes | 3.85 ns | 3.70 ns | 1.04x (tiny win) |
+| 32 bytes | 12.5 ns | 1.43 ns | **8.7x faster** ✅ |
+| 128 bytes | 53.8 ns | 5.04 ns | **10.7x faster** ✅ |
+
+**Micro-benchmarks showed massive SIMD wins for large inputs (8-14x faster)!**
+
+**Why It Was Rejected (Before Implementation):**
+
+After analyzing micro-benchmark results against real YAML data, a critical size mismatch was discovered:
+
+**Real flow collections from test suite:**
+```yaml
+items: [1, 2, 3]                          # 9 bytes
+person: {name: Alice, age: 30}             # 22 bytes
+items: ["hello", 'world', plain]          # 26 bytes
+data: {users: [{name: Alice}, {name: Bob}]} # 44 bytes
+- {one: two, three: four}                 # 25 bytes
+```
+
+**Typical flow collections: 10-30 bytes**
+**SIMD wins start at: 32+ bytes**
+
+**The Problem:**
+
+90% of real flow collections are < 30 bytes, but SIMD only wins at 32+ bytes. For typical inputs:
+- 4-16 byte whitespace: Scalar wins or ties
+- 8-byte structural search: Essentially tied
+- SIMD overhead (dispatch, setup) would dominate on small inputs
+
+**This is the P2.8/P3 Pattern:**
+
+| Optimization | Micro Win | Real Data | Expected Result |
+|--------------|-----------|-----------|-----------------|
+| P2.8 (Thresholds) | 2-4% on large | Most < 16 bytes | +8-15% regression ❌ |
+| P3 (Branchless) | 3-29% on loops | Predictable | +25-44% regression ❌ |
+| **P5 (Flow SIMD)** | **8-14x on 64+ bytes** | **Most < 30 bytes** | Predicted regression ⚠️ |
+
+**Decision Rationale:**
+
+This is the **fourth time** micro-benchmarks have shown wins on large inputs while real data is small:
+1. P2.6 (Prefetching): Micro wins → +30% regression
+2. P2.8 (Thresholds): Micro wins → +8-15% regression
+3. P3 (Branchless): Micro wins → +25-44% regression
+4. **P5 (Flow SIMD)**: Micro wins (8-14x) → **aborted before implementation**
+
+**Lesson learned:** Optimization aborted during analysis phase to avoid wasting implementation effort on a predicted failure.
+
+**Why P4 (Anchor SIMD) succeeded but P5 would fail:**
+- **P4**: Targeted 32-64 byte anchor names common in Kubernetes configs (real data matches SIMD sweet spot)
+- **P5**: Would target 10-30 byte flow collections (real data too small for SIMD to win)
+
+**Key Insight:**
+
+**Micro-benchmark wins only translate to real gains when optimizing inputs that actually exist in real workloads.**
+
+Analyzing real data sizes BEFORE implementation saved significant development time and prevented another regression.
+
+**No implementation or end-to-end benchmarks performed.** Optimization rejected at analysis stage.
+
+---
+
 ### P4: NEON `classify_yaml_chars` Port - REJECTED ❌
 
 **Status:** Tested and rejected 2026-01-17
@@ -1908,7 +1992,7 @@ This section details planned and implemented SIMD optimizations for x86_64 (AMD 
 
 **Status:** Completed 2026-01-17
 
-The YAML parser now includes enhanced SIMD operations in [`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs:1):
+The YAML parser now includes enhanced SIMD operations in [`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs):
 
 | Function | SSE2 | AVX2 | Usage | Speedup (Measured) |
 |----------|------|------|-------|-------------------|
@@ -1930,7 +2014,7 @@ The YAML parser now includes enhanced SIMD operations in [`src/yaml/simd/x86.rs`
 
 Analysis of [`src/json/simd/`](../../src/json/simd/) reveals these techniques:
 
-#### 1. **Multi-Character Classification** ([x86.rs](../../src/json/simd/x86.rs:44-123), [avx2.rs](../../src/json/simd/avx2.rs:44-129))
+#### 1. **Multi-Character Classification** ([x86.rs](../../src/json/simd/x86.rs), [avx2.rs](../../src/json/simd/avx2.rs))
 
 JSON classifies 6 character classes in parallel per 16/32-byte chunk:
 - Quotes (`"`)
@@ -1957,7 +2041,7 @@ unsafe fn classify_chars(chunk: __m256i) -> CharClass {
 
 **Benefit:** 1 load + 6-8 vector ops = bulk classification
 
-#### 2. **PFSM Tables** ([pfsm_tables.rs](../../src/json/pfsm_tables.rs:1-150))
+#### 2. **PFSM Tables** ([pfsm_tables.rs](../../src/json/pfsm_tables.rs))
 
 Pre-computed state transition tables eliminate branching:
 
@@ -1976,7 +2060,7 @@ let output_bits = (phi >> (state * 8)) & 0x07;
 
 **Benefit:** Branch-free state machine, predictable memory access
 
-#### 3. **BMI2 Bit Manipulation** ([bmi2.rs](../../src/json/simd/bmi2.rs:1-200))
+#### 3. **BMI2 Bit Manipulation** ([bmi2.rs](../../src/json/simd/bmi2.rs))
 
 PDEP/PEXT for efficient bitmask manipulation:
 - **PEXT:** Extract bits matching mask positions
@@ -2010,7 +2094,7 @@ Based on baseline benchmarks and JSON techniques, here are high-value optimizati
 
 #### **Optimization 1: Multi-Character Classification**
 
-**Target:** Core parsing loop in [`src/yaml/parser.rs`](../../src/yaml/parser.rs:666-1647)
+**Target:** Core parsing loop in [`src/yaml/parser.rs`](../../src/yaml/parser.rs)
 
 **Approach:** Classify YAML structural characters in bulk, similar to JSON.
 
@@ -2253,9 +2337,10 @@ unsafe fn is_simple_kv_line(line: &[u8]) -> Option<(usize, usize)> {
 | ~~**P2.8**~~ | ~~SIMD Threshold Tuning~~ | ~~1-3%~~ | Very Low | ❌ **REJECTED** (+8-15% regression!) |
 | ~~**P3**~~ | ~~Branchless Character Classification~~ | ~~2-4%~~ | Low | ❌ **REJECTED** (+25-44% regression!) |
 | ~~**P4**~~ | ~~Anchor/Alias SIMD~~ | ~~5-15%~~ | Medium | ✅ **DONE** (+6-17%) |
-| **P5** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Experimental |
-| **P6** | Newline Index | 2-5% | Medium | Pending |
-| **P7** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
+| ~~**P5**~~ | ~~Flow Collection Fast Path~~ | ~~10-20%~~ | Medium | ❌ **REJECTED** (size mismatch - aborted at analysis) |
+| **P6** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Experimental |
+| **P7** | Newline Index | 2-5% | Medium | Pending |
+| **P8** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
 
 **Achieved So Far:** P0 + P0+ + P2 + P2.5 + P2.7 + P4 = **+34-59% overall** improvement, **largest single gain: Block Scalar SIMD (+19-25%)**
 
