@@ -207,8 +207,13 @@ For detailed documentation on optimisation techniques used in this project, see 
 - Algorithmic improvements beat micro-optimisations (cumulative index: 627x speedup)
 - Simpler data structures often outperform complex ones due to cache behaviour
 - Caching hot values eliminates repeated lookups (type checking: 1-17% improvement)
+- Hardware prefetchers beat software prefetch for sequential access (prefetch: +30% regression!)
 
 **Recent YAML optimizations:**
-- P2.5 (Cached Type Checking): 1-17% improvement depending on nesting depth
+- ✅ P2.5 (Cached Type Checking): 1-17% improvement depending on nesting depth
   - See [docs/parsing/yaml.md#p25-cached-type-checking](docs/parsing/yaml.md#p25-cached-type-checking) for details
   - Best for deeply nested YAML (Kubernetes configs, CI/CD files)
+- ❌ P2.6 (Software Prefetching): **REJECTED** - 30% regression on large files
+  - Modern CPU hardware prefetchers are superior for sequential parsing
+  - Software prefetch causes cache pollution and interferes with hardware
+  - See [docs/parsing/yaml.md#p26-software-prefetching-for-large-files---rejected-](docs/parsing/yaml.md#p26-software-prefetching-for-large-files---rejected-) for analysis

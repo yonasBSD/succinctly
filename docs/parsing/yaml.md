@@ -1064,6 +1064,97 @@ fn pop_type(&mut self) -> Option<NodeType> {
 
 ---
 
+### P2.6: Software Prefetching for Large Files - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+**Hypothesis:** Large YAML files (100kb-1mb+) suffer from cache misses. Adding software prefetch hints (`_mm_prefetch`) ahead of the parser should reduce latency by loading data into cache before it's needed.
+
+**Implementation Details:**
+- Added `_mm_prefetch` with `_MM_HINT_T0` (temporal locality hint)
+- Prefetch distance: 256 bytes ahead
+- Locations tested:
+  1. `parse_double_quoted` loop (every iteration)
+  2. `parse_single_quoted` loop (every iteration)
+  3. `parse_unquoted_value_with_indent_impl` loop (every line)
+  4. `parse_documents` main loop (every iteration)
+
+```rust
+#[cfg(target_arch = "x86_64")]
+if self.pos + 256 < self.input.len() {
+    unsafe {
+        use core::arch::x86_64::_mm_prefetch;
+        _mm_prefetch(
+            self.input.as_ptr().add(self.pos + 256) as *const i8,
+            core::arch::x86_64::_MM_HINT_T0,
+        );
+    }
+}
+```
+
+**Performance Results (AMD Ryzen 9 7950X):**
+
+| File Size | Baseline | With Prefetch | Change | Note |
+|-----------|----------|---------------|--------|------|
+| 1kb       | 2.91 µs  | 2.93 µs       | +0.5%  | Neutral (noise) |
+| 10kb      | 19.9 µs  | 20.6 µs       | **+3.7%** ❌ | Regression |
+| 100kb     | 177 µs   | 179 µs        | +0.8%  | Neutral (noise) |
+| **1mb**   | **2.58 ms** | **3.36 ms**   | **+30.3%** ❌ | **Severe regression** |
+
+**Conclusion:** Software prefetching is **counterproductive** for YAML parsing. The **30% regression on 1MB files** proves that hardware prefetchers are superior for sequential workloads.
+
+**Why Prefetching Failed:**
+
+1. **Hardware prefetchers already optimal**
+   - Modern AMD Ryzen (Zen 4) has sophisticated L1/L2 stream prefetchers
+   - Automatically detect sequential access patterns
+   - YAML parser accesses memory left-to-right sequentially - perfect for hardware
+
+2. **Cache pollution**
+   - Aggressive prefetching (every loop iteration) evicts hot data
+   - Prefetched data displaces useful cache lines in L1/L2
+   - In 1MB case: repeatedly prefetching 256 bytes ahead causes thrashing
+
+3. **SIMD already handles locality**
+   - `find_quote_or_escape` - processes 32 bytes at once (AVX2)
+   - `find_single_quote` - processes 32 bytes at once
+   - `classify_yaml_chars` - processes 32 bytes at once
+   - SIMD operations inherently fetch data into cache
+
+4. **Sequential access pattern**
+   - Hardware prefetchers excel at sequential patterns
+   - Software prefetch adds no value
+   - Actually interferes with hardware prefetcher heuristics
+
+5. **Prefetch distance too short**
+   - 256 bytes ahead is too close for modern CPUs
+   - L1: 32KB, L2: 1MB per core
+   - Hardware would have already loaded it by the time we access
+
+**When Software Prefetching Works:**
+
+Prefetching helps when:
+- ✅ Access pattern is **non-sequential** (pointer chasing, tree traversal)
+- ✅ Hardware can't predict next access (hash lookups, random jumps)
+- ✅ Prefetch distance is **large** (>>512 bytes)
+- ✅ Prefetching is **sparse** (not every iteration)
+
+YAML parsing **fails all criteria**:
+- ❌ Sequential left-to-right parsing
+- ❌ Predictable pattern (hardware handles it perfectly)
+- ❌ Short distance (256 bytes)
+- ❌ Dense prefetching (every loop iteration)
+
+**Lessons Learned:**
+- Trust hardware prefetchers for sequential workloads on modern x86_64
+- Software prefetching can **harm** performance via cache pollution
+- SIMD operations already optimize memory locality
+- Measure before optimizing - intuition can be wrong
+
+**Full analysis:** `/tmp/prefetch_analysis.md`
+
+---
+
 ### P3: NEON `classify_yaml_chars` Port - REJECTED ❌
 
 **Status:** Tested and rejected 2026-01-17
@@ -1571,9 +1662,13 @@ unsafe fn is_simple_kv_line(line: &[u8]) -> Option<(usize, usize)> {
 | ~~**P1**~~ | ~~YFSM Tables~~ | ~~15-25%~~ | High | ❌ **REJECTED** (0-2%) |
 | ~~**P2**~~ | ~~Integrate classify_yaml_chars~~ | ~~5-10%~~ | Medium | ✅ **DONE** (+8-17%) |
 | ~~**P2.5**~~ | ~~Cached Type Checking~~ | ~~1-2%~~ | Low | ✅ **DONE** (+1-17%) |
-| **P3** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Pending |
-| **P4** | Newline Index | 2-5% | Medium | Pending |
-| **P5** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
+| ~~**P2.6**~~ | ~~Software Prefetching~~ | ~~5-10%~~ | Low | ❌ **REJECTED** (+30% regression!) |
+| **P3** | SIMD Threshold Tuning | 1-3% | Very Low | **Recommended next** |
+| **P4** | Block Scalar SIMD | 10-20% (literal blocks) | Medium | High impact |
+| **P5** | Anchor/Alias SIMD | 5-15% (anchor-heavy) | Low | Good for k8s |
+| **P6** | BMI2 operations (PDEP/PEXT) | 3-8% | Medium | Pending |
+| **P7** | Newline Index | 2-5% | Medium | Pending |
+| **P8** | AVX-512 variants | 0-10% (uncertain) | Medium | Low priority |
 
 **Achieved So Far:** P0 + P0+ + P2 + P2.5 = **+9-17% overall** on typical files, **up to +20%** on deeply nested YAML
 
