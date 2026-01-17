@@ -78,6 +78,14 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         self.index.bp_to_text_pos(self.bp_pos)
     }
 
+    /// Get the text end byte offset for this node.
+    ///
+    /// For scalars, returns the end position. For containers, returns 0.
+    #[inline]
+    pub fn text_end_position(&self) -> Option<usize> {
+        self.index.bp_to_text_end_pos(self.bp_pos)
+    }
+
     /// Navigate to the first child.
     #[inline]
     pub fn first_child(&self) -> Option<YamlCursor<'a, W>> {
@@ -269,9 +277,21 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
             }
             _ => {
                 // Unquoted (plain) scalar - may span multiple lines
-                let (base_indent, is_doc_root) =
-                    self.compute_base_indent_and_root_flag(effective_text_pos);
-                let end = self.find_plain_scalar_end(effective_text_pos, base_indent, is_doc_root);
+                // Use pre-computed end position for O(1) lookup
+                let end = self.text_end_position().unwrap_or(effective_text_pos);
+
+                // Compute base_indent only if needed for multi-line scalar decoding
+                // For single-line scalars (no newlines), base_indent doesn't matter
+                let base_indent = if end > effective_text_pos
+                    && self.text[effective_text_pos..end].contains(&b'\n')
+                {
+                    // Multi-line scalar - compute base indent from line start
+                    self.compute_scalar_base_indent(effective_text_pos)
+                } else {
+                    // Single-line scalar - base_indent is unused
+                    0
+                };
+
                 YamlValue::String(YamlString::Unquoted {
                     text: self.text,
                     start: effective_text_pos,
@@ -382,12 +402,27 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         indent
     }
 
+    /// Compute base indent for multi-line plain scalar decoding.
+    /// Returns the indent of the current line (spaces at start of line).
+    /// This is a simplified version used when we already have the end position.
+    fn compute_scalar_base_indent(&self, value_pos: usize) -> usize {
+        // Find start of current line
+        let mut line_start = value_pos;
+        while line_start > 0 && self.text[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+
+        // Compute line indent (spaces at start of line)
+        Self::compute_line_indent_static(self.text, line_start)
+    }
+
     /// Compute the base indent for plain scalar continuation.
     /// For values on their own line (after key:), this returns the key's indent.
     /// For values on the same line as the key, this returns that line's indent.
     /// Compute base indent for plain scalar continuation checking.
     /// Returns (base_indent, is_document_root) where is_document_root is true
     /// if this scalar is the document root content (right after --- or at start).
+    #[allow(dead_code)]
     fn compute_base_indent_and_root_flag(&self, value_pos: usize) -> (usize, bool) {
         // Find start of current line
         let mut line_start = value_pos;
@@ -549,6 +584,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
 
     /// Check if a position is inside a flow context (inside `[]` or `{}`).
     /// Returns true if there's an unmatched `[` or `{` before the position.
+    #[allow(dead_code)]
     fn is_in_flow_context(&self, pos: usize) -> bool {
         // Find start of line containing pos
         let mut line_start = pos;
@@ -673,6 +709,7 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     /// A continuation line is more indented than base_indent (in block context),
     /// or any line that doesn't start with a flow delimiter (in flow context).
     /// For document root scalars (is_doc_root=true), continuation at indent 0 is allowed.
+    #[allow(dead_code)]
     fn find_plain_scalar_end(&self, start: usize, base_indent: usize, is_doc_root: bool) -> usize {
         let in_flow = self.is_in_flow_context(start);
         let mut end = start;

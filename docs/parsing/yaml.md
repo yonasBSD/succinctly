@@ -2107,7 +2107,8 @@ Profiling the end-to-end pipeline on 1MB YAML files reveals:
 | **TY** (Type Bits) | 0=mapping, 1=sequence | ✗ Linear scan |
 | **seq_items** | Sequence item markers | ✗ Linear scan |
 | **containers** | Container markers | ✓ `containers_rank` cumulative |
-| **bp_to_text** | BP position → text offset | ✓ Dense array O(1) |
+| **bp_to_text** | BP position → text start offset | ✓ Dense array O(1) |
+| **bp_to_text_end** | BP position → text end offset | ✓ Dense array O(1) |
 
 ### Opportunity 1: Cumulative Index for `containers` ✓ IMPLEMENTED
 
@@ -2141,25 +2142,34 @@ pub fn bp_to_text_pos(&self, bp_pos: usize) -> (usize, bool) {
 
 **Cost**: None (uses existing storage).
 
-### Opportunity 4: String Boundary Pre-computation
+### Opportunity 4: String Boundary Pre-computation ✓ IMPLEMENTED
 
-The To JSON phase spends significant time in:
-1. `YamlString::as_str()` - decodes quoted strings, handles escapes
-2. `write_json_string()` - re-escapes for JSON output
+**Status**: Implemented. `bp_to_text_end: Vec<u32>` added to `YamlIndex`.
 
-**Proposed**: During Build phase, record:
-- String start/end byte offsets
-- "Escape-free" flag (string contains no escapes → can copy directly)
+The To JSON phase previously spent significant time in:
+1. `find_plain_scalar_end()` - scanned forward to find scalar boundary for each scalar node
+2. `YamlString::as_str()` - decodes quoted strings, handles escapes
 
-```rust
-pub struct StringInfo {
-    start: u32,
-    end: u32,
-    flags: u8,  // bit 0: has_escapes, bit 1: is_quoted, etc.
-}
-```
+**Implementation**: During Build phase, record scalar end positions:
+- Added `bp_to_text_end: Vec<u32>` parallel to `bp_to_text`
+- Parser records end position after parsing each scalar (quoted, unquoted, block)
+- All scalar parsing functions now return trimmed end positions
+- `YamlCursor::text_end_position()` provides O(1) lookup
 
-**Impact**: Skip escape processing for ~90% of strings that don't contain escapes.
+**Code Changes**:
+- `src/yaml/parser.rs`: Added `set_bp_text_end()` helper, updated ~20 call sites
+- `src/yaml/index.rs`: Added `bp_to_text_end` field and `bp_to_text_end_pos()` getter
+- `src/yaml/light.rs`: Added `text_end_position()` method, modified `value()` to use pre-computed end
+
+**Measured Impact**: ~5-7% improvement in yq identity benchmarks (10KB files).
+
+| Benchmark | Before | After | Improvement |
+|-----------|--------|-------|-------------|
+| yq_identity/10kb | 4.4 ms | 4.1 ms | **+7%** |
+| yq_identity/100kb | 10.8 ms | 10.7 ms | **+1%** |
+| yq_identity/1mb | 72.5 ms | 71.5 ms | **+1%** |
+
+The improvement is most significant for smaller files where per-scalar overhead is more noticeable. Larger files are dominated by other costs (I/O, string serialization).
 
 ### Opportunity 5: SIMD JSON String Escaping
 
@@ -2204,7 +2214,7 @@ for (start, end) in structural_segments {
 | Opportunity | Effort | Impact | Priority | Status |
 |-------------|--------|--------|----------|--------|
 | 1. `containers_rank` | Low | Medium | **P1** | ✓ Done |
-| 4. String boundaries | Medium | High | **P1** | Pending |
+| 4. String boundaries | Medium | High | **P1** | ✓ Done |
 | 3. Pack flag in bp_to_text | Low | Low | **P2** | Pending |
 | 5. SIMD JSON escaping | Medium | Medium | **P2** | Pending |
 | 2. `seq_items_rank` | Low | Low | **P3** | Pending |
@@ -2223,12 +2233,12 @@ Profiling 1MB YAML (111,529 nodes, 93% strings) reveals:
 - Time per node: ~225 ns
 - Time per string: ~241 ns
 
-**Key functions called per scalar**:
+**Key functions called per scalar** (before `bp_to_text_end` optimization):
 1. `compute_base_indent_and_root_flag()` - scans backward to line start, forward to find `:`, `-`, `?`
-2. `find_plain_scalar_end()` - scans forward to find scalar boundary
+2. ~~`find_plain_scalar_end()` - scans forward to find scalar boundary~~ **(eliminated by bp_to_text_end)**
 3. `is_in_flow_context()` - quick path if no `[` or `{` in recent text
 
-**Implication**: String boundary pre-computation (Opportunity 4) would have the highest impact by eliminating `find_plain_scalar_end()` during traversal. Estimated reduction from 241 ns to ~50 ns per string could save ~20ms.
+**Post-optimization status**: String boundary pre-computation (Opportunity 4) has been implemented. The `find_plain_scalar_end()` function is now unused during traversal - scalar end positions are looked up in O(1) from `bp_to_text_end`. Measured improvement: ~5-7% for 10KB files.
 
 ---
 

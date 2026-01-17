@@ -94,6 +94,9 @@ pub struct SemiIndex {
     /// For each BP open (1-bit), this stores the corresponding byte offset.
     /// Containers may share position with first child.
     pub bp_to_text: Vec<u32>,
+    /// End positions for scalars. For each BP open, stores the end byte offset.
+    /// For containers, stores 0 (containers don't have a text end position).
+    pub bp_to_text_end: Vec<u32>,
     /// Sequence item marker bits: 1 if this BP position is a sequence item wrapper.
     /// Sequence items have BP open/close but no TY entry.
     pub seq_items: Vec<u64>,
@@ -131,6 +134,8 @@ struct Parser<'a> {
 
     // Direct BP-to-text mapping
     bp_to_text: Vec<u32>,
+    /// End positions for scalars (start is in bp_to_text, end is here)
+    bp_to_text_end: Vec<u32>,
 
     // Indentation tracking
     indent_stack: Vec<usize>,
@@ -172,6 +177,7 @@ impl<'a> Parser<'a> {
             bp_pos: 0,
             ty_pos: 0,
             bp_to_text: Vec::new(),
+            bp_to_text_end: Vec::new(),
             indent_stack: vec![0], // Start at indent 0
             type_stack: Vec::new(),
             anchors: BTreeMap::new(),
@@ -220,7 +226,18 @@ impl<'a> Parser<'a> {
         self.bp_words[word_idx] |= 1u64 << bit_idx;
         // Record the text position for this BP open
         self.bp_to_text.push(text_pos as u32);
+        // Placeholder for end position (will be set by set_bp_text_end for scalars)
+        self.bp_to_text_end.push(0);
         self.bp_pos += 1;
+    }
+
+    /// Set the end text position for the most recently opened BP node.
+    /// Call this before write_bp_close for scalar nodes.
+    #[inline]
+    fn set_bp_text_end(&mut self, end_pos: usize) {
+        if let Some(last) = self.bp_to_text_end.last_mut() {
+            *last = end_pos as u32;
+        }
     }
 
     /// Write a close parenthesis (0) to BP.
@@ -660,6 +677,7 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
@@ -667,6 +685,7 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'[') | Some(b'{') => {
@@ -687,10 +706,11 @@ impl<'a> Parser<'a> {
                 self.parse_mapping_entry(0)?;
             }
             Some(_) => {
-                // Plain scalar
+                // Plain scalar at document root
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(0);
+                let end = self.parse_unquoted_value_doc_root(0);
+                self.set_bp_text_end(end);
                 self.write_bp_close();
             }
             None => {}
@@ -804,18 +824,36 @@ impl<'a> Parser<'a> {
 
     /// Parse an unquoted scalar value with a minimum indentation requirement.
     /// Handles multiline plain scalars - continues on lines more indented than start_indent.
+    /// When `is_doc_root` is true, same-indent lines continue the scalar (YAML spec 7.4).
     fn parse_unquoted_value_with_indent(&mut self, start_indent: usize) -> usize {
+        self.parse_unquoted_value_with_indent_impl(start_indent, false)
+    }
+
+    /// Parse an unquoted scalar at document root level.
+    /// At document root, same-indent lines continue the scalar (YAML spec 7.4).
+    fn parse_unquoted_value_doc_root(&mut self, start_indent: usize) -> usize {
+        self.parse_unquoted_value_with_indent_impl(start_indent, true)
+    }
+
+    fn parse_unquoted_value_with_indent_impl(
+        &mut self,
+        start_indent: usize,
+        is_doc_root: bool,
+    ) -> usize {
         let start = self.pos;
+        // Track the actual end of content (before newlines we skip)
+        let mut content_end = start;
 
         loop {
+            let line_start = self.pos;
             // Parse content on current line
             // Use inline scalar loop for common case, SIMD for long runs
             while let Some(b) = self.peek() {
                 match b {
                     b'\n' => break,
                     b'#' => {
-                        // # is only a comment if preceded by whitespace
-                        if self.pos > start && self.input[self.pos - 1] == b' ' {
+                        // # is only a comment if preceded by whitespace (space or tab)
+                        if self.pos > start && matches!(self.input[self.pos - 1], b' ' | b'\t') {
                             break;
                         }
                         self.advance();
@@ -844,6 +882,12 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                 }
+            }
+
+            // Only update content_end if we parsed content on this line
+            // (Skip if we just returned from an empty line continuation)
+            if self.pos > line_start {
+                content_end = self.pos;
             }
 
             // Check if we can continue to next line
@@ -904,8 +948,9 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            // Continuation requires more indent than where scalar started
-            // and next line shouldn't start block structure or be a comment.
+            // Continuation requires more indent than where scalar started,
+            // EXCEPT at document root (start_indent == 0) where same-indent is allowed.
+            // Next line shouldn't start block structure or be a comment.
             //
             // For sequence indicators `- `, they're only block structure if at a
             // "proper" indent level. A `- ` at indent just 1 greater than start_indent
@@ -917,7 +962,11 @@ impl<'a> Parser<'a> {
             let sequence_indicator_is_block_structure = is_sequence_indicator
                 && (next_indent <= start_indent || next_indent >= start_indent + 2);
 
-            if next_indent > start_indent
+            // At document root, same-indent continues the scalar (YAML spec 7.4).
+            // Inside containers, must be more indented than start.
+            let indent_allows_continuation = is_doc_root || next_indent > start_indent;
+
+            if indent_allows_continuation
                 && next_char != b'#'
                 && !sequence_indicator_is_block_structure
                 && !(next_char == b':'
@@ -936,13 +985,14 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Trim trailing whitespace
-        let mut end = self.pos;
+        // Trim trailing whitespace from content_end
+        let mut end = content_end;
         while end > start && matches!(self.input[end - 1], b' ' | b'\t') {
             end -= 1;
         }
 
-        end - start
+        // Return absolute end position (not length)
+        end
     }
 
     /// Parse an unquoted key (stops at colon+space).
@@ -1003,7 +1053,8 @@ impl<'a> Parser<'a> {
         }
 
         // Empty key is valid in YAML (e.g., `: value`)
-        Ok(end - start)
+        // Return absolute end position
+        Ok(end)
     }
 
     /// Close containers that are at higher indent levels.
@@ -1174,17 +1225,18 @@ impl<'a> Parser<'a> {
         self.write_bp_open();
 
         // Parse the key
-        match self.peek() {
+        let key_end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_unquoted_key()?;
-            }
-        }
+            _ => self.parse_unquoted_key()?,
+        };
+        self.set_bp_text_end(key_end);
 
         // Close key node
         self.write_bp_close();
@@ -1213,7 +1265,8 @@ impl<'a> Parser<'a> {
             // Open value node
             self.set_ib();
             self.write_bp_open();
-            self.parse_inline_value(indent)?;
+            let end_pos = self.parse_inline_value(indent)?;
+            self.set_bp_text_end(end_pos);
             self.write_bp_close();
         }
 
@@ -1275,23 +1328,26 @@ impl<'a> Parser<'a> {
         }
 
         // Parse the key - check for empty key first (colon at start)
-        if self.peek() == Some(b':') {
+        let key_end = if self.peek() == Some(b':') {
             // Empty key - check that it's followed by proper terminator
             let next = self.peek_at(1);
             if matches!(next, Some(b' ') | Some(b'\t') | Some(b'\n') | None) {
                 // Empty key case - key length is 0, don't advance yet
+                self.pos
             } else {
                 // Colon followed by something else - not an empty key
-                self.parse_unquoted_key()?;
+                self.parse_unquoted_key()?
             }
         } else {
             // Parse the key
             match self.peek() {
                 Some(b'"') => {
                     self.parse_double_quoted()?;
+                    self.pos
                 }
                 Some(b'\'') => {
                     self.parse_single_quoted()?;
+                    self.pos
                 }
                 Some(b'*') => {
                     // Alias as key - parse alias name
@@ -1304,12 +1360,12 @@ impl<'a> Parser<'a> {
                     if let Some(&target_bp_pos) = self.anchors.get(&alias_name) {
                         self.aliases.insert(self.bp_pos - 1, target_bp_pos);
                     }
+                    self.pos
                 }
-                _ => {
-                    self.parse_unquoted_key()?;
-                }
+                _ => self.parse_unquoted_key()?,
             }
-        }
+        };
+        self.set_bp_text_end(key_end);
 
         // Close key node
         self.write_bp_close();
@@ -1403,7 +1459,8 @@ impl<'a> Parser<'a> {
                     // Plain scalar value - parse it here with key's indent as base
                     self.set_ib();
                     self.write_bp_open();
-                    self.parse_unquoted_value_with_indent(indent);
+                    let end_pos = self.parse_unquoted_value_with_indent(indent);
+                    self.set_bp_text_end(end_pos);
                     self.write_bp_close();
                     return Ok(());
                 }
@@ -1491,7 +1548,8 @@ impl<'a> Parser<'a> {
                     // Scalar value - wrap in BP
                     self.set_ib();
                     self.write_bp_open();
-                    self.parse_inline_value(indent)?;
+                    let end_pos = self.parse_inline_value(indent)?;
+                    self.set_bp_text_end(end_pos);
                     self.write_bp_close();
                 }
             }
@@ -1598,18 +1656,21 @@ impl<'a> Parser<'a> {
                 // Double-quoted key
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
                 // Single-quoted key
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             _ => {
                 // Unquoted scalar key
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(indent);
+                let end_pos = self.parse_unquoted_value_with_indent(indent);
+                self.set_bp_text_end(end_pos);
                 self.write_bp_close();
             }
         }
@@ -1688,12 +1749,14 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'*') => {
@@ -1703,7 +1766,8 @@ impl<'a> Parser<'a> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(indent);
+                let end_pos = self.parse_unquoted_value_with_indent(indent);
+                self.set_bp_text_end(end_pos);
                 self.write_bp_close();
             }
         }
@@ -1712,19 +1776,20 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an inline scalar value (on the same line as the key).
-    fn parse_inline_value(&mut self, min_indent: usize) -> Result<(), YamlError> {
-        match self.peek() {
+    /// Returns the end position of the scalar content.
+    fn parse_inline_value(&mut self, min_indent: usize) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_unquoted_value_with_indent(min_indent);
-            }
-        }
-        Ok(())
+            _ => self.parse_unquoted_value_with_indent(min_indent),
+        };
+        Ok(end)
     }
 
     /// Parse a value (could be scalar or nested structure).
@@ -1747,12 +1812,14 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'-') if self.peek_at(1) == Some(b' ') || self.peek_at(1) == Some(b'\t') => {
@@ -1774,7 +1841,8 @@ impl<'a> Parser<'a> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(min_indent);
+                let end_pos = self.parse_unquoted_value_with_indent(min_indent);
+                self.set_bp_text_end(end_pos);
                 self.write_bp_close();
             }
         }
@@ -1931,18 +1999,27 @@ impl<'a> Parser<'a> {
         // Parse key - can be scalar, quoted, flow mapping, or flow sequence
         self.set_ib();
         self.write_bp_open();
-        match self.peek() {
-            Some(b'{') => self.parse_flow_mapping()?,
-            Some(b'[') => self.parse_flow_sequence()?,
+        let key_end = match self.peek() {
+            Some(b'{') => {
+                self.parse_flow_mapping()?;
+                self.pos
+            }
+            Some(b'[') => {
+                self.parse_flow_sequence()?;
+                self.pos
+            }
             Some(b':') => {
                 // Empty key (null) - ?: means null key
                 // Don't consume anything, write empty node
+                self.pos
             }
             Some(b',') | Some(b']') | Some(b'}') => {
                 // Empty key (null) - ? followed by terminator
+                self.pos
             }
             _ => self.parse_explicit_flow_key_scalar()?,
-        }
+        };
+        self.set_bp_text_end(key_end);
         self.write_bp_close();
 
         // Skip whitespace before possible colon
@@ -1960,12 +2037,15 @@ impl<'a> Parser<'a> {
                 match self.peek() {
                     Some(b'[') => {
                         self.parse_flow_sequence()?;
+                        self.set_bp_text_end(self.pos);
                     }
                     Some(b'{') => {
                         self.parse_flow_mapping()?;
+                        self.set_bp_text_end(self.pos);
                     }
                     _ => {
-                        self.parse_flow_scalar()?;
+                        let end = self.parse_flow_scalar()?;
+                        self.set_bp_text_end(end);
                     }
                 }
                 self.write_bp_close();
@@ -1973,11 +2053,13 @@ impl<'a> Parser<'a> {
                 // Empty value (null)
                 self.set_ib();
                 self.write_bp_open();
+                // Null has no text end
                 self.write_bp_close();
             }
         } else {
             // No colon - value is null
             self.write_bp_open_at(self.input.len());
+            // Null has no text end
             self.write_bp_close();
         }
 
@@ -1998,11 +2080,18 @@ impl<'a> Parser<'a> {
         // Parse key - can be scalar, quoted, flow mapping, or flow sequence
         self.set_ib();
         self.write_bp_open();
-        match self.peek() {
-            Some(b'{') => self.parse_flow_mapping()?,
-            Some(b'[') => self.parse_flow_sequence()?,
+        let key_end = match self.peek() {
+            Some(b'{') => {
+                self.parse_flow_mapping()?;
+                self.pos
+            }
+            Some(b'[') => {
+                self.parse_flow_sequence()?;
+                self.pos
+            }
             _ => self.parse_flow_key_scalar()?,
-        }
+        };
+        self.set_bp_text_end(key_end);
         self.write_bp_close();
 
         // Skip whitespace before colon
@@ -2023,22 +2112,24 @@ impl<'a> Parser<'a> {
         if !matches!(self.peek(), Some(b',') | Some(b']') | Some(b'}') | None) {
             self.set_ib();
             self.write_bp_open();
-            match self.peek() {
+            let val_end = match self.peek() {
                 Some(b'[') => {
                     self.parse_flow_sequence()?;
+                    self.pos
                 }
                 Some(b'{') => {
                     self.parse_flow_mapping()?;
+                    self.pos
                 }
-                _ => {
-                    self.parse_flow_scalar()?;
-                }
-            }
+                _ => self.parse_flow_scalar()?,
+            };
+            self.set_bp_text_end(val_end);
             self.write_bp_close();
         } else {
             // Empty value (null)
             self.set_ib();
             self.write_bp_open();
+            // Null has no text end
             self.write_bp_close();
         }
 
@@ -2121,7 +2212,8 @@ impl<'a> Parser<'a> {
                         // Plain scalar value - wrap in BP
                         self.set_ib();
                         self.write_bp_open();
-                        self.parse_flow_scalar()?;
+                        let end = self.parse_flow_scalar()?;
+                        self.set_bp_text_end(end);
                         self.write_bp_close();
                     }
                 }
@@ -2186,6 +2278,7 @@ impl<'a> Parser<'a> {
             self.set_ib();
             self.write_bp_open();
             self.parse_flow_key()?;
+            self.set_bp_text_end(self.pos);
             self.write_bp_close();
 
             self.skip_flow_whitespace();
@@ -2219,7 +2312,8 @@ impl<'a> Parser<'a> {
                             // Scalar value - wrap in BP
                             self.set_ib();
                             self.write_bp_open();
-                            self.parse_flow_scalar()?;
+                            let end = self.parse_flow_scalar()?;
+                            self.set_bp_text_end(end);
                             self.write_bp_close();
                         }
                     }
@@ -2228,6 +2322,7 @@ impl<'a> Parser<'a> {
                 // Key without colon/value - emit empty value (implicit null)
                 self.set_ib();
                 self.write_bp_open();
+                // Null has no text end
                 self.write_bp_close();
             } else {
                 return Err(YamlError::UnexpectedCharacter {
@@ -2399,51 +2494,62 @@ impl<'a> Parser<'a> {
         }
 
         // Empty key is valid in YAML (e.g., `[ : value ]`)
-        Ok(end - start)
+        // Return absolute end position
+        Ok(end)
     }
 
     /// Parse a scalar value in flow context (string or unquoted).
-    fn parse_flow_scalar(&mut self) -> Result<(), YamlError> {
-        match self.peek() {
+    fn parse_flow_scalar(&mut self) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_flow_unquoted_value();
-            }
-        }
-        Ok(())
+            _ => self.parse_flow_unquoted_value(),
+        };
+        Ok(end)
     }
 
     /// Parse a flow key (for implicit mapping entries).
     /// Like parse_flow_scalar but also stops at `: ` (colon followed by space/flow indicator).
-    fn parse_flow_key_scalar(&mut self) -> Result<(), YamlError> {
-        match self.peek() {
+    fn parse_flow_key_scalar(&mut self) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
             _ => {
                 // Use existing parse_flow_unquoted_key which stops at `:`
-                self.parse_flow_unquoted_key()?;
+                self.parse_flow_unquoted_key()?
             }
-        }
-        Ok(())
+        };
+        Ok(end)
     }
 
     /// Parse an unquoted value in flow context.
-    /// Stops at `,`, `}`, `]`, or newline.
+    /// Stops at `,`, `}`, `]`, `#` (comment), or newline.
+    /// Returns the absolute end position (with trailing whitespace trimmed).
     fn parse_flow_unquoted_value(&mut self) -> usize {
         let start = self.pos;
 
         while let Some(b) = self.peek() {
             match b {
                 b',' | b'}' | b']' => break,
+                b'#' => {
+                    // # is a comment if preceded by whitespace
+                    if self.pos > start && matches!(self.input[self.pos - 1], b' ' | b'\t') {
+                        break;
+                    }
+                    self.advance();
+                }
                 b'\n' | b'\r' => {
                     // Multiline value - check if next line continues the value
                     let mut lookahead = self.pos;
@@ -2462,9 +2568,9 @@ impl<'a> Parser<'a> {
                     }
                     // Check what follows
                     if lookahead >= self.input.len()
-                        || matches!(self.input[lookahead], b',' | b'}' | b']')
+                        || matches!(self.input[lookahead], b',' | b'}' | b']' | b'#')
                     {
-                        // Delimiter or EOF - stop value here
+                        // Delimiter, comment, or EOF - stop value here
                         break;
                     }
                     // Continue parsing on next line
@@ -2487,25 +2593,25 @@ impl<'a> Parser<'a> {
             end -= 1;
         }
 
-        end - start
+        end
     }
 
     /// Parse an explicit flow key scalar.
     /// Unlike implicit flow keys which stop at `:`, explicit keys stop at `: ` (colon+space)
     /// because the colon is part of the explicit value syntax.
-    fn parse_explicit_flow_key_scalar(&mut self) -> Result<(), YamlError> {
-        match self.peek() {
+    fn parse_explicit_flow_key_scalar(&mut self) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_explicit_flow_unquoted_key()?;
-            }
-        }
-        Ok(())
+            _ => self.parse_explicit_flow_unquoted_key()?,
+        };
+        Ok(end)
     }
 
     /// Parse an explicit unquoted key in flow context.
@@ -2645,7 +2751,8 @@ impl<'a> Parser<'a> {
             end -= 1;
         }
 
-        Ok(end - start)
+        // Return absolute end position
+        Ok(end)
     }
 
     // =========================================================================
@@ -2863,6 +2970,7 @@ impl<'a> Parser<'a> {
                 Some(indent) => indent,
                 None => {
                     // Empty block scalar
+                    self.set_bp_text_end(self.pos);
                     self.write_bp_close();
                     return Ok(());
                 }
@@ -2870,9 +2978,10 @@ impl<'a> Parser<'a> {
         };
 
         // Consume content lines
-        let _content_end = self.consume_block_scalar_content(content_indent, header.chomping);
+        let content_end = self.consume_block_scalar_content(content_indent, header.chomping);
 
         // Close the block scalar node
+        self.set_bp_text_end(content_end);
         self.write_bp_close();
 
         Ok(())
@@ -2973,6 +3082,7 @@ impl<'a> Parser<'a> {
         // Forward references (alias before anchor) are not supported.
 
         // Close the alias node
+        self.set_bp_text_end(self.pos);
         self.write_bp_close();
 
         Ok(())
@@ -3013,6 +3123,7 @@ impl<'a> Parser<'a> {
             bp: self.bp_words.clone(),
             ty: self.ty_words.clone(),
             bp_to_text: self.bp_to_text.clone(),
+            bp_to_text_end: self.bp_to_text_end.clone(),
             seq_items: self.seq_item_words.clone(),
             containers: self.container_words.clone(),
             ib_len: self.input.len(),
@@ -3269,20 +3380,29 @@ impl<'a> Parser<'a> {
                             self.parse_value(indent)?;
                         }
                         _ => {
-                            // Scalar value
+                            // Scalar value - only doc_root if not inside a container
                             self.set_ib();
                             self.write_bp_open();
-                            match self.peek() {
+                            // type_stack.len() == 1 means we're inside only the virtual root sequence
+                            let is_truly_doc_root = self.type_stack.len() <= 1;
+                            let end_pos = match self.peek() {
                                 Some(b'"') => {
                                     self.parse_double_quoted()?;
+                                    self.pos
                                 }
                                 Some(b'\'') => {
                                     self.parse_single_quoted()?;
+                                    self.pos
                                 }
                                 _ => {
-                                    self.parse_unquoted_value_with_indent(indent);
+                                    if is_truly_doc_root {
+                                        self.parse_unquoted_value_doc_root(indent)
+                                    } else {
+                                        self.parse_unquoted_value_with_indent(indent)
+                                    }
                                 }
-                            }
+                            };
+                            self.set_bp_text_end(end_pos);
                             self.write_bp_close();
                         }
                     }
@@ -3306,21 +3426,31 @@ impl<'a> Parser<'a> {
                 if self.looks_like_mapping_entry() {
                     self.parse_mapping_entry(indent)?;
                 } else {
-                    // Bare scalar document (e.g., `---\nplain value` or `---\n"quoted"`)
+                    // Scalar value - either bare document scalar or value in a container
                     self.close_deeper_indents(indent);
                     self.set_ib();
                     self.write_bp_open();
-                    match self.peek() {
+                    // Only use doc_root mode if we're not inside any container
+                    // type_stack.len() == 1 means we're inside only the virtual root sequence
+                    let is_truly_doc_root = self.type_stack.len() <= 1;
+                    let end_pos = match self.peek() {
                         Some(b'"') => {
                             self.parse_double_quoted()?;
+                            self.pos
                         }
                         Some(b'\'') => {
                             self.parse_single_quoted()?;
+                            self.pos
                         }
                         _ => {
-                            self.parse_unquoted_value_with_indent(indent);
+                            if is_truly_doc_root {
+                                self.parse_unquoted_value_doc_root(indent)
+                            } else {
+                                self.parse_unquoted_value_with_indent(indent)
+                            }
                         }
-                    }
+                    };
+                    self.set_bp_text_end(end_pos);
                     self.write_bp_close();
                 }
             }

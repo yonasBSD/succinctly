@@ -41,6 +41,9 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Direct BP open index to text position mapping.
     /// Entry i = text byte offset for the i-th BP open.
     bp_to_text: Vec<u32>,
+    /// End positions for scalars. For each BP open, stores the end byte offset.
+    /// For containers, stores 0 (containers don't have a text end position).
+    bp_to_text_end: Vec<u32>,
     /// Sequence item markers - 1 if BP position is a sequence item wrapper
     seq_items: W,
     /// Container markers - 1 if BP position has a TY entry (is a mapping or sequence)
@@ -100,6 +103,7 @@ impl YamlIndex<Vec<u64>> {
             ty: semi.ty,
             ty_len: semi.ty_len,
             bp_to_text: semi.bp_to_text,
+            bp_to_text_end: semi.bp_to_text_end,
             seq_items: semi.seq_items,
             containers: semi.containers,
             containers_rank,
@@ -122,6 +126,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         ty: W,
         ty_len: usize,
         bp_to_text: Vec<u32>,
+        bp_to_text_end: Vec<u32>,
         seq_items: W,
         containers: W,
         anchors: BTreeMap<String, usize>,
@@ -138,6 +143,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             ty,
             ty_len,
             bp_to_text,
+            bp_to_text_end,
             seq_items,
             containers,
             containers_rank,
@@ -159,6 +165,19 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         // so the index is rank1(bp_pos) if the bit is 1
         let open_idx = self.bp.rank1(bp_pos);
         self.bp_to_text.get(open_idx).map(|&pos| pos as usize)
+    }
+
+    /// Get the text end byte offset for a BP position.
+    ///
+    /// For scalars, returns the end position. For containers and null values, returns `None`.
+    /// The value 0 is used as a sentinel meaning "no end position" (null/empty values).
+    #[inline]
+    pub fn bp_to_text_end_pos(&self, bp_pos: usize) -> Option<usize> {
+        let open_idx = self.bp.rank1(bp_pos);
+        self.bp_to_text_end
+            .get(open_idx)
+            .map(|&pos| pos as usize)
+            .filter(|&pos| pos > 0) // 0 is sentinel for "no end position"
     }
 
     /// Get a reference to the interest bits words.
