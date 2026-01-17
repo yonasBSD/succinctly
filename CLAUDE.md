@@ -208,6 +208,7 @@ For detailed documentation on optimisation techniques used in this project, see 
 - Simpler data structures often outperform complex ones due to cache behaviour
 - Caching hot values eliminates repeated lookups (type checking: 1-17% improvement)
 - Hardware prefetchers beat software prefetch for sequential access (prefetch: +30% regression!)
+- SIMD newline scanning + indentation checking enables fast block boundary detection (block scalars: 19-25% improvement!)
 
 **Recent YAML optimizations:**
 - ✅ P2.5 (Cached Type Checking): 1-17% improvement depending on nesting depth
@@ -217,3 +218,8 @@ For detailed documentation on optimisation techniques used in this project, see 
   - Modern CPU hardware prefetchers are superior for sequential parsing
   - Software prefetch causes cache pollution and interferes with hardware
   - See [docs/parsing/yaml.md#p26-software-prefetching-for-large-files---rejected-](docs/parsing/yaml.md#p26-software-prefetching-for-large-files---rejected-) for analysis
+- ✅ P2.7 (Block Scalar SIMD): **19-25% improvement** on block scalar parsing - **largest Phase 2 optimization!**
+  - AVX2 scans 32-byte chunks for newlines, checks indentation using SIMD
+  - 100x100 lines: 247 µs → 195 µs (-21%, 1.27x faster)
+  - Throughput: 1.39 GiB/s → 1.76 GiB/s (+27%)
+  - See [docs/parsing/yaml.md#p27-block-scalar-simd---accepted-](docs/parsing/yaml.md#p27-block-scalar-simd---accepted-) for full analysis

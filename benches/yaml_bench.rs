@@ -112,6 +112,33 @@ fn generate_mixed_yaml(target_size: usize) -> Vec<u8> {
     yaml
 }
 
+/// Generate block scalars (literal | style) for SIMD optimization testing.
+fn generate_block_scalars(count: usize, lines_per_block: usize) -> Vec<u8> {
+    let mut yaml = Vec::with_capacity(count * lines_per_block * 50);
+    for i in 0..count {
+        yaml.extend_from_slice(format!("block{}: |\n", i).as_bytes());
+        for j in 0..lines_per_block {
+            yaml.extend_from_slice(
+                format!("  This is line {} of block scalar {}\n", j, i).as_bytes(),
+            );
+        }
+    }
+    yaml
+}
+
+/// Generate long block scalars (stress test for SIMD block scanning).
+fn generate_long_block_scalars(count: usize, lines_per_block: usize) -> Vec<u8> {
+    let mut yaml = Vec::with_capacity(count * lines_per_block * 100);
+    let long_line = "x".repeat(80);
+    for i in 0..count {
+        yaml.extend_from_slice(format!("content{}: |\n", i).as_bytes());
+        for _ in 0..lines_per_block {
+            yaml.extend_from_slice(format!("  {}\n", long_line).as_bytes());
+        }
+    }
+    yaml
+}
+
 // ============================================================================
 // Benchmark Groups
 // ============================================================================
@@ -266,6 +293,39 @@ fn bench_long_strings(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark block scalars to measure SIMD block scanning optimization.
+fn bench_block_scalars(c: &mut Criterion) {
+    let mut group = c.benchmark_group("yaml/block_scalars");
+
+    // Test with various block sizes
+    for &(blocks, lines) in &[(10, 10), (50, 50), (100, 100), (10, 1000)] {
+        let label = format!("{}x{}lines", blocks, lines);
+        let yaml = generate_block_scalars(blocks, lines);
+        group.throughput(Throughput::Bytes(yaml.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(&label), &yaml, |b, yaml| {
+            b.iter(|| {
+                let index = YamlIndex::build(black_box(yaml)).unwrap();
+                black_box(index)
+            })
+        });
+    }
+
+    // Test long block scalars
+    for &(blocks, lines) in &[(10, 100), (50, 100), (100, 100)] {
+        let label = format!("long_{}x{}lines", blocks, lines);
+        let yaml = generate_long_block_scalars(blocks, lines);
+        group.throughput(Throughput::Bytes(yaml.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(&label), &yaml, |b, yaml| {
+            b.iter(|| {
+                let index = YamlIndex::build(black_box(yaml)).unwrap();
+                black_box(index)
+            })
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_simple_kv,
@@ -274,5 +334,6 @@ criterion_group!(
     bench_quoted_strings,
     bench_long_strings,
     bench_large_files,
+    bench_block_scalars,
 );
 criterion_main!(benches);

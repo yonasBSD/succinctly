@@ -2936,23 +2936,26 @@ impl<'a> Parser<'a> {
         content_indent: usize,
         chomping: ChompingIndicator,
     ) -> usize {
+        // Use SIMD to quickly find where the block scalar ends
+        let block_end = simd::find_block_scalar_end(self.input, self.pos, content_indent)
+            .unwrap_or(self.input.len());
+
+        // Now we need to walk through the content to find:
+        // 1. last_content_end - position after last non-empty line
+        // 2. trailing_newline_start - where trailing newlines begin
         let mut last_content_end = self.pos;
         let mut trailing_newline_start = self.pos;
 
-        loop {
-            if self.peek().is_none() {
-                break; // EOF ends block scalar
-            }
-
+        while self.pos < block_end {
             let line_start = self.pos;
 
             // Count spaces at start of line (SIMD accelerated)
-            let line_indent = self.skip_spaces_simd();
+            let _line_indent = self.skip_spaces_simd();
 
             // Check what's on this line
             match self.peek() {
                 Some(b'\n') => {
-                    // Empty line - include in content (counts as trailing newline area)
+                    // Empty line - part of trailing newlines
                     trailing_newline_start = line_start;
                     self.advance();
                 }
@@ -2964,21 +2967,10 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                 }
-                Some(b'#') if line_indent < content_indent => {
-                    // Comment at lower indent - end of block
-                    self.pos = line_start;
-                    break;
-                }
                 None => {
                     break; // EOF
                 }
                 _ => {
-                    if line_indent < content_indent {
-                        // Real content at lower indent - end of block scalar
-                        self.pos = line_start;
-                        break;
-                    }
-
                     // This is a content line - skip to end
                     self.skip_to_eol();
                     last_content_end = self.pos;
@@ -2995,6 +2987,9 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+
+        // Position should now be at block_end
+        self.pos = block_end;
 
         // Return position based on chomping
         match chomping {

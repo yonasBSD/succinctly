@@ -188,6 +188,59 @@ pub fn find_newline(input: &[u8], start: usize) -> Option<usize> {
     }
 }
 
+/// Find the end of a block scalar by scanning for a line with insufficient indentation.
+///
+/// Uses SIMD to find newlines and check indentation efficiently.
+/// Returns the position where the block ends (start of line with insufficient indent),
+/// or input.len() if EOF is reached.
+///
+/// This is used to quickly skip to the end of `|` (literal) or `>` (folded) block scalars.
+#[inline]
+pub fn find_block_scalar_end(input: &[u8], start: usize, min_indent: usize) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        x86::find_block_scalar_end(input, start, min_indent)
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        find_block_scalar_end_scalar(input, start, min_indent)
+    }
+}
+
+/// Scalar fallback for find_block_scalar_end
+#[allow(dead_code)]
+fn find_block_scalar_end_scalar(input: &[u8], start: usize, min_indent: usize) -> Option<usize> {
+    let mut pos = start;
+
+    while pos < input.len() {
+        if input[pos] == b'\n' {
+            let line_start = pos + 1;
+
+            if line_start >= input.len() {
+                return Some(input.len());
+            }
+
+            // Count leading spaces
+            let mut indent = 0;
+            while line_start + indent < input.len() && input[line_start + indent] == b' ' {
+                indent += 1;
+            }
+
+            // Check if this line has content at insufficient indent
+            if line_start + indent < input.len() {
+                let next_char = input[line_start + indent];
+                if next_char != b'\n' && next_char != b'\r' && indent < min_indent {
+                    return Some(line_start);
+                }
+            }
+        }
+        pos += 1;
+    }
+
+    Some(input.len())
+}
+
 /// Scalar implementation of find_newline.
 #[allow(dead_code)]
 fn find_newline_scalar(input: &[u8], start: usize) -> Option<usize> {

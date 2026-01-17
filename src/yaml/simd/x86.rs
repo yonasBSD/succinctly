@@ -543,6 +543,202 @@ unsafe fn count_leading_spaces_avx2(input: &[u8], start: usize) -> usize {
     offset + data[offset..].iter().take_while(|&&b| b == b' ').count()
 }
 
+// ============================================================================
+// Block Scalar Optimization
+// ============================================================================
+
+/// Find the end of a block scalar by scanning for a line with insufficient indentation.
+///
+/// Uses SIMD to find newlines and check indentation efficiently.
+/// Returns the position where the block ends (start of line with insufficient indent),
+/// or input.len() if EOF is reached.
+#[inline]
+pub fn find_block_scalar_end(input: &[u8], start: usize, min_indent: usize) -> Option<usize> {
+    if start >= input.len() {
+        return Some(input.len());
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return Some(unsafe { find_block_scalar_end_avx2(input, start, min_indent) });
+        }
+    }
+
+    // Fall back to SSE2
+    Some(unsafe { find_block_scalar_end_sse2(input, start, min_indent) })
+}
+
+#[cfg(any(test, feature = "std"))]
+#[target_feature(enable = "avx2")]
+unsafe fn find_block_scalar_end_avx2(input: &[u8], start: usize, min_indent: usize) -> usize {
+    let newline_vec = _mm256_set1_epi8(b'\n' as i8);
+    let space_vec = _mm256_set1_epi8(b' ' as i8);
+
+    let mut pos = start;
+
+    // Process in 32-byte chunks, looking for newlines
+    while pos + 32 < input.len() {
+        let chunk = _mm256_loadu_si256(input.as_ptr().add(pos) as *const __m256i);
+        let nl_matches = _mm256_cmpeq_epi8(chunk, newline_vec);
+        let mut nl_mask = _mm256_movemask_epi8(nl_matches) as u32;
+
+        if nl_mask != 0 {
+            // Found newline(s) in this chunk - check indentation after each
+            while nl_mask != 0 {
+                let offset = nl_mask.trailing_zeros() as usize;
+                let line_start = pos + offset + 1; // Position after newline
+
+                if line_start >= input.len() {
+                    return input.len(); // EOF
+                }
+
+                // Count leading spaces on next line
+                let mut indent = 0;
+                let remaining = input.len() - line_start;
+
+                // Use SIMD to count spaces
+                if remaining >= 32 {
+                    let next_chunk =
+                        _mm256_loadu_si256(input.as_ptr().add(line_start) as *const __m256i);
+                    let space_matches = _mm256_cmpeq_epi8(next_chunk, space_vec);
+                    let space_mask = _mm256_movemask_epi8(space_matches) as u32;
+
+                    if space_mask != 0xFFFF_FFFF {
+                        indent = (!space_mask).trailing_zeros() as usize;
+                    } else {
+                        indent = 32;
+                        // Continue counting if all 32 were spaces
+                        let mut check_pos = line_start + 32;
+                        while check_pos < input.len() && input[check_pos] == b' ' {
+                            indent += 1;
+                            check_pos += 1;
+                        }
+                    }
+                } else {
+                    // Less than 32 bytes remaining, count scalar
+                    while line_start + indent < input.len() && input[line_start + indent] == b' ' {
+                        indent += 1;
+                    }
+                }
+
+                // Check if this line has sufficient indent
+                if line_start + indent < input.len() {
+                    let next_char = input[line_start + indent];
+                    if next_char != b'\n' && next_char != b'\r' && indent < min_indent {
+                        // Content at insufficient indent - block ends here
+                        return line_start;
+                    }
+                }
+
+                // Clear this bit and check next newline
+                nl_mask &= nl_mask - 1;
+            }
+        }
+
+        pos += 32;
+    }
+
+    // Handle remainder with scalar code
+    find_block_scalar_end_scalar(input, pos, min_indent)
+}
+
+#[target_feature(enable = "sse2")]
+unsafe fn find_block_scalar_end_sse2(input: &[u8], start: usize, min_indent: usize) -> usize {
+    let newline_vec = _mm_set1_epi8(b'\n' as i8);
+    let space_vec = _mm_set1_epi8(b' ' as i8);
+
+    let mut pos = start;
+
+    // Process in 16-byte chunks
+    while pos + 16 < input.len() {
+        let chunk = _mm_loadu_si128(input.as_ptr().add(pos) as *const __m128i);
+        let nl_matches = _mm_cmpeq_epi8(chunk, newline_vec);
+        let mut nl_mask = _mm_movemask_epi8(nl_matches) as u32;
+
+        if nl_mask != 0 {
+            while nl_mask != 0 {
+                let offset = nl_mask.trailing_zeros() as usize;
+                let line_start = pos + offset + 1;
+
+                if line_start >= input.len() {
+                    return input.len();
+                }
+
+                // Count leading spaces (SSE2 version)
+                let mut indent = 0;
+                let remaining = input.len() - line_start;
+
+                if remaining >= 16 {
+                    let next_chunk =
+                        _mm_loadu_si128(input.as_ptr().add(line_start) as *const __m128i);
+                    let space_matches = _mm_cmpeq_epi8(next_chunk, space_vec);
+                    let space_mask = _mm_movemask_epi8(space_matches) as u32;
+
+                    if space_mask != 0xFFFF {
+                        indent = (!space_mask).trailing_zeros() as usize;
+                    } else {
+                        indent = 16;
+                        let mut check_pos = line_start + 16;
+                        while check_pos < input.len() && input[check_pos] == b' ' {
+                            indent += 1;
+                            check_pos += 1;
+                        }
+                    }
+                } else {
+                    while line_start + indent < input.len() && input[line_start + indent] == b' ' {
+                        indent += 1;
+                    }
+                }
+
+                if line_start + indent < input.len() {
+                    let next_char = input[line_start + indent];
+                    if next_char != b'\n' && next_char != b'\r' && indent < min_indent {
+                        return line_start;
+                    }
+                }
+
+                nl_mask &= nl_mask - 1;
+            }
+        }
+
+        pos += 16;
+    }
+
+    find_block_scalar_end_scalar(input, pos, min_indent)
+}
+
+fn find_block_scalar_end_scalar(input: &[u8], start: usize, min_indent: usize) -> usize {
+    let mut pos = start;
+
+    while pos < input.len() {
+        if input[pos] == b'\n' {
+            let line_start = pos + 1;
+
+            if line_start >= input.len() {
+                return input.len();
+            }
+
+            // Count leading spaces
+            let mut indent = 0;
+            while line_start + indent < input.len() && input[line_start + indent] == b' ' {
+                indent += 1;
+            }
+
+            // Check if this line has content at insufficient indent
+            if line_start + indent < input.len() {
+                let next_char = input[line_start + indent];
+                if next_char != b'\n' && next_char != b'\r' && indent < min_indent {
+                    return line_start;
+                }
+            }
+        }
+        pos += 1;
+    }
+
+    input.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
