@@ -1564,6 +1564,83 @@ fn parse_unquoted_value_with_indent(&mut self, start_indent: usize) -> usize {
 
 ---
 
+### Alternative: Pre-indexed Structural Characters
+
+An alternative approach is to pre-index all structural character positions upfront, then use succinct data structures for O(1) navigation.
+
+#### Concept
+
+Instead of calling `find_unquoted_structural` repeatedly during parsing:
+
+1. **One-time SIMD scan**: Build a bitvector marking all positions with `\n`, `#`, or `:`
+2. **Navigation via rank/select**: Use `select1(rank1(pos) + 1)` to jump to next structural char in O(1)
+
+```rust
+// Pre-indexing phase (once, O(n))
+let structural_bv = build_structural_bitvector(input);  // marks \n, #, : positions
+
+// Query phase (per value, O(1))
+fn next_structural(&self, pos: usize) -> Option<usize> {
+    let rank = self.structural_bv.rank1(pos);
+    self.structural_bv.select1(rank + 1)
+}
+```
+
+#### Analysis
+
+**Advantages:**
+- O(1) navigation after one-time O(n) scan
+- Eliminates repeated SIMD setup overhead
+- Natural fit for semi-indexing architecture
+
+**Disadvantages:**
+- Still requires context checks (is `#` preceded by space? is `:` followed by whitespace?)
+- Memory overhead: ~n/8 bytes for bitvector + rank directory
+- Doesn't address the root cause: most values are short
+
+**Comparison with current approach:**
+
+| Aspect | Per-value SIMD | Pre-indexed |
+|--------|----------------|-------------|
+| Setup cost | Per call | Once |
+| Memory | None | ~n/8 + rank |
+| Short values | High overhead | Still needs context check |
+| Long values | Efficient | More efficient |
+
+#### Better Alternative: Batch Classification
+
+The more natural fit is the simdjson-style approach where the **initial SIMD pass classifies all characters in bulk**:
+
+```rust
+// Pass 1 (SIMD): Classify ALL characters, build structural bitmasks
+for offset in (0..input.len()).step_by(32) {
+    let class = classify_yaml_chars(input, offset);  // Already implemented!
+
+    // Find ": " patterns with bit operations
+    let colon_space = class.colons & (class.spaces >> 1);
+
+    // Find "# " patterns (preceded by space)
+    let space_hash = (class.spaces << 1) & class.hash;
+
+    // Combine structural positions
+    structural_mask |= class.newlines | colon_space | space_hash;
+}
+
+// Pass 2 (Sequential): Walk bitmasks + input to build IB/BP/TY
+```
+
+This approach:
+- Uses the existing `classify_yaml_chars` function ([x86.rs:38-57](../../src/yaml/simd/x86.rs#L38-L57))
+- Classifies 8 character types simultaneously per 32-byte chunk
+- Uses bit operations to find patterns like `": "` without per-byte checks
+- Avoids the per-value SIMD calls that cause the current regression
+
+#### Recommendation
+
+For the current regression, the **scalar fast-path** (Opportunity 1+2) is the simplest fix. For future optimization, **batch classification** using `classify_yaml_chars` is the more promising direction as it aligns with simdjson's proven approach and leverages existing infrastructure.
+
+---
+
 ### Integration with Parser
 
 #### String Scanning
