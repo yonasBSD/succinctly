@@ -1149,12 +1149,77 @@ The `classify_yaml_chars` function calls `neon_movemask` 8 times (once per chara
 - These work because they only need **one** movemask call per chunk
 - Bulk classification should remain scalar on ARM64
 
-**Alternative Considered: Pure Broadword (SWAR)**
+---
 
-A pure u128 arithmetic approach without NEON intrinsics was considered but rejected:
-- Still requires ~15-20 arithmetic operations
-- No better than the NEON emulation
-- ARM64 has excellent scalar performance, making SIMD overhead harder to recoup
+### P4: Pure Broadword (SWAR) Classification - TESTED, NEUTRAL ⚖️
+
+**Status:** Implemented and benchmarked 2026-01-17. Code kept but disabled.
+
+Following the P3 NEON rejection, we implemented a pure broadword (SWAR) approach that avoids NEON intrinsics entirely, using only u64 arithmetic operations.
+
+**Implementation Details:**
+- Uses classic `(x - 0x0101...) & ~x & 0x8080...` trick to detect zero bytes
+- XOR with broadcast byte to find character matches
+- Multiplication trick (`0x0102040810204080`) to extract bitmask
+- Processes 8 bytes per u64, or 16 bytes using two operations
+- No NEON intrinsics, no SIMD→scalar lane extraction
+
+**Key Insight:** The multiplication trick magic constant must be `0x0102040810204080`, not `0x0002040810204081`. The former correctly maps bit positions 0,8,16,24,32,40,48,56 to result bits 0-7.
+
+**Code Location:** [`src/yaml/simd/neon.rs:171-367`](../../src/yaml/simd/neon.rs#L171-L367)
+
+**Micro-Benchmark Results (Apple M1 Max):**
+
+| Benchmark | Baseline | Broadword | Change |
+|-----------|----------|-----------|--------|
+| simple_kv/10 | 1.54 µs | 1.63 µs | **+6%** ❌ |
+| simple_kv/100 | 5.9 µs | 6.7 µs | **+14%** ❌ |
+| simple_kv/1000 | 48.3 µs | 55.2 µs | **+14%** ❌ |
+| large/1kb | 5.0 µs | 5.0 µs | **0%** |
+| large/10kb | 33.8 µs | 33.8 µs | **0%** |
+| large/100kb | 301 µs | 301 µs | **0%** |
+| large/1mb | 2.71 ms | 2.71 ms | **0%** |
+| long_strings/double/64b | 8.8 µs | 8.5 µs | **-3%** ✅ |
+| long_strings/double/1024b | 40.6 µs | 40.4 µs | **-0.5%** |
+| long_strings/double/4096b | 151 µs | 150 µs | **-1%** |
+
+**Analysis:**
+
+1. **Simple KV workloads: Regression** - Short keys/values don't benefit from 16-byte classification. The overhead of function calls, bitmask computation, and conditional checks outweighs any skip benefit.
+
+2. **Large files: Neutral** - The large file benchmarks show zero change because:
+   - Most values are still short (average ~20 bytes)
+   - The 16-byte threshold means we rarely activate SIMD
+   - When we do activate, the benefit is consumed by overhead
+
+3. **Long strings: Small improvement** - Only workloads with genuinely long unquoted values (>64 bytes) show improvement, and even then only ~3%.
+
+**Why Broadword Failed to Help:**
+
+| Factor | Expected | Reality |
+|--------|----------|---------|
+| Bytes per operation | 16 | 16 (same as NEON) |
+| Operations per classify | ~24 arithmetic ops | ~24 (correct) |
+| Overhead vs scalar | Lower (no intrinsics) | Similar (still function call + branching) |
+| Break-even point | ~16 bytes | >64 bytes |
+| Typical YAML value length | 5-30 bytes | Too short to benefit |
+
+**Conclusion:** The broadword approach is algorithmically correct and faster than NEON movemask emulation, but:
+
+1. ❌ **Overhead too high** for typical YAML values (5-30 bytes)
+2. ❌ **Break-even point too high** (~64+ bytes needed for benefit)
+3. ❌ **ARM64 scalar is excellent** - simple byte-by-byte loop is well-optimized
+4. ⚖️ **Neutral on large files** - no regression, but no improvement either
+
+**Decision:** Code is kept but integration is disabled. The infrastructure may be useful for:
+- YAML documents with unusually long unquoted values
+- Future optimization attempts with different activation strategies
+- Reference implementation for other projects
+
+**Code kept at:**
+- Broadword primitives: [`src/yaml/simd/neon.rs:171-220`](../../src/yaml/simd/neon.rs#L171-L220)
+- Classification functions: [`src/yaml/simd/neon.rs:253-367`](../../src/yaml/simd/neon.rs#L253-L367)
+- Parser integration (disabled): [`src/yaml/parser.rs:438-471`](../../src/yaml/parser.rs#L438-L471)
 
 ---
 

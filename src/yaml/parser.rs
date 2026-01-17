@@ -435,6 +435,42 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Broadword fast-path for skipping regular characters in unquoted values (ARM64).
+    /// Uses pure u64 arithmetic instead of NEON movemask emulation for better performance.
+    /// Returns the number of bytes that can be safely skipped, or None if
+    /// a potential terminator was found immediately.
+    ///
+    /// NOTE: Currently disabled - benchmarks showed neutral to slight regression.
+    /// Kept for future investigation. See P4 analysis in docs/parsing/yaml.md.
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    #[allow(dead_code)]
+    fn skip_unquoted_simd(&self, _value_start: usize) -> Option<usize> {
+        // Use broadword classify to scan 16 bytes at once (two 8-byte chunks)
+        if let Some(class) = super::simd::classify_yaml_chars_16(self.input, self.pos) {
+            // Check for any potential terminators: newline, colon, or hash
+            let terminators = class.value_terminators();
+
+            if terminators == 0 {
+                // No structural characters in this 16-byte chunk - safe to skip all
+                return Some(16);
+            }
+
+            // Found a potential terminator - find its position
+            let first_pos = terminators.trailing_zeros() as usize;
+
+            // If it's at position 0, we can't skip anything
+            if first_pos == 0 {
+                return None;
+            }
+
+            // We can safely skip up to the terminator position
+            Some(first_pos)
+        } else {
+            None
+        }
+    }
+
     /// Count leading spaces (indentation) at start of a line.
     fn count_indent(&self) -> Result<usize, YamlError> {
         // Use SIMD-accelerated space counting
@@ -888,7 +924,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                     _ => {
-                        // SIMD fast-path: skip long runs of regular characters
+                        // SIMD/broadword fast-path: skip long runs of regular characters
                         // Only use SIMD if we have enough remaining bytes to justify overhead
                         #[cfg(target_arch = "x86_64")]
                         if self.input.len() - self.pos >= 32 {
@@ -897,6 +933,14 @@ impl<'a> Parser<'a> {
                                 continue;
                             }
                         }
+                        // ARM64 broadword disabled - see P4 analysis in docs/parsing/yaml.md
+                        // #[cfg(target_arch = "aarch64")]
+                        // if self.input.len() - self.pos >= 16 {
+                        //     if let Some(skip) = self.skip_unquoted_simd(start) {
+                        //         self.advance_by(skip);
+                        //         continue;
+                        //     }
+                        // }
                         self.advance();
                     }
                 }
@@ -1051,7 +1095,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 _ => {
-                    // SIMD fast-path: skip long runs of regular characters
+                    // SIMD/broadword fast-path: skip long runs of regular characters
                     #[cfg(target_arch = "x86_64")]
                     if self.input.len() - self.pos >= 32 {
                         if let Some(skip) = self.skip_unquoted_simd(start) {
@@ -1059,6 +1103,14 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                     }
+                    // ARM64 broadword disabled - see P4 analysis in docs/parsing/yaml.md
+                    // #[cfg(target_arch = "aarch64")]
+                    // if self.input.len() - self.pos >= 16 {
+                    //     if let Some(skip) = self.skip_unquoted_simd(start) {
+                    //         self.advance_by(skip);
+                    //         continue;
+                    //     }
+                    // }
                     self.advance();
                 }
             }

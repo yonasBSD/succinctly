@@ -24,6 +24,12 @@ mod x86;
 #[cfg(target_arch = "x86_64")]
 pub use x86::YamlCharClass;
 
+// Re-export ARM64 broadword types for P0 optimizations
+// NOTE: Currently unused - broadword integration is disabled. See P4 analysis.
+#[cfg(target_arch = "aarch64")]
+#[allow(unused_imports)]
+pub use neon::{YamlCharClass16, YamlCharClassBroadword};
+
 // ============================================================================
 // Public API - platform-dispatched functions
 // ============================================================================
@@ -130,10 +136,35 @@ pub fn classify_yaml_chars(input: &[u8], offset: usize) -> Option<YamlCharClass>
     x86::classify_yaml_chars(input, offset)
 }
 
+/// Classify 16 bytes of YAML structural characters using broadword operations.
+///
+/// ARM64 version using pure u64 arithmetic instead of NEON movemask emulation.
+/// Returns classification bitmasks for 8 character types at once.
+///
+/// NOTE: Currently unused - broadword integration is disabled. See P4 analysis.
+#[inline]
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+pub fn classify_yaml_chars_16(input: &[u8], offset: usize) -> Option<YamlCharClass16> {
+    neon::classify_yaml_chars_16(input, offset)
+}
+
+/// Classify 8 bytes of YAML structural characters using broadword operations.
+///
+/// ARM64 version for smaller chunks.
+///
+/// NOTE: Currently unused - broadword integration is disabled. See P4 analysis.
+#[inline]
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+pub fn classify_yaml_chars_8(input: &[u8], offset: usize) -> Option<YamlCharClassBroadword> {
+    neon::classify_yaml_chars_broadword(input, offset)
+}
+
 /// Find the next newline (`\n`) from the given position.
 ///
 /// Returns offset from `start` to the newline, or `None` if not found.
-/// Uses SIMD for fast scanning on supported platforms.
+/// Uses SIMD/broadword for fast scanning on supported platforms.
 #[inline]
 #[allow(dead_code)]
 pub fn find_newline(input: &[u8], start: usize) -> Option<usize> {
@@ -146,7 +177,12 @@ pub fn find_newline(input: &[u8], start: usize) -> Option<usize> {
         x86::find_newline_x86(input, start)
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::find_newline_broadword(input, start)
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         find_newline_scalar(input, start)
     }
