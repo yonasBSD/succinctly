@@ -1293,6 +1293,11 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::ModuleMeta(name) => builtin_modulemeta(name, value, optional),
         Builtin::Pick(keys) => builtin_pick(keys, value, optional),
 
+        // YAML metadata functions (yq)
+        Builtin::Tag => builtin_tag(value),
+        Builtin::Anchor => builtin_anchor(),
+        Builtin::Style => builtin_style(value),
+
         // Phase 11: Path manipulation
         Builtin::Del(path) => builtin_del(path, value, optional),
     }
@@ -5148,6 +5153,9 @@ fn substitute_var_in_builtin(
             Builtin::ModuleMeta(Box::new(substitute_var(e, var_name, replacement)))
         }
         Builtin::Pick(e) => Builtin::Pick(Box::new(substitute_var(e, var_name, replacement))),
+        Builtin::Tag => Builtin::Tag,
+        Builtin::Anchor => Builtin::Anchor,
+        Builtin::Style => Builtin::Style,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
     }
 }
@@ -7883,6 +7891,52 @@ fn builtin_pick<'a, W: Clone + AsRef<[u64]>>(
     }
 }
 
+// Builtin: tag - return YAML type tag (!!str, !!int, !!map, etc.)
+// Since we evaluate on JSON/OwnedValue (not raw YAML), we derive the tag from the JSON type.
+fn builtin_tag<'a, W: Clone + AsRef<[u64]>>(value: StandardJson<'a, W>) -> QueryResult<'a, W> {
+    let tag = match &value {
+        StandardJson::Null => "!!null",
+        StandardJson::Bool(_) => "!!bool",
+        StandardJson::Number(n) => {
+            // Distinguish int from float
+            if n.as_i64().is_ok() {
+                "!!int"
+            } else {
+                "!!float"
+            }
+        }
+        StandardJson::String(_) => "!!str",
+        StandardJson::Array(_) => "!!seq",
+        StandardJson::Object(_) => "!!map",
+        StandardJson::Error(_) => "!!null",
+    };
+    QueryResult::Owned(OwnedValue::String(tag.to_string()))
+}
+
+// Builtin: anchor - return anchor name if present
+// Since YAML metadata is lost during conversion to OwnedValue, this always returns empty string.
+// In a full yq implementation, this would require tracking anchor metadata through the pipeline.
+fn builtin_anchor<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
+    // Currently YAML anchors are not preserved through the OwnedValue conversion.
+    // Return empty string to match yq behavior for values without anchors.
+    QueryResult::Owned(OwnedValue::String(String::new()))
+}
+
+// Builtin: style - return scalar/collection style
+// Since YAML style metadata is lost during conversion to OwnedValue, this returns
+// reasonable defaults based on the JSON structure.
+fn builtin_style<'a, W: Clone + AsRef<[u64]>>(value: StandardJson<'a, W>) -> QueryResult<'a, W> {
+    let style = match &value {
+        // Collections: yq returns "flow" for flow-style, empty for block-style
+        // Since we lose this info, we return empty string (block-style is more common)
+        StandardJson::Array(_) | StandardJson::Object(_) => "",
+        // Scalars: yq returns "double", "single", "literal", "folded", or empty for plain
+        // Since we lose quote info, we return empty string (plain scalar)
+        _ => "",
+    };
+    QueryResult::Owned(OwnedValue::String(style.to_string()))
+}
+
 // ============================================================================
 // Phase 9: Variables & Definitions
 // ============================================================================
@@ -8772,6 +8826,9 @@ fn expand_func_calls_in_builtin(
             Builtin::ModuleMeta(Box::new(expand_func_calls(e, func_name, params, body)))
         }
         Builtin::Pick(e) => Builtin::Pick(Box::new(expand_func_calls(e, func_name, params, body))),
+        Builtin::Tag => Builtin::Tag,
+        Builtin::Anchor => Builtin::Anchor,
+        Builtin::Style => Builtin::Style,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
     }
 }
@@ -8957,6 +9014,9 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
             Builtin::ModuleMeta(Box::new(substitute_func_param(e, param, arg)))
         }
         Builtin::Pick(e) => Builtin::Pick(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::Tag => Builtin::Tag,
+        Builtin::Anchor => Builtin::Anchor,
+        Builtin::Style => Builtin::Style,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
     }
 }
@@ -11581,6 +11641,132 @@ mod tests {
                 assert_eq!(*a, OwnedValue::Int(1));
                 let b = obj.get("b").unwrap();
                 assert_eq!(*b, OwnedValue::Int(2));
+            }
+        );
+    }
+
+    // ========================================================================
+    // YAML Metadata Functions (yq)
+    // ========================================================================
+
+    #[test]
+    fn test_tag_null() {
+        query!(br#"null"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!null");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_bool() {
+        query!(br#"true"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!bool");
+            }
+        );
+        query!(br#"false"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!bool");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_int() {
+        query!(br#"42"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!int");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_float() {
+        query!(br#"3.14"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!float");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_string() {
+        query!(br#""hello""#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!str");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_array() {
+        query!(br#"[1, 2, 3]"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!seq");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_object() {
+        query!(br#"{"a": 1}"#, "tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!map");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_nested() {
+        // Test tag on nested values
+        query!(br#"{"value": 42}"#, ".value | tag",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "!!int");
+            }
+        );
+    }
+
+    #[test]
+    fn test_anchor_returns_empty() {
+        // anchor always returns empty string (metadata not preserved)
+        query!(br#"{"a": 1}"#, "anchor",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "");
+            }
+        );
+    }
+
+    #[test]
+    fn test_style_returns_empty() {
+        // style always returns empty string (metadata not preserved)
+        query!(br#""hello""#, "style",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "");
+            }
+        );
+        query!(br#"[1, 2, 3]"#, "style",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "");
+            }
+        );
+        query!(br#"{"a": 1}"#, "style",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "");
+            }
+        );
+    }
+
+    #[test]
+    fn test_tag_with_map() {
+        // Test tag with map function
+        query!(br#"[1, "hello", true, null]"#, "map(tag)",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 4);
+                assert_eq!(arr[0], OwnedValue::String("!!int".to_string()));
+                assert_eq!(arr[1], OwnedValue::String("!!str".to_string()));
+                assert_eq!(arr[2], OwnedValue::String("!!bool".to_string()));
+                assert_eq!(arr[3], OwnedValue::String("!!null".to_string()));
             }
         );
     }

@@ -2498,6 +2498,24 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Pick(Box::new(keys))));
         }
 
+        // tag - yq: return YAML type tag (!!str, !!int, !!map, etc.)
+        if self.matches_keyword("tag") {
+            self.consume_keyword("tag");
+            return Ok(Some(Builtin::Tag));
+        }
+
+        // anchor - yq: return anchor name if present
+        if self.matches_keyword("anchor") {
+            self.consume_keyword("anchor");
+            return Ok(Some(Builtin::Anchor));
+        }
+
+        // style - yq: return scalar/collection style
+        if self.matches_keyword("style") {
+            self.consume_keyword("style");
+            return Ok(Some(Builtin::Style));
+        }
+
         Ok(None)
     }
 

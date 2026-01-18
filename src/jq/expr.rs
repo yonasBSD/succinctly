@@ -733,6 +733,14 @@ pub enum Builtin {
     /// `pick(keys)` - select only specified keys from object/array (yq)
     Pick(Box<Expr>),
 
+    // YAML metadata functions (yq)
+    /// `tag` - return YAML type tag (!!str, !!int, !!map, etc.)
+    Tag,
+    /// `anchor` - return anchor name if present, or empty string
+    Anchor,
+    /// `style` - return scalar style (double, single, literal, folded) or collection style (flow)
+    Style,
+
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path
     Del(Box<Expr>),
