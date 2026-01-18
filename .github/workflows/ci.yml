@@ -34,6 +34,9 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
+      - name: Build CLI (for integration tests)
+        run: cargo build --features cli --bin succinctly
+
       - name: Run tests
         run: cargo test --verbose
 
@@ -69,6 +72,9 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
+      - name: Build CLI (for integration tests)
+        run: cargo build --features cli --bin succinctly
+
       - name: Run tests
         run: cargo test --verbose
 
@@ -100,6 +106,9 @@ jobs:
 
       - name: Build
         run: cargo build --verbose
+
+      - name: Build CLI (for integration tests)
+        run: cargo build --features cli --bin succinctly
 
       - name: Run tests
         run: cargo test --verbose
