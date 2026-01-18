@@ -1166,6 +1166,7 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
 
         // Phase 10: Object functions
         Builtin::ModuleMeta(name) => builtin_modulemeta(name, value, optional),
+        Builtin::Pick(keys) => builtin_pick(keys, value, optional),
 
         // Phase 11: Path manipulation
         Builtin::Del(path) => builtin_del(path, value, optional),
@@ -4602,6 +4603,7 @@ fn substitute_var_in_builtin(
         Builtin::ModuleMeta(e) => {
             Builtin::ModuleMeta(Box::new(substitute_var(e, var_name, replacement)))
         }
+        Builtin::Pick(e) => Builtin::Pick(Box::new(substitute_var(e, var_name, replacement))),
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
     }
 }
@@ -6877,6 +6879,89 @@ fn builtin_modulemeta<'a, W: Clone + AsRef<[u64]>>(
     QueryResult::Owned(OwnedValue::Null)
 }
 
+/// Builtin: pick(keys) - select only specified keys from object/array (yq)
+fn builtin_pick<'a, W: Clone + AsRef<[u64]>>(
+    keys_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate the keys expression to get the array of keys
+    let keys_owned = match eval_single(keys_expr, value.clone(), optional) {
+        QueryResult::One(v) => to_owned(&v),
+        QueryResult::OneCursor(c) => to_owned(&c.value()),
+        QueryResult::Owned(v) => v,
+        QueryResult::ManyOwned(v) if !v.is_empty() => v.into_iter().next().unwrap(),
+        QueryResult::ManyOwned(_) => {
+            return QueryResult::Error(EvalError::new("pick: keys expression produced no output"))
+        }
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::None if optional => return QueryResult::None,
+        QueryResult::None => {
+            return QueryResult::Error(EvalError::new("pick: keys expression produced no output"))
+        }
+        QueryResult::Many(v) if !v.is_empty() => to_owned(&v.into_iter().next().unwrap()),
+        QueryResult::Many(_) => {
+            return QueryResult::Error(EvalError::new("pick: keys expression produced no output"))
+        }
+    };
+
+    // Keys must be an array
+    let keys = match &keys_owned {
+        OwnedValue::Array(arr) => arr,
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::new("pick: argument must be an array of keys")),
+    };
+
+    match &value {
+        StandardJson::Object(fields) => {
+            // For objects, pick specified string keys
+            let mut result = IndexMap::new();
+            for key in keys {
+                if let OwnedValue::String(k) = key {
+                    // Find the field in the object
+                    for field in *fields {
+                        if let StandardJson::String(key_str) = field.key() {
+                            if let Ok(cow) = key_str.as_str() {
+                                if cow.as_ref() == k.as_str() {
+                                    result.insert(k.clone(), to_owned(&field.value()));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // If key not found, yq silently skips it
+                }
+            }
+            QueryResult::Owned(OwnedValue::Object(result))
+        }
+        StandardJson::Array(elements) => {
+            // For arrays, pick specified indices
+            let arr: Vec<_> = (*elements).collect();
+            let len = arr.len() as i64;
+            let mut result = Vec::new();
+
+            for key in keys {
+                let idx = match key {
+                    OwnedValue::Int(i) => *i,
+                    OwnedValue::Float(f) => *f as i64,
+                    _ => continue, // Skip non-numeric indices
+                };
+
+                // Handle negative indices
+                let actual_idx = if idx < 0 { len + idx } else { idx };
+
+                if actual_idx >= 0 && actual_idx < len {
+                    result.push(to_owned(&arr[actual_idx as usize]));
+                }
+                // If index out of bounds, yq silently skips it
+            }
+            QueryResult::Owned(OwnedValue::Array(result))
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::new("pick: input must be an object or array")),
+    }
+}
+
 // ============================================================================
 // Phase 9: Variables & Definitions
 // ============================================================================
@@ -7749,6 +7834,7 @@ fn expand_func_calls_in_builtin(
         Builtin::ModuleMeta(e) => {
             Builtin::ModuleMeta(Box::new(expand_func_calls(e, func_name, params, body)))
         }
+        Builtin::Pick(e) => Builtin::Pick(Box::new(expand_func_calls(e, func_name, params, body))),
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
     }
 }
@@ -7919,6 +8005,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::ModuleMeta(e) => {
             Builtin::ModuleMeta(Box::new(substitute_func_param(e, param, arg)))
         }
+        Builtin::Pick(e) => Builtin::Pick(Box::new(substitute_func_param(e, param, arg))),
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
     }
 }

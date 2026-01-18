@@ -698,6 +698,8 @@ pub enum Builtin {
     // Phase 10: Object functions
     /// `modulemeta(name)` - get module metadata (stub for compatibility)
     ModuleMeta(Box<Expr>),
+    /// `pick(keys)` - select only specified keys from object/array (yq)
+    Pick(Box<Expr>),
 
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path

@@ -64,6 +64,7 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `has(key)`
 - [x] `in(obj)`
 - [x] `to_entries` / `from_entries` / `with_entries(f)`
+- [x] `pick(keys)` - select only specified keys (yq)
 - [x] Object construction: `{foo: .bar}`, `{(expr): value}`, shorthand `{foo}`
 
 ### Array Operations
@@ -299,3 +300,4 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2025-01-19 | Initial document created from audit       |
 | 2025-01-19 | Added assignment operators (✅ complete)  |
 | 2025-01-19 | Added env variable access (✅ complete)   |
+| 2026-01-19 | Added pick() function for yq (✅ complete)|

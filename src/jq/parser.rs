@@ -2416,6 +2416,18 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::ModuleMeta(Box::new(name))));
         }
 
+        // pick(keys) - yq: select only specified keys from object/array
+        if self.matches_keyword("pick") {
+            self.consume_keyword("pick");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let keys = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Pick(Box::new(keys))));
+        }
+
         Ok(None)
     }
 
