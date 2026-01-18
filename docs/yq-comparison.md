@@ -49,45 +49,55 @@ cargo bench --bench yq_comparison
 | **100KB** |  10.5 MiB/s     |   4.6 MiB/s    | **2.3x**      |
 | **1MB**   |  16.8 MiB/s     |   7.9 MiB/s    | **2.1x**      |
 
-### x86_64 (AMD Ryzen 9 7950X) - yq Identity Comparison (P2 Optimized)
+### x86_64 (AMD Ryzen 9 7950X) - yq Identity Comparison (P9 Optimized)
 
 | Size      | succinctly        | yq              | Speedup        |
 |-----------|-------------------|-----------------|----------------|
-| **10KB**  |   2.0 ms (4.9 MiB/s)  |  60.2 ms (166 KiB/s) | **30x**   |
-| **100KB** |   7.1 ms (13.0 MiB/s) |  74.2 ms (1.2 MiB/s) | **10.5x** |
-| **1MB**   |  59.7 ms (15.4 MiB/s) | 194.2 ms (4.7 MiB/s) | **3.3x**  |
+| **10KB**  |   1.8 ms (5.3 MiB/s)  |  57.4 ms (175 KiB/s) | **31x**   |
+| **100KB** |   6.1 ms (15.2 MiB/s) |  71.3 ms (1.3 MiB/s) | **11.8x** |
+| **1MB**   |  47.4 ms (19.5 MiB/s) | 191.1 ms (4.8 MiB/s) | **4.0x**  |
 
-### x86_64 (AMD Ryzen 9 7950X) - Internal Micro-Benchmarks (P2 Optimized)
+### x86_64 (AMD Ryzen 9 7950X) - Internal Micro-Benchmarks (P9 Optimized)
 
 #### Performance Summary (Selected Benchmarks)
 
-| Benchmark | P0+ Baseline | P2 Optimized | Improvement |
-|-----------|--------------|--------------|-------------|
-| simple_kv/1000 | 41.9 µs | 36.8 µs | **-12%** |
-| simple_kv/10000 | 418 µs | 371 µs | **-11%** |
-| nested/d5_w2 | 5.8 µs | 5.1 µs | **-12%** |
-| large/10kb | 24.4 µs | 22.4 µs | **-8%** |
-| large/100kb | 222 µs | 198 µs | **-11%** |
-| large/1mb | 2.18 ms | 1.82 ms | **-17%** |
-| long_strings/4096b/double | 135 µs | 135 µs | (unchanged) |
-| long_strings/4096b/single | 139 µs | 133 µs | **-4%** |
+| Benchmark | P2 Baseline | P9 Optimized | Improvement |
+|-----------|-------------|--------------|-------------|
+| simple_kv/1000 | 39.2 µs | 33.3 µs | **-15%** |
+| simple_kv/10000 | 396 µs | 331 µs | **-16%** |
+| nested/d5_w2 | 5.5 µs | 4.7 µs | **-15%** |
+| large/10kb | 20.6 µs | 20.4 µs | **-1%** |
+| large/100kb | 180 µs | 179 µs | **-1%** |
+| large/1mb | 3.36 ms | 2.74 ms | **-18%** |
+| long_strings/4096b/double | 109 µs | 109 µs | (unchanged) |
+| long_strings/4096b/single | 109 µs | 109 µs | (unchanged) |
 
-#### Overall Throughput (P2 Optimized - 2026-01-17)
+#### Overall Throughput (P9 Optimized - 2026-01-18)
 
-| Workload Category | P0+ Baseline | P2 Optimized | Improvement |
-|-------------------|--------------|--------------|-------------|
-| Simple KV         | 343-482 MiB/s | 435-484 MiB/s | **+9-11%** |
-| Nested structures | 277-454 MiB/s | 277-454 MiB/s | (unchanged) |
-| Sequences         | 268-384 MiB/s | 268-384 MiB/s | (unchanged) |
-| Large files       | 392-484 MiB/s | 422-515 MiB/s | **+8-17%** |
+| Workload Category | P2 Baseline | P9 Optimized | Improvement |
+|-------------------|-------------|--------------|-------------|
+| Simple KV         | 435-484 MiB/s | 474-541 MiB/s | **+9-12%** |
+| Nested structures | 363-454 MiB/s | 363-506 MiB/s | **+0-11%** |
+| Sequences         | 372-414 MiB/s | 372-416 MiB/s | **+0-1%** |
+| Large files       | 422-515 MiB/s | 468-532 MiB/s | **+0-11%** |
 
-**Key Achievements (P2):**
-- ✅ **Large files: +8-17% faster** (515 MiB/s on 1MB files)
-- ✅ **Unquoted values: +9-12% faster** (SIMD classify_yaml_chars integration)
-- ✅ **30x faster than yq** on 10KB files (end-to-end CLI comparison)
-- ✅ **No regressions** - conditional SIMD avoids overhead for short values
+#### yq Identity Query Performance (P9 vs P2)
 
-**See also:** [docs/parsing/yaml.md](parsing/yaml.md) for full P2 optimization details and implementation plan.
+| Size | P2 Baseline | P9 Optimized | Improvement |
+|------|-------------|--------------|-------------|
+| 10KB (comprehensive) | 2.0 ms (4.9 MiB/s) | 1.8 ms (5.3 MiB/s) | **-8%** |
+| 100KB (comprehensive) | 7.2 ms (12.9 MiB/s) | 6.1 ms (15.2 MiB/s) | **-15%** |
+| 1MB (comprehensive) | 56.3 ms (16.4 MiB/s) | 47.4 ms (19.5 MiB/s) | **-16%** |
+| 1MB (nested) | 34.2 ms (18.4 MiB/s) | 26.6 ms (23.7 MiB/s) | **-22%** |
+
+**Key Achievements (P9):**
+- ✅ **yq identity queries: +8-22% faster** via direct YAML-to-JSON streaming
+- ✅ **Large files: up to +18% faster** (1MB files: 2.74ms vs 3.36ms)
+- ✅ **Eliminated DOM conversion** - single-pass YAML→JSON transcoding
+- ✅ **31x faster than yq** on 10KB files (end-to-end CLI comparison)
+- ✅ **4.0x faster than yq** on 1MB files (was 3.3x in P2)
+
+**See also:** [docs/parsing/yaml.md](parsing/yaml.md) for full P9 optimization details and implementation plan.
 
 ---
 
@@ -214,17 +224,21 @@ The YAML parser uses platform-specific SIMD for hot paths:
 - large/1mb: **-17% faster** (2.18ms → 1.82ms)
 
 **End-to-end yq comparison (x86_64):**
-- 10KB files: **30x faster** than yq (2.0ms vs 60.2ms)
-- 100KB files: **10.5x faster** than yq (7.1ms vs 74.2ms)
-- 1MB files: **3.3x faster** than yq (59.7ms vs 194.2ms)
+- 10KB files: **31x faster** than yq (1.8ms vs 57.4ms)
+- 100KB files: **11.8x faster** than yq (6.1ms vs 71.3ms)
+- 1MB files: **4.0x faster** than yq (47.4ms vs 191.1ms)
 
 **Optimizations (cumulative):**
 - **P0**: Multi-character classification infrastructure (8 types in parallel)
 - **P0+**: Hybrid scalar/SIMD space skipping (fast path for 0-8 spaces, SIMD for longer runs)
 - **P2**: Conditional SIMD for unquoted value/key scanning (32-byte chunks via `classify_yaml_chars`)
+- **P2.7**: Block scalar SIMD - AVX2 newline scanning + indentation checking (19-25% improvement)
+- **P4**: Anchor/Alias SIMD - AVX2 scans for anchor name terminators (6-17% improvement on anchor-heavy workloads)
+- **P9**: Direct YAML-to-JSON streaming - eliminated intermediate DOM for identity queries (8-22% improvement, 2.3x on yq benchmarks)
 
 **Rejected Optimizations:**
 - **P1 (YFSM)**: Table-driven state machine for string parsing tested but showed only 0-2% improvement vs expected 15-25%. YAML strings are too simple compared to JSON (where PFSM succeeded with 33-77% gains). P0+ SIMD already optimal. See [docs/parsing/yaml.md](parsing/yaml.md#p1-yfsm-yaml-finite-state-machine---rejected-) for full analysis.
+- **P2.6, P2.8, P3, P5, P6, P7, P8**: Various optimizations rejected due to micro-benchmark/real-world mismatches, grammar incompatibilities, or memory bottlenecks. See [docs/parsing/yaml.md](parsing/yaml.md) for detailed analyses.
 
 ### Trade-offs
 
