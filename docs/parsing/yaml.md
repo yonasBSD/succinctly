@@ -949,8 +949,6 @@ See [Tuning Opportunities](#unquoted-structural-scanning-tuning) below for propo
 - Integrated into 3 hot paths: sequence indent checking, block scalar indentation
 - Avoids SIMD dispatch overhead for typical 2-4 space YAML indents
 
-**Full results:** [.ai/scratch/yaml_p0_plus_integration_summary.md](../../.ai/scratch/yaml_p0_plus_integration_summary.md)
-
 ---
 
 ### P1: YFSM (YAML Finite State Machine) - REJECTED ❌
@@ -989,8 +987,6 @@ Attempted to replicate JSON's PFSM success (33-77% improvement) by implementing 
 | Baseline performance | ~600 MiB/s | ~990 MiB/s (P0+ SIMD) |
 | SIMD applicability | Moderate (complex patterns) | High (simple quote/escape) |
 | Table lookup cost | Worth it (complex logic) | Not worth it (simple SIMD wins) |
-
-**Full analysis:** [.ai/scratch/yfsm_experiment_results.md](../../.ai/scratch/yfsm_experiment_results.md)
 
 ---
 

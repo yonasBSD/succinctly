@@ -157,3 +157,7 @@ harness = false
 [[bench]]
 name = "yaml_transcode_micro"
 harness = false
+
+[[bench]]
+name = "yq_select"
+harness = false
