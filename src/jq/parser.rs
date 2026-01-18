@@ -2522,6 +2522,12 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Kind));
         }
 
+        // key - yq: return current key when iterating
+        if self.matches_keyword("key") {
+            self.consume_keyword("key");
+            return Ok(Some(Builtin::Key));
+        }
+
         Ok(None)
     }
 

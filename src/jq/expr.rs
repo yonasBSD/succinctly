@@ -742,6 +742,8 @@ pub enum Builtin {
     Style,
     /// `kind` - return node kind: "scalar", "seq", or "map"
     Kind,
+    /// `key` - return the current key when iterating (yq)
+    Key,
 
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path

@@ -151,12 +151,13 @@ fn to_owned<W: Clone + AsRef<[u64]>>(value: &StandardJson<'_, W>) -> OwnedValue 
     }
 }
 
-/// Check if an expression contains PathNoArg or Parent builtins that need path context.
+/// Check if an expression contains PathNoArg, Parent, or Key builtins that need path context.
 fn needs_path_context(expr: &Expr) -> bool {
     match expr {
         Expr::Builtin(Builtin::PathNoArg) => true,
         Expr::Builtin(Builtin::Parent) => true,
         Expr::Builtin(Builtin::ParentN(_)) => true,
+        Expr::Builtin(Builtin::Key) => true,
         Expr::Pipe(exprs) => exprs.iter().any(needs_path_context),
         Expr::Paren(inner) => needs_path_context(inner),
         Expr::Optional(inner) => needs_path_context(inner),
@@ -1298,6 +1299,11 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Anchor => builtin_anchor(),
         Builtin::Style => builtin_style(value),
         Builtin::Kind => builtin_kind(value),
+        Builtin::Key => {
+            // Key requires path context which is handled in eval_pipe_with_context
+            // If we reach here without context, return null (at root level)
+            QueryResult::Owned(OwnedValue::Null)
+        }
 
         // Phase 11: Path manipulation
         Builtin::Del(path) => builtin_del(path, value, optional),
@@ -5158,6 +5164,7 @@ fn substitute_var_in_builtin(
         Builtin::Anchor => Builtin::Anchor,
         Builtin::Style => Builtin::Style,
         Builtin::Kind => Builtin::Kind,
+        Builtin::Key => Builtin::Key,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
     }
 }
@@ -5969,6 +5976,30 @@ fn eval_pipe_with_path_context_internal<'a, W: Clone + AsRef<[u64]>>(
         }
         // Continue with remaining expressions
         if let QueryResult::Owned(v) = path_result {
+            return eval_pipe_with_path_context_internal::<W>(
+                rest,
+                &v,
+                root,
+                current_path,
+                optional,
+            );
+        }
+    }
+
+    // Handle Key - return the last element of current path (current key)
+    if matches!(first, Expr::Builtin(Builtin::Key)) {
+        let key_result = if current_path.is_empty() {
+            // At root - return null (yq behavior)
+            QueryResult::Owned(OwnedValue::Null)
+        } else {
+            // Get the last element of the path (the current key)
+            QueryResult::Owned(current_path.last().unwrap().clone())
+        };
+        if rest.is_empty() {
+            return key_result;
+        }
+        // Continue with remaining expressions
+        if let QueryResult::Owned(v) = key_result {
             return eval_pipe_with_path_context_internal::<W>(
                 rest,
                 &v,
@@ -8844,6 +8875,7 @@ fn expand_func_calls_in_builtin(
         Builtin::Anchor => Builtin::Anchor,
         Builtin::Style => Builtin::Style,
         Builtin::Kind => Builtin::Kind,
+        Builtin::Key => Builtin::Key,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
     }
 }
@@ -9033,6 +9065,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Anchor => Builtin::Anchor,
         Builtin::Style => Builtin::Style,
         Builtin::Kind => Builtin::Kind,
+        Builtin::Key => Builtin::Key,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
     }
 }
@@ -11890,6 +11923,68 @@ mod tests {
                 assert_eq!(arr[1], OwnedValue::String("scalar".to_string()));
                 assert_eq!(arr[2], OwnedValue::String("seq".to_string()));
                 assert_eq!(arr[3], OwnedValue::String("map".to_string()));
+            }
+        );
+    }
+
+    // ============================================================================
+    // key function tests (yq)
+    // ============================================================================
+
+    #[test]
+    fn test_key_object() {
+        // Test key on object iteration
+        query!(br#"{"a": 1, "b": 2, "c": 3}"#, ".[] | key",
+            QueryResult::ManyOwned(results) => {
+                assert_eq!(results.len(), 3);
+                // Check that all results are string keys
+                let keys: Vec<String> = results.iter().filter_map(|v| {
+                    if let OwnedValue::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                }).collect();
+                assert!(keys.contains(&"a".to_string()));
+                assert!(keys.contains(&"b".to_string()));
+                assert!(keys.contains(&"c".to_string()));
+            }
+        );
+    }
+
+    #[test]
+    fn test_key_array() {
+        // Test key on array iteration - returns indices
+        query!(b"[10, 20, 30]", ".[] | key",
+            QueryResult::ManyOwned(results) => {
+                assert_eq!(results.len(), 3);
+                // Check that we get indices 0, 1, 2
+                let indices: Vec<i64> = results.iter().filter_map(|v| {
+                    if let OwnedValue::Int(i) = v {
+                        Some(*i)
+                    } else {
+                        None
+                    }
+                }).collect();
+                assert_eq!(indices, vec![0, 1, 2]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_key_at_root() {
+        // Test key at root level - returns null
+        query!(br#"{"a": 1}"#, "key",
+            QueryResult::Owned(OwnedValue::Null) => {}
+        );
+    }
+
+    #[test]
+    fn test_key_nested() {
+        // Test key on nested access
+        query!(br#"{"outer": {"inner": 42}}"#, ".outer | .[] | key",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "inner");
             }
         );
     }

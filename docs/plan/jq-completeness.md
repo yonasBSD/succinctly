@@ -184,6 +184,7 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `anchor` - return anchor name (returns empty string; metadata not preserved)
 - [x] `style` - return scalar/collection style (returns empty string; metadata not preserved)
 - [x] `kind` - return node kind (scalar, seq, map) - fully working
+- [x] `key` - return current key when iterating (string for objects, int for arrays) - fully working
 
 ---
 
@@ -299,3 +300,4 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-19 | Added tojson / fromjson for JSON string conversion (✅ complete)|
 | 2026-01-19 | Added YAML metadata functions: tag, anchor, style for yq (✅ partial - tag works fully, anchor/style return defaults)|
 | 2026-01-19 | Added kind function for yq - returns node kind: scalar, seq, map (✅ complete)|
+| 2026-01-19 | Added key function for yq - returns current key when iterating (✅ complete)|
