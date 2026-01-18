@@ -280,6 +280,83 @@ cargo bench --bench yq_select
 
 ---
 
+## Compatibility with yq
+
+### Drop-in Replacement Status
+
+**`succinctly yq` is now yq-compatible** for YAML scalar type preservation. Quoted strings are preserved as strings, and unquoted scalars undergo YAML type detection.
+
+### Type Preservation Behavior
+
+`succinctly yq` correctly implements YAML 1.2 type preservation:
+
+**Example**:
+```yaml
+# Source YAML
+version: "1.0"   # Quoted string
+id: "001"        # Quoted string
+number: 123      # Unquoted number
+code: "007"      # Quoted string
+```
+
+**Output (both `yq` and `succinctly yq`):**
+```json
+{
+  "version": "1.0",
+  "id": "001",
+  "number": 123,
+  "code": "007"
+}
+```
+
+**Behavior**:
+- **Quoted strings** (`"1.0"`, `"001"`) are always output as JSON strings
+- **Unquoted scalars** (`123`, `true`, `null`) undergo type detection per YAML 1.2 spec
+- **Preserves semantic meaning** of the original YAML document
+
+### Compatible Query Patterns
+
+✓ **All standard yq query patterns produce identical output**:
+
+| Pattern | Example | Notes |
+|---------|---------|-------|
+| Identity | `.` | Full document output |
+| Field selection | `.users[].name` | String and number fields |
+| Filtering | `.users[] \| select(.age > 30)` | Comparison operations |
+| Boolean selection | `.users[] \| select(.active)` | Boolean values |
+| Array indexing | `.users[0]` | Array element access |
+| Nested paths | `.config.version` | Preserves quoted strings |
+| Number fields | `.scores.total` | Unquoted numbers |
+| Quoted numbers | `.id` | Preserves `"001"` as string |
+
+### Migration from yq
+
+`succinctly yq` can be used as a drop-in replacement for `yq` in most scenarios:
+
+```bash
+# These produce identical output:
+yq -o json '.' file.yaml
+succinctly yq -o json '.' file.yaml
+
+# Version strings preserved correctly
+$ echo 'version: "1.0"' | succinctly yq -o json '.'
+{"version":"1.0"}
+
+# Leading-zero IDs preserved
+$ echo 'id: "001"' | succinctly yq -o json '.'
+{"id":"001"}
+```
+
+### Performance Benefits
+
+`succinctly yq` offers significant performance advantages over `yq`:
+- **4.0x faster** on 1MB files (AMD Ryzen 9 7950X)
+- **31x faster** on 10KB files (AMD Ryzen 9 7950X)
+- **Lower memory usage** on large files
+- **Streaming architecture** for better scalability
+- **Full yq compatibility** for type preservation
+---
+
 ## Reproducing Benchmarks
 
 ```bash
