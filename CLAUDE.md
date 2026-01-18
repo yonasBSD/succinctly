@@ -120,6 +120,32 @@ echo '["a","b|c","d"]' | jq -r '@dsv("|")'      # Output: a|"b|c"|d
 echo '["a","b","c"]' | jq -r '@dsv(";")'        # Output: a;b;c
 ```
 
+### jq Assignment Operators
+
+The jq implementation supports assignment operators for modifying JSON in-place:
+
+| Operator   | Syntax               | Description                                          | Example                    |
+|------------|----------------------|------------------------------------------------------|----------------------------|
+| **=**      | `.path = value`      | Simple assignment                                    | `.a = 42`                  |
+| **\|=**    | `.path \|= filter`   | Update assignment (applies filter to current value)  | `.a \|= . + 1`             |
+| **+=**     | `.path += value`     | Compound add (equivalent to `.path \|= . + value`)   | `.count += 10`             |
+| **-=**     | `.path -= value`     | Compound subtract                                    | `.health -= 25`            |
+| ***=**     | `.path *= value`     | Compound multiply                                    | `.scale *= 2`              |
+| **/=**     | `.path /= value`     | Compound divide                                      | `.total /= 4`              |
+| **%=**     | `.path %= value`     | Compound modulo                                      | `.index %= 10`             |
+| **//=**    | `.path //= value`    | Alternative assignment (sets only if null/false)     | `.default //= "fallback"`  |
+| **del()**  | `del(.path)`         | Delete field or array element                        | `del(.temporary)`          |
+
+```bash
+# Examples
+echo '{"a": 1}' | succinctly jq '.a = 42'           # {"a": 42}
+echo '{"x": 5}' | succinctly jq '.x |= . * 2'       # {"x": 10}
+echo '{"n": 10}' | succinctly jq '.n += 5'          # {"n": 15}
+echo '{"a": null}' | succinctly jq '.a //= "default"'  # {"a": "default"}
+echo '{"a": 1, "b": 2}' | succinctly jq 'del(.a)'   # {"b": 2}
+echo '[1, 2, 3]' | succinctly jq '.[] |= . * 2'     # [2, 4, 6]
+```
+
 ## Feature Flags
 
 | Feature             | Description                    |

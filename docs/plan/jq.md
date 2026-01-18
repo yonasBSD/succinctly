@@ -44,11 +44,21 @@ Support basic jq path syntax for navigating JSON:
 
 ### Phase 4: Advanced (Future)
 
-- Recursive descent `..`
-- Pipe operator `|`
-- Arithmetic and comparison operators
-- String interpolation
-- `reduce`, `group_by`, `sort_by`
+- Recursive descent `..` ✅ Implemented
+- Pipe operator `|` ✅ Implemented
+- Arithmetic and comparison operators ✅ Implemented
+- String interpolation ✅ Implemented
+- `reduce`, `group_by`, `sort_by` ✅ Implemented
+
+### Phase 5: Assignment Operators ✅ Implemented
+
+| Expression         | Meaning                                    |
+|--------------------|-------------------------------------------|
+| `.a = value`       | Simple assignment                          |
+| `.a \|= filter`    | Update assignment (apply filter to value)  |
+| `.a += value`      | Compound add (also -=, *=, /=, %=)         |
+| `.a //= value`     | Alternative assignment (set if null/false) |
+| `del(.a)`          | Delete field or array element              |
 
 ---
 

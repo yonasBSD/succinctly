@@ -407,6 +407,65 @@ cat data.json | succinctly jq '.items[]'
 succinctly jq . input.json | diff - <(jq . input.json)
 ```
 
+### Assignment Operators
+
+The jq command supports assignment operators for modifying JSON in-place:
+
+```bash
+# Simple assignment
+echo '{"a": 1}' | succinctly jq '.a = 42'
+# Output: {"a": 42}
+
+# Update assignment (applies filter to current value)
+echo '{"x": 5}' | succinctly jq '.x |= . * 2'
+# Output: {"x": 10}
+
+# Compound assignment (+=, -=, *=, /=, %=)
+echo '{"count": 10}' | succinctly jq '.count += 5'
+# Output: {"count": 15}
+
+echo '{"value": 100}' | succinctly jq '.value -= 25'
+# Output: {"value": 75}
+
+# Alternative assignment (sets only if null/false)
+echo '{"a": null}' | succinctly jq '.a //= "default"'
+# Output: {"a": "default"}
+
+echo '{"a": "existing"}' | succinctly jq '.a //= "default"'
+# Output: {"a": "existing"}  (unchanged)
+
+# Delete field or array element
+echo '{"a": 1, "b": 2}' | succinctly jq 'del(.a)'
+# Output: {"b": 2}
+
+echo '[1, 2, 3]' | succinctly jq 'del(.[1])'
+# Output: [1, 3]
+
+# Update all array elements
+echo '[1, 2, 3]' | succinctly jq '.[] |= . * 2'
+# Output: [2, 4, 6]
+
+# Chained assignments
+echo '{"x": 0, "y": 0}' | succinctly jq '.x = 10 | .y = 20'
+# Output: {"x": 10, "y": 20}
+
+# Nested assignment
+echo '{"user": {"name": "Alice", "age": 30}}' | succinctly jq '.user.age += 1'
+# Output: {"user": {"name": "Alice", "age": 31}}
+```
+
+| Operator | Syntax             | Description                                         |
+|----------|--------------------|-----------------------------------------------------|
+| `=`      | `.path = value`    | Simple assignment                                   |
+| `\|=`    | `.path \|= filter` | Update assignment (apply filter to current value)   |
+| `+=`     | `.path += value`   | Add to current value                                |
+| `-=`     | `.path -= value`   | Subtract from current value                         |
+| `*=`     | `.path *= value`   | Multiply current value                              |
+| `/=`     | `.path /= value`   | Divide current value                                |
+| `%=`     | `.path %= value`   | Modulo of current value                             |
+| `//=`    | `.path //= value`  | Set only if current value is null or false          |
+| `del()`  | `del(.path)`       | Delete field or array element                       |
+
 ## Development
 
 Run tests for the CLI:

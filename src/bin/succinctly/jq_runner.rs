@@ -415,6 +415,24 @@ fn rewrite_namespaced_calls(expr: Expr) -> Expr {
                 .collect();
             Expr::StringInterpolation(new_parts)
         }
+        // Assignment operators
+        Expr::Assign { path, value } => Expr::Assign {
+            path: Box::new(rewrite_namespaced_calls(*path)),
+            value: Box::new(rewrite_namespaced_calls(*value)),
+        },
+        Expr::Update { path, filter } => Expr::Update {
+            path: Box::new(rewrite_namespaced_calls(*path)),
+            filter: Box::new(rewrite_namespaced_calls(*filter)),
+        },
+        Expr::CompoundAssign { op, path, value } => Expr::CompoundAssign {
+            op,
+            path: Box::new(rewrite_namespaced_calls(*path)),
+            value: Box::new(rewrite_namespaced_calls(*value)),
+        },
+        Expr::AlternativeAssign { path, value } => Expr::AlternativeAssign {
+            path: Box::new(rewrite_namespaced_calls(*path)),
+            value: Box::new(rewrite_namespaced_calls(*value)),
+        },
         // Expressions that don't contain sub-expressions - return as-is
         Expr::Identity
         | Expr::Field(_)

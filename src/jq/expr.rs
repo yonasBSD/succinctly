@@ -232,6 +232,45 @@ pub enum Expr {
         /// Arguments (empty for no-arg calls)
         args: Vec<Expr>,
     },
+
+    // Assignment operators
+    /// Simple assignment: `.a = value`
+    /// Sets the path to the value and returns the modified input.
+    Assign {
+        /// Path expression (left side)
+        path: Box<Expr>,
+        /// Value expression (right side)
+        value: Box<Expr>,
+    },
+
+    /// Update assignment: `.a |= f`
+    /// Applies filter f to the value at path and updates it.
+    Update {
+        /// Path expression (left side)
+        path: Box<Expr>,
+        /// Filter expression (right side)
+        filter: Box<Expr>,
+    },
+
+    /// Compound assignment: `.a += value`, `.a -= value`, etc.
+    /// Equivalent to `.a |= . op value`
+    CompoundAssign {
+        /// Assignment operator type
+        op: AssignOp,
+        /// Path expression (left side)
+        path: Box<Expr>,
+        /// Value expression (right side)
+        value: Box<Expr>,
+    },
+
+    /// Alternative assignment: `.a //= value`
+    /// Sets path to value only if current value is null or false.
+    AlternativeAssign {
+        /// Path expression (left side)
+        path: Box<Expr>,
+        /// Default value expression (right side)
+        value: Box<Expr>,
+    },
 }
 
 /// A complete jq program including module directives and the main expression.
@@ -655,6 +694,10 @@ pub enum Builtin {
     // Phase 10: Object functions
     /// `modulemeta(name)` - get module metadata (stub for compatibility)
     ModuleMeta(Box<Expr>),
+
+    // Phase 11: Path manipulation
+    /// `del(path)` - delete value at path
+    Del(Box<Expr>),
 }
 
 /// Arithmetic operators.
@@ -687,6 +730,21 @@ pub enum CompareOp {
     Gt,
     /// Greater than or equal: `>=`
     Ge,
+}
+
+/// Compound assignment operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignOp {
+    /// Addition assignment: `+=`
+    Add,
+    /// Subtraction assignment: `-=`
+    Sub,
+    /// Multiplication assignment: `*=`
+    Mul,
+    /// Division assignment: `/=`
+    Div,
+    /// Modulo assignment: `%=`
+    Mod,
 }
 
 /// An entry in an object construction expression.
