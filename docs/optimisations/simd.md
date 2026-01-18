@@ -107,12 +107,20 @@ unsafe fn popcount_avx512(words: &[u64; 8]) -> u64 {
 
 **When AVX-512 wins**: Compute-bound operations like popcount (5.2x faster).
 
-**When AVX-512 loses**: Memory-bound operations like JSON parsing (7-17% slower).
+**When AVX-512 loses**: Memory-bound operations like JSON parsing (7-17% slower) and YAML parsing (7% slower at 64B).
 
 **Why it can be slower**:
-1. Zen 4 splits AVX-512 into 2×256-bit micro-ops
-2. Higher power consumption causes frequency throttling
-3. Memory bandwidth is the bottleneck, not compute
+1. **Memory bandwidth bottleneck**: Sequential text parsing saturates RAM bandwidth at AVX2 width already
+2. **Zen 4 splits AVX-512 ops**: Physical execution units are 256-bit wide, so 512-bit ops split into two 256-bit micro-ops (overhead without benefit)
+3. **Higher power → frequency throttling**: CPU may reduce clock speed with AVX-512
+4. **Benchmark design matters**: Measuring loop iterations vs actual work can show misleading "wins"
+
+**Lessons from YAML P8 rejection (2026-01-18)**:
+- AVX-512 showed 7% regression at realistic 64B chunk size
+- Apparent "2x wins" at 256B+ were benchmark artifacts (half the loop iterations, not twice the efficiency)
+- Real parsing scans linearly → AVX2 and AVX-512 do same total work, but AVX-512 adds overhead
+- **Pattern**: When JSON AVX-512 failed (7-17% slower), YAML AVX-512 also failed (same memory-bound workload)
+- See [docs/parsing/yaml.md](../parsing/yaml.md#p8-avx-512-variants---rejected-) for full analysis
 
 ---
 
@@ -289,6 +297,64 @@ unsafe fn process_64_avx2(data: &[u8; 64]) -> u64 {
 
 ---
 
+## Successful SIMD Optimizations
+
+### YAML Unquoted Structural Skip (+3-8%)
+
+**Pattern**: Use SIMD to find the next structural character (`\n`, `#`, `:`) in unquoted
+values, then handle context-aware validation at scalar level.
+
+```rust
+// NEON implementation - find next \n, #, or :
+let newline_vec = vdupq_n_u8(b'\n');
+let hash_vec = vdupq_n_u8(b'#');
+let colon_vec = vdupq_n_u8(b':');
+
+while offset + 16 <= len {
+    let chunk = vld1q_u8(data.as_ptr().add(offset));
+
+    // Compare against all three targets
+    let newlines = vceqq_u8(chunk, newline_vec);
+    let hashes = vceqq_u8(chunk, hash_vec);
+    let colons = vceqq_u8(chunk, colon_vec);
+
+    // OR all results together
+    let matches = vorrq_u8(vorrq_u8(newlines, hashes), colons);
+    let mask = neon_movemask(matches);
+
+    if mask != 0 {
+        return Some(offset + mask.trailing_zeros() as usize);
+    }
+    offset += 16;
+}
+```
+
+**Benchmark results** (Apple M1 Max):
+
+| Size   | Before       | After        | Improvement     |
+|--------|--------------|--------------|-----------------|
+| 10 KB  | 28.9 µs      | 28.3 µs      | **+3.8%**       |
+| 100 KB | 264 µs       | 257 µs       | **+5.2%**       |
+| 1 MB   | 2.51 ms      | 2.33 ms      | **+8.3%**       |
+
+**Why it works** (unlike previous YAML SIMD attempts):
+
+| Factor | Failed Attempts | This Approach |
+|--------|-----------------|---------------|
+| Target | `: ` (2-char pattern) | `\n`, `#`, `:` (1-char each) |
+| Context handling | Tried SIMD | Scalar at found position |
+| Typical scan distance | 5-15 bytes (keys) | 30-100+ bytes (values) |
+| SIMD setup amortization | Below breakeven | Well above breakeven |
+
+**Key insight**: SIMD works for finding the *next interesting byte* in potentially long
+runs of uninteresting bytes. Context-sensitive checks (e.g., `#` needs preceding space,
+`:` needs following whitespace) are handled efficiently at scalar level after the jump.
+
+This avoids the trap that killed the colon-space detection: trying to validate context
+in SIMD when the context check is simple and cheap at scalar level.
+
+---
+
 ## Failed SIMD Optimizations
 
 ### AVX-512 JSON Parser (-10% penalty)
@@ -309,6 +375,104 @@ unsafe fn process_64_avx2(data: &[u8; 64]) -> u64 {
 **Result**: 1.33x slower.
 **Reason**: Prefix sum is inherently sequential; extraction overhead dominates.
 
+### NEON Nibble Lookup for YAML (-12-15% penalty)
+
+**Attempted**: Use nibble-based lookup tables for YAML string scanning.
+
+The simdjson technique splits each byte into high/low nibbles (4 bits each), looks up both
+in precomputed 16-entry tables, and ANDs the results to classify characters:
+
+```rust
+unsafe fn classify_yaml_chars(chunk: uint8x16_t) -> uint8x16_t {
+    let lo_table = vld1q_u8(YAML_LO_NIBBLE.as_ptr());
+    let hi_table = vld1q_u8(YAML_HI_NIBBLE.as_ptr());
+
+    let lo_nibble = vandq_u8(chunk, vdupq_n_u8(0x0F));
+    let hi_nibble = vshrq_n_u8::<4>(chunk);
+
+    let lo_result = vqtbl1q_u8(lo_table, lo_nibble);
+    let hi_result = vqtbl1q_u8(hi_table, hi_nibble);
+
+    vandq_u8(lo_result, hi_result)  // Each byte has classification flags
+}
+```
+
+**Result**: 12-15% slower than direct comparison for YAML.
+
+**Benchmark data** (Apple M1, finding quote at end of string):
+
+| Size | Nibble Lookup | Direct Comparison | Delta |
+|------|---------------|-------------------|-------|
+| 16B  | 2.77 ns       | 2.43 ns           | -12%  |
+| 64B  | 5.58 ns       | 4.75 ns           | -15%  |
+| 256B | 16.83 ns      | 14.88 ns          | -12%  |
+
+**Why it failed for YAML**:
+
+YAML string scanning only needs to find 2-3 specific characters (`"`, `\`, `'`).
+
+| Approach | Operations per 16-byte chunk |
+|----------|------------------------------|
+| Direct comparison | 2 comparisons + 1 OR |
+| Nibble lookup | 2 table loads + 2 lookups + 1 AND + 1 test |
+
+The table lookup overhead doesn't amortize when searching for few characters.
+
+**When nibble lookup DOES work**:
+
+It's effective for JSON (used in `json/simd/neon.rs`) where you classify 6+ character
+types simultaneously: `{`, `}`, `[`, `]`, `:`, `,`, `"`, `\`, plus value chars.
+The single classification pass replaces ~13 comparisons with 6 operations.
+
+### NEON/SSE2 Colon-Space Detection for YAML (-15-20% end-to-end penalty)
+
+**Attempted**: Use SIMD to find the `: ` pattern for YAML key-value detection.
+
+```rust
+// NEON approach - find colons, then check if next byte is space
+let colon_vec = vdupq_n_u8(b':');
+let chunk = vld1q_u8(data.as_ptr().add(offset));
+let colons = vceqq_u8(chunk, colon_vec);
+let colon_mask = neon_movemask(colons);
+
+if colon_mask != 0 {
+    let bit_pos = colon_mask.trailing_zeros() as usize;
+    if data[offset + bit_pos + 1] == b' ' {
+        return Some(offset + bit_pos);
+    }
+}
+```
+
+**Isolation benchmark** (Apple M1 Max) - looked promising:
+
+| Scenario             | SIMD    | Scalar   | Speedup           |
+|----------------------|---------|----------|-------------------|
+| Short key (11 bytes) | 4.13 ns | 2.31 ns  | **-44% (slower)** |
+| Medium key (46 bytes)| 3.35 ns | 10.67 ns | **3.2x**          |
+| Long key (92 bytes)  | 4.97 ns | 27.79 ns | **5.6x**          |
+
+**End-to-end result**: 15-20% slower when integrated into parser.
+
+| YAML benchmark   | With SIMD | Without SIMD | Change             |
+|------------------|-----------|--------------|-------------------|
+| simple_kv/10     | 1.38 µs   | 1.33 µs      | **-4% (slower)**  |
+| simple_kv/100    | 6.05 µs   | 5.26 µs      | **-15% (slower)** |
+| simple_kv/1000   | 53.7 µs   | 44.7 µs      | **-20% (slower)** |
+
+**Why it failed end-to-end**:
+
+| Factor             | Isolation Benchmark | Real YAML Parsing          |
+|--------------------|---------------------|----------------------------|
+| Search distance    | 46-92+ bytes        | 5-15 bytes (typical keys)  |
+| Breakeven point    | ~16 bytes           | Keys shorter than breakeven|
+| Additional overhead| None                | Finding line_end, extra call|
+
+**Key insight**: SIMD setup cost (~4 ns) is only amortized when scanning 40+ bytes.
+Typical YAML keys like `name:`, `host:`, `timeout:` are 5-15 chars, where scalar wins.
+
+**Lesson learned**: Isolation benchmarks can mislead - a function can be 5x faster in
+isolation but cause regression when integrated due to real-world data characteristics.
+
 ---
 
 ## Usage in Succinctly
@@ -321,6 +485,7 @@ unsafe fn process_64_avx2(data: &[u8; 64]) -> u64 {
 | SSE4.2     | `json/simd/sse42.rs`    | String matching          | 1.38x   |
 | NEON       | `json/simd/neon.rs`     | ARM JSON parsing         | 1.11x   |
 | NEON       | `dsv/simd/neon.rs`      | ARM DSV parsing          | 1.8x    |
+| NEON/AVX2  | `yaml/simd/`            | YAML unquoted structural | 3-8%    |
 
 ---
 
@@ -331,6 +496,9 @@ unsafe fn process_64_avx2(data: &[u8; 64]) -> u64 {
 3. **Memory bandwidth limits**: 32 bytes/cycle is often the ceiling
 4. **Runtime dispatch is cheap**: One branch vs. many iterations
 5. **ARM NEON is different**: No movemask; use multiplication trick
+6. **SIMD setup cost matters**: For short operations (<16 bytes), scalar wins
+7. **Isolation benchmarks can mislead**: A function can be 5x faster in isolation but cause regression when integrated (colon-space detection won for 46+ byte scans, but real YAML keys are 5-15 bytes)
+8. **Know your data characteristics**: Benchmark with realistic data sizes, not arbitrary test cases
 
 ---
 

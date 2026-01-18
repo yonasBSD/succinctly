@@ -33,6 +33,7 @@ use alloc::{
 use std::collections::BTreeMap;
 
 use super::error::YamlError;
+use super::simd;
 
 /// Node type in the YAML structure tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,9 @@ pub struct SemiIndex {
     /// For each BP open (1-bit), this stores the corresponding byte offset.
     /// Containers may share position with first child.
     pub bp_to_text: Vec<u32>,
+    /// End positions for scalars. For each BP open, stores the end byte offset.
+    /// For containers, stores 0 (containers don't have a text end position).
+    pub bp_to_text_end: Vec<u32>,
     /// Sequence item marker bits: 1 if this BP position is a sequence item wrapper.
     /// Sequence items have BP open/close but no TY entry.
     pub seq_items: Vec<u64>,
@@ -117,7 +121,6 @@ pub struct SemiIndex {
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
-    line: usize,
 
     // Index builders
     ib_words: Vec<u64>,
@@ -131,12 +134,16 @@ struct Parser<'a> {
 
     // Direct BP-to-text mapping
     bp_to_text: Vec<u32>,
+    /// End positions for scalars (start is in bp_to_text, end is here)
+    bp_to_text_end: Vec<u32>,
 
     // Indentation tracking
     indent_stack: Vec<usize>,
 
     // Node type stack (to track if we're in mapping or sequence)
     type_stack: Vec<NodeType>,
+    /// Cached current type for branchless access (avoids Option unwrapping in hot paths)
+    current_type: Option<NodeType>,
 
     // Anchor and alias tracking
     /// Anchors collected during parsing: name → bp_pos of anchored value
@@ -164,7 +171,6 @@ impl<'a> Parser<'a> {
         Self {
             input,
             pos: 0,
-            line: 1,
             ib_words,
             bp_words,
             ty_words,
@@ -173,13 +179,30 @@ impl<'a> Parser<'a> {
             bp_pos: 0,
             ty_pos: 0,
             bp_to_text: Vec::new(),
+            bp_to_text_end: Vec::new(),
             indent_stack: vec![0], // Start at indent 0
             type_stack: Vec::new(),
+            current_type: None,
             anchors: BTreeMap::new(),
             aliases: BTreeMap::new(),
             in_document: false,
             pending_explicit_key: false,
         }
+    }
+
+    /// Push a type onto the type stack and update the cached current type.
+    #[inline]
+    fn push_type(&mut self, node_type: NodeType) {
+        self.type_stack.push(node_type);
+        self.current_type = Some(node_type);
+    }
+
+    /// Pop a type from the type stack and update the cached current type.
+    #[inline]
+    fn pop_type(&mut self) -> Option<NodeType> {
+        let popped = self.type_stack.pop();
+        self.current_type = self.type_stack.last().copied();
+        popped
     }
 
     /// Set an interest bit at the current position.
@@ -221,7 +244,18 @@ impl<'a> Parser<'a> {
         self.bp_words[word_idx] |= 1u64 << bit_idx;
         // Record the text position for this BP open
         self.bp_to_text.push(text_pos as u32);
+        // Placeholder for end position (will be set by set_bp_text_end for scalars)
+        self.bp_to_text_end.push(0);
         self.bp_pos += 1;
+    }
+
+    /// Set the end text position for the most recently opened BP node.
+    /// Call this before write_bp_close for scalar nodes.
+    #[inline]
+    fn set_bp_text_end(&mut self, end_pos: usize) {
+        if let Some(last) = self.bp_to_text_end.last_mut() {
+            *last = end_pos as u32;
+        }
     }
 
     /// Write a close parenthesis (0) to BP.
@@ -302,49 +336,159 @@ impl<'a> Parser<'a> {
     #[inline]
     fn advance(&mut self) {
         if self.pos < self.input.len() {
-            if self.input[self.pos] == b'\n' {
-                self.line += 1;
-            }
             self.pos += 1;
         }
     }
 
+    /// Advance position by multiple bytes.
+    #[inline]
+    fn advance_by(&mut self, count: usize) {
+        self.pos = (self.pos + count).min(self.input.len());
+    }
+
+    /// Compute line number at current position (1-indexed).
+    /// Only called on error paths, so we pay the cost only when needed.
+    #[inline]
+    fn current_line(&self) -> usize {
+        // Count newlines from start to current position
+        self.input[..self.pos]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1
+    }
+
     /// Skip whitespace on the current line (spaces and tabs, not newlines).
+    #[inline]
     fn skip_inline_whitespace(&mut self) {
-        while let Some(b) = self.peek() {
-            if b == b' ' || b == b'\t' {
-                self.advance();
-            } else {
-                break;
+        while self.pos < self.input.len() {
+            match self.input[self.pos] {
+                b' ' | b'\t' => self.pos += 1,
+                _ => break,
             }
+        }
+    }
+
+    /// Skip spaces only (not tabs) with hybrid scalar/SIMD approach.
+    /// Returns number of spaces skipped.
+    #[inline]
+    fn skip_spaces_simd(&mut self) -> usize {
+        // Fast path for short runs (0-8 spaces) - avoid SIMD overhead
+        let mut count = 0;
+        while count < 8 && self.pos < self.input.len() && self.input[self.pos] == b' ' {
+            self.pos += 1;
+            count += 1;
+        }
+
+        // If we found non-space within 8 bytes, we're done
+        if count < 8 || self.pos >= self.input.len() {
+            return count;
+        }
+
+        // For longer runs (>= 8 spaces), use SIMD from current position
+        let remaining = super::simd::count_leading_spaces(self.input, self.pos);
+        self.pos += remaining;
+        count + remaining
+    }
+
+    /// Find next newline using SIMD acceleration.
+    /// Returns offset from current position, or None if not found.
+    #[inline]
+    #[allow(dead_code)]
+    fn find_next_newline_simd(&self) -> Option<usize> {
+        super::simd::find_newline(self.input, self.pos)
+    }
+
+    /// SIMD fast-path for skipping regular characters in unquoted values.
+    /// Returns the number of bytes that can be safely skipped, or None if
+    /// a potential terminator was found immediately.
+    #[cfg(all(target_arch = "x86_64", not(feature = "scalar-yaml")))]
+    #[inline]
+    fn skip_unquoted_simd(&self, _value_start: usize) -> Option<usize> {
+        // Use classify_yaml_chars to scan 32 bytes at once
+        if let Some(class) = super::simd::classify_yaml_chars(self.input, self.pos) {
+            // Check for any potential terminators: newline, colon, or hash
+            let terminators = class.newlines | class.colons | class.hash;
+
+            if terminators == 0 {
+                // No structural characters in this 32-byte chunk - safe to skip all
+                let chunk_size = if self.pos + 32 <= self.input.len() {
+                    32
+                } else {
+                    16
+                };
+                return Some(chunk_size);
+            }
+
+            // Found a potential terminator - find its position
+            let first_pos = terminators.trailing_zeros() as usize;
+
+            // If it's at position 0, we can't skip anything
+            if first_pos == 0 {
+                return None;
+            }
+
+            // We can safely skip up to the terminator position
+            Some(first_pos)
+        } else {
+            None
+        }
+    }
+
+    /// Broadword fast-path for skipping regular characters in unquoted values (ARM64).
+    /// Uses pure u64 arithmetic instead of NEON movemask emulation for better performance.
+    /// Returns the number of bytes that can be safely skipped, or None if
+    /// a potential terminator was found immediately.
+    ///
+    /// NOTE: Currently disabled - benchmarks showed neutral to slight regression.
+    /// Kept for future investigation. See P4 analysis in docs/parsing/yaml.md.
+    #[cfg(all(target_arch = "aarch64", not(feature = "scalar-yaml")))]
+    #[inline]
+    #[allow(dead_code)]
+    fn skip_unquoted_simd(&self, _value_start: usize) -> Option<usize> {
+        // Use broadword classify to scan 16 bytes at once (two 8-byte chunks)
+        if let Some(class) = super::simd::classify_yaml_chars_16(self.input, self.pos) {
+            // Check for any potential terminators: newline, colon, or hash
+            let terminators = class.value_terminators();
+
+            if terminators == 0 {
+                // No structural characters in this 16-byte chunk - safe to skip all
+                return Some(16);
+            }
+
+            // Found a potential terminator - find its position
+            let first_pos = terminators.trailing_zeros() as usize;
+
+            // If it's at position 0, we can't skip anything
+            if first_pos == 0 {
+                return None;
+            }
+
+            // We can safely skip up to the terminator position
+            Some(first_pos)
+        } else {
+            None
         }
     }
 
     /// Count leading spaces (indentation) at start of a line.
     fn count_indent(&self) -> Result<usize, YamlError> {
-        let mut count = 0;
-        let mut i = self.pos;
-        while i < self.input.len() {
-            match self.input[i] {
-                b' ' => {
-                    count += 1;
-                    i += 1;
-                }
-                b'\t' => {
-                    // Tab after spaces - check context
-                    // If we haven't seen any spaces and hit a tab at start of line,
-                    // that's tab indentation (error). But tab after spaces is content.
-                    if count == 0 {
-                        return Err(YamlError::TabIndentation {
-                            line: self.line,
-                            offset: i,
-                        });
-                    }
-                    // Tab after spaces is start of content, stop counting indent
-                    break;
-                }
-                _ => break,
+        // Use SIMD-accelerated space counting
+        let count = super::simd::count_leading_spaces(self.input, self.pos);
+
+        // Check for tab at the position after spaces
+        let next_pos = self.pos + count;
+        if next_pos < self.input.len() && self.input[next_pos] == b'\t' {
+            // Tab after spaces - check context
+            // If we haven't seen any spaces and hit a tab at start of line,
+            // that's tab indentation (error). But tab after spaces is content.
+            if count == 0 {
+                return Err(YamlError::TabIndentation {
+                    line: self.current_line(),
+                    offset: next_pos,
+                });
             }
+            // Tab after spaces is start of content, indent count is correct
         }
         Ok(count)
     }
@@ -456,12 +600,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Skip to end of line (handles comments).
+    #[inline]
     fn skip_to_eol(&mut self) {
-        while let Some(b) = self.peek() {
-            if b == b'\n' {
-                break;
-            }
-            self.advance();
+        while self.pos < self.input.len() && self.input[self.pos] != b'\n' {
+            self.pos += 1;
         }
     }
 
@@ -589,6 +731,7 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
@@ -596,6 +739,7 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'[') | Some(b'{') => {
@@ -616,10 +760,11 @@ impl<'a> Parser<'a> {
                 self.parse_mapping_entry(0)?;
             }
             Some(_) => {
-                // Plain scalar
+                // Plain scalar at document root
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(0);
+                let end = self.parse_unquoted_value_doc_root(0);
+                self.set_bp_text_end(end);
                 self.write_bp_close();
             }
             None => {}
@@ -644,11 +789,11 @@ impl<'a> Parser<'a> {
         // The virtual root is at indent_stack[0], so close everything above it
         while self.indent_stack.len() > 1 {
             // If we're closing a mapping that has a pending explicit key, close it first
-            if self.type_stack.last() == Some(&NodeType::Mapping) {
+            if self.current_type == Some(NodeType::Mapping) {
                 self.close_pending_explicit_key();
             }
             self.indent_stack.pop();
-            self.type_stack.pop();
+            self.pop_type();
             self.write_bp_close();
         }
 
@@ -656,84 +801,113 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a double-quoted string.
+    ///
+    /// Uses SIMD fast-path to skip to the next quote or backslash.
     fn parse_double_quoted(&mut self) -> Result<usize, YamlError> {
         let start = self.pos;
         self.advance(); // Skip opening quote
 
-        while let Some(b) = self.peek() {
-            match b {
-                b'"' => {
-                    self.advance();
-                    return Ok(self.pos - start);
-                }
-                b'\\' => {
-                    self.advance(); // Skip backslash
-                    if self.peek().is_some() {
-                        self.advance(); // Skip escaped char
-                    } else {
-                        return Err(YamlError::UnexpectedEof {
-                            context: "escape sequence in string",
-                        });
+        loop {
+            // SIMD fast-path: find next quote or backslash
+            if let Some(offset) = simd::find_quote_or_escape(self.input, self.pos, self.input.len())
+            {
+                // Skip to the found character
+                self.advance_by(offset);
+
+                // Now process the found character
+                match self.peek() {
+                    Some(b'"') => {
+                        self.advance();
+                        return Ok(self.pos - start);
+                    }
+                    Some(b'\\') => {
+                        self.advance(); // Skip backslash
+                        if self.peek().is_some() {
+                            self.advance(); // Skip escaped char
+                        } else {
+                            return Err(YamlError::UnexpectedEof {
+                                context: "escape sequence in string",
+                            });
+                        }
+                    }
+                    _ => {
+                        // Should not happen since we found quote or backslash
+                        self.advance();
                     }
                 }
-                b'\n' => {
-                    // Multi-line string - continue
-                    self.advance();
-                }
-                _ => self.advance(),
+            } else {
+                // No quote or backslash found - string is unclosed
+                return Err(YamlError::UnclosedQuote {
+                    start_offset: start,
+                    quote_type: '"',
+                });
             }
         }
-
-        Err(YamlError::UnclosedQuote {
-            start_offset: start,
-            quote_type: '"',
-        })
     }
 
     /// Parse a single-quoted string.
+    ///
+    /// Uses SIMD fast-path to skip to the next single quote.
     fn parse_single_quoted(&mut self) -> Result<usize, YamlError> {
         let start = self.pos;
         self.advance(); // Skip opening quote
 
-        while let Some(b) = self.peek() {
-            match b {
-                b'\'' => {
-                    // Check for escaped quote ('')
-                    if self.peek_at(1) == Some(b'\'') {
-                        self.advance();
-                        self.advance();
-                    } else {
-                        self.advance();
-                        return Ok(self.pos - start);
-                    }
-                }
-                b'\n' => {
-                    // Multi-line string - continue
+        loop {
+            // SIMD fast-path: find next single quote
+            if let Some(offset) = simd::find_single_quote(self.input, self.pos, self.input.len()) {
+                // Skip to the found quote
+                self.advance_by(offset);
+
+                // Check for escaped quote ('')
+                if self.peek_at(1) == Some(b'\'') {
                     self.advance();
+                    self.advance();
+                } else {
+                    self.advance();
+                    return Ok(self.pos - start);
                 }
-                _ => self.advance(),
+            } else {
+                // No quote found - string is unclosed
+                return Err(YamlError::UnclosedQuote {
+                    start_offset: start,
+                    quote_type: '\'',
+                });
             }
         }
-
-        Err(YamlError::UnclosedQuote {
-            start_offset: start,
-            quote_type: '\'',
-        })
     }
 
     /// Parse an unquoted scalar value with a minimum indentation requirement.
     /// Handles multiline plain scalars - continues on lines more indented than start_indent.
+    /// When `is_doc_root` is true, same-indent lines continue the scalar (YAML spec 7.4).
     fn parse_unquoted_value_with_indent(&mut self, start_indent: usize) -> usize {
+        self.parse_unquoted_value_with_indent_impl(start_indent, false)
+    }
+
+    /// Parse an unquoted scalar at document root level.
+    /// At document root, same-indent lines continue the scalar (YAML spec 7.4).
+    fn parse_unquoted_value_doc_root(&mut self, start_indent: usize) -> usize {
+        self.parse_unquoted_value_with_indent_impl(start_indent, true)
+    }
+
+    fn parse_unquoted_value_with_indent_impl(
+        &mut self,
+        start_indent: usize,
+        is_doc_root: bool,
+    ) -> usize {
         let start = self.pos;
+        // Track the actual end of content (before newlines we skip)
+        let mut content_end = start;
 
         loop {
+            let line_start = self.pos;
             // Parse content on current line
+            // Use inline scalar loop for common case, SIMD for long runs
             while let Some(b) = self.peek() {
                 match b {
                     b'\n' => break,
                     b'#' => {
-                        // # is only a comment if preceded by whitespace
-                        if self.pos > start && self.input[self.pos - 1] == b' ' {
+                        // # is only a comment if preceded by whitespace (space or tab)
+                        if self.pos > start && matches!(self.input[self.pos - 1], b' ' | b'\t') {
                             break;
                         }
                         self.advance();
@@ -749,8 +923,33 @@ impl<'a> Parser<'a> {
                         }
                         self.advance();
                     }
-                    _ => self.advance(),
+                    _ => {
+                        // SIMD/broadword fast-path: skip long runs of regular characters
+                        // Only use SIMD if we have enough remaining bytes to justify overhead
+                        #[cfg(all(target_arch = "x86_64", not(feature = "scalar-yaml")))]
+                        if self.input.len() - self.pos >= 32 {
+                            if let Some(skip) = self.skip_unquoted_simd(start) {
+                                self.advance_by(skip);
+                                continue;
+                            }
+                        }
+                        // ARM64 broadword disabled - see P4 analysis in docs/parsing/yaml.md
+                        // #[cfg(target_arch = "aarch64")]
+                        // if self.input.len() - self.pos >= 16 {
+                        //     if let Some(skip) = self.skip_unquoted_simd(start) {
+                        //         self.advance_by(skip);
+                        //         continue;
+                        //     }
+                        // }
+                        self.advance();
+                    }
                 }
+            }
+
+            // Only update content_end if we parsed content on this line
+            // (Skip if we just returned from an empty line continuation)
+            if self.pos > line_start {
+                content_end = self.pos;
             }
 
             // Check if we can continue to next line
@@ -811,8 +1010,9 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            // Continuation requires more indent than where scalar started
-            // and next line shouldn't start block structure or be a comment.
+            // Continuation requires more indent than where scalar started,
+            // EXCEPT at document root (start_indent == 0) where same-indent is allowed.
+            // Next line shouldn't start block structure or be a comment.
             //
             // For sequence indicators `- `, they're only block structure if at a
             // "proper" indent level. A `- ` at indent just 1 greater than start_indent
@@ -824,7 +1024,11 @@ impl<'a> Parser<'a> {
             let sequence_indicator_is_block_structure = is_sequence_indicator
                 && (next_indent <= start_indent || next_indent >= start_indent + 2);
 
-            if next_indent > start_indent
+            // At document root, same-indent continues the scalar (YAML spec 7.4).
+            // Inside containers, must be more indented than start.
+            let indent_allows_continuation = is_doc_root || next_indent > start_indent;
+
+            if indent_allows_continuation
                 && next_char != b'#'
                 && !sequence_indicator_is_block_structure
                 && !(next_char == b':'
@@ -843,13 +1047,14 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Trim trailing whitespace
-        let mut end = self.pos;
+        // Trim trailing whitespace from content_end
+        let mut end = content_end;
         while end > start && matches!(self.input[end - 1], b' ' | b'\t') {
             end -= 1;
         }
 
-        end - start
+        // Return absolute end position (not length)
+        end
     }
 
     /// Parse an unquoted key (stops at colon+space).
@@ -875,7 +1080,7 @@ impl<'a> Parser<'a> {
                     // Key without colon
                     return Err(YamlError::KeyWithoutValue {
                         offset: start,
-                        line: self.line,
+                        line: self.current_line(),
                     });
                 }
                 b'#' => {
@@ -884,12 +1089,30 @@ impl<'a> Parser<'a> {
                     if self.pos > start && self.input[self.pos - 1] == b' ' {
                         return Err(YamlError::KeyWithoutValue {
                             offset: start,
-                            line: self.line,
+                            line: self.current_line(),
                         });
                     }
                     self.advance();
                 }
-                _ => self.advance(),
+                _ => {
+                    // SIMD/broadword fast-path: skip long runs of regular characters
+                    #[cfg(all(target_arch = "x86_64", not(feature = "scalar-yaml")))]
+                    if self.input.len() - self.pos >= 32 {
+                        if let Some(skip) = self.skip_unquoted_simd(start) {
+                            self.advance_by(skip);
+                            continue;
+                        }
+                    }
+                    // ARM64 broadword disabled - see P4 analysis in docs/parsing/yaml.md
+                    // #[cfg(target_arch = "aarch64")]
+                    // if self.input.len() - self.pos >= 16 {
+                    //     if let Some(skip) = self.skip_unquoted_simd(start) {
+                    //         self.advance_by(skip);
+                    //         continue;
+                    //     }
+                    // }
+                    self.advance();
+                }
             }
         }
 
@@ -900,7 +1123,8 @@ impl<'a> Parser<'a> {
         }
 
         // Empty key is valid in YAML (e.g., `: value`)
-        Ok(end - start)
+        // Return absolute end position
+        Ok(end)
     }
 
     /// Close containers that are at higher indent levels.
@@ -912,11 +1136,11 @@ impl<'a> Parser<'a> {
             // can be added to them.
             if current_indent > new_indent {
                 // If we're closing a mapping that has a pending explicit key, close it first
-                if self.type_stack.last() == Some(&NodeType::Mapping) {
+                if self.current_type == Some(NodeType::Mapping) {
                     self.close_pending_explicit_key();
                 }
                 self.indent_stack.pop();
-                self.type_stack.pop();
+                self.pop_type();
                 self.write_bp_close();
             } else {
                 break;
@@ -953,7 +1177,7 @@ impl<'a> Parser<'a> {
                 && below_indent == indent
             {
                 self.indent_stack.pop();
-                self.type_stack.pop();
+                self.pop_type();
                 self.write_bp_close();
             }
         }
@@ -978,7 +1202,7 @@ impl<'a> Parser<'a> {
         // We need a new sequence if:
         // 1. There's no sequence on the stack, OR
         // 2. The item indent doesn't match the sequence indent
-        let need_new_sequence = self.type_stack.last() != Some(&NodeType::Sequence)
+        let need_new_sequence = self.current_type != Some(NodeType::Sequence)
             || self.indent_stack.last().copied() != Some(indent);
 
         if need_new_sequence {
@@ -986,7 +1210,7 @@ impl<'a> Parser<'a> {
             self.write_bp_open();
             self.write_ty(true); // 1 = sequence
             self.indent_stack.push(indent);
-            self.type_stack.push(NodeType::Sequence);
+            self.push_type(NodeType::Sequence);
         }
 
         // Open the sequence item node
@@ -1006,7 +1230,7 @@ impl<'a> Parser<'a> {
         // NOTE: This means for `- foo`, the item is at virtual indent 1, so content
         // at indent 2 would be part of the item. But the sequence itself is at indent 0.
         self.indent_stack.push(indent + 1);
-        self.type_stack.push(NodeType::SequenceItem);
+        self.push_type(NodeType::SequenceItem);
 
         // Check what follows
         if self.at_line_end() {
@@ -1048,7 +1272,7 @@ impl<'a> Parser<'a> {
             self.parse_value(indent)?;
             // Close the sequence item for simple values
             self.indent_stack.pop();
-            self.type_stack.pop();
+            self.pop_type();
             self.write_bp_close();
         }
 
@@ -1062,7 +1286,7 @@ impl<'a> Parser<'a> {
         self.write_bp_open();
         self.write_ty(false); // 0 = mapping
         self.indent_stack.push(indent);
-        self.type_stack.push(NodeType::Mapping);
+        self.push_type(NodeType::Mapping);
 
         // Mark key position
         self.set_ib();
@@ -1071,17 +1295,18 @@ impl<'a> Parser<'a> {
         self.write_bp_open();
 
         // Parse the key
-        match self.peek() {
+        let key_end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_unquoted_key()?;
-            }
-        }
+            _ => self.parse_unquoted_key()?,
+        };
+        self.set_bp_text_end(key_end);
 
         // Close key node
         self.write_bp_close();
@@ -1110,7 +1335,8 @@ impl<'a> Parser<'a> {
             // Open value node
             self.set_ib();
             self.write_bp_open();
-            self.parse_inline_value(indent)?;
+            let end_pos = self.parse_inline_value(indent)?;
+            self.set_bp_text_end(end_pos);
             self.write_bp_close();
         }
 
@@ -1141,7 +1367,7 @@ impl<'a> Parser<'a> {
         self.close_same_indent_sequence_before_mapping_entry(indent);
 
         // Now check if we need to open a new mapping
-        let need_new_mapping = self.type_stack.last() != Some(&NodeType::Mapping)
+        let need_new_mapping = self.current_type != Some(NodeType::Mapping)
             || self.indent_stack.last().copied() != Some(indent);
 
         if need_new_mapping {
@@ -1149,7 +1375,7 @@ impl<'a> Parser<'a> {
             self.write_bp_open();
             self.write_ty(false); // 0 = mapping
             self.indent_stack.push(indent);
-            self.type_stack.push(NodeType::Mapping);
+            self.push_type(NodeType::Mapping);
         }
 
         // Mark key position
@@ -1172,23 +1398,26 @@ impl<'a> Parser<'a> {
         }
 
         // Parse the key - check for empty key first (colon at start)
-        if self.peek() == Some(b':') {
+        let key_end = if self.peek() == Some(b':') {
             // Empty key - check that it's followed by proper terminator
             let next = self.peek_at(1);
             if matches!(next, Some(b' ') | Some(b'\t') | Some(b'\n') | None) {
                 // Empty key case - key length is 0, don't advance yet
+                self.pos
             } else {
                 // Colon followed by something else - not an empty key
-                self.parse_unquoted_key()?;
+                self.parse_unquoted_key()?
             }
         } else {
             // Parse the key
             match self.peek() {
                 Some(b'"') => {
                     self.parse_double_quoted()?;
+                    self.pos
                 }
                 Some(b'\'') => {
                     self.parse_single_quoted()?;
+                    self.pos
                 }
                 Some(b'*') => {
                     // Alias as key - parse alias name
@@ -1201,12 +1430,12 @@ impl<'a> Parser<'a> {
                     if let Some(&target_bp_pos) = self.anchors.get(&alias_name) {
                         self.aliases.insert(self.bp_pos - 1, target_bp_pos);
                     }
+                    self.pos
                 }
-                _ => {
-                    self.parse_unquoted_key()?;
-                }
+                _ => self.parse_unquoted_key()?,
             }
-        }
+        };
+        self.set_bp_text_end(key_end);
 
         // Close key node
         self.write_bp_close();
@@ -1256,9 +1485,7 @@ impl<'a> Parser<'a> {
 
             // Skip to the content position
             let saved_pos = self.pos;
-            for _ in 0..next_indent {
-                self.advance();
-            }
+            self.advance_by(next_indent);
 
             // Check if this is a nested structure or a plain scalar value
             match self.peek() {
@@ -1302,7 +1529,8 @@ impl<'a> Parser<'a> {
                     // Plain scalar value - parse it here with key's indent as base
                     self.set_ib();
                     self.write_bp_open();
-                    self.parse_unquoted_value_with_indent(indent);
+                    let end_pos = self.parse_unquoted_value_with_indent(indent);
+                    self.set_bp_text_end(end_pos);
                     self.write_bp_close();
                     return Ok(());
                 }
@@ -1327,14 +1555,12 @@ impl<'a> Parser<'a> {
 
                 // Save position to look ahead
                 let saved_pos = self.pos;
-                let saved_line = self.line;
 
                 // Look at next content line
                 self.skip_newlines();
                 if self.peek().is_none() {
                     // EOF - value is null, create explicit null node for anchor
                     self.pos = saved_pos;
-                    self.line = saved_line;
                     self.set_ib();
                     self.write_bp_open();
                     self.write_bp_close();
@@ -1347,10 +1573,8 @@ impl<'a> Parser<'a> {
                 // Sequences can be at same indent as their parent mapping key
                 let pos_before_check = self.pos;
                 let is_sequence_at_same_indent = {
-                    // Skip past indent spaces to check what follows
-                    while self.peek() == Some(b' ') {
-                        self.advance();
-                    }
+                    // Skip past indent spaces to check what follows (SIMD accelerated)
+                    self.skip_spaces_simd();
                     matches!(self.peek(), Some(b'-'))
                         && matches!(self.peek_at(1), Some(b' ') | Some(b'\n') | None)
                 };
@@ -1361,7 +1585,6 @@ impl<'a> Parser<'a> {
                     // Next line is at same or lower indent and not a sequence - value is null
                     // Create explicit null node for anchor to point to
                     self.pos = saved_pos;
-                    self.line = saved_line;
                     self.set_ib();
                     self.write_bp_open();
                     self.write_bp_close();
@@ -1395,7 +1618,8 @@ impl<'a> Parser<'a> {
                     // Scalar value - wrap in BP
                     self.set_ib();
                     self.write_bp_open();
-                    self.parse_inline_value(indent)?;
+                    let end_pos = self.parse_inline_value(indent)?;
+                    self.set_bp_text_end(end_pos);
                     self.write_bp_close();
                 }
             }
@@ -1417,7 +1641,7 @@ impl<'a> Parser<'a> {
         self.close_pending_explicit_key();
 
         // Check if we need to open a new mapping
-        let need_new_mapping = self.type_stack.last() != Some(&NodeType::Mapping)
+        let need_new_mapping = self.current_type != Some(NodeType::Mapping)
             || self.indent_stack.last().copied() != Some(indent);
 
         if need_new_mapping {
@@ -1425,7 +1649,7 @@ impl<'a> Parser<'a> {
             self.write_bp_open();
             self.write_ty(false); // 0 = mapping
             self.indent_stack.push(indent);
-            self.type_stack.push(NodeType::Mapping);
+            self.push_type(NodeType::Mapping);
         }
 
         // Skip `?`
@@ -1465,7 +1689,7 @@ impl<'a> Parser<'a> {
                 self.write_bp_open();
                 self.write_ty(true); // sequence
                 self.indent_stack.push(indent + 2); // Indent for sequence content
-                self.type_stack.push(NodeType::Sequence);
+                self.push_type(NodeType::Sequence);
 
                 // Parse first sequence item inline
                 self.write_bp_open(); // item node
@@ -1502,18 +1726,21 @@ impl<'a> Parser<'a> {
                 // Double-quoted key
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
                 // Single-quoted key
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             _ => {
                 // Unquoted scalar key
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(indent);
+                let end_pos = self.parse_unquoted_value_with_indent(indent);
+                self.set_bp_text_end(end_pos);
                 self.write_bp_close();
             }
         }
@@ -1563,7 +1790,7 @@ impl<'a> Parser<'a> {
                 self.write_bp_open();
                 self.write_ty(true); // sequence
                 self.indent_stack.push(indent + 2);
-                self.type_stack.push(NodeType::Sequence);
+                self.push_type(NodeType::Sequence);
 
                 // Parse first sequence item
                 self.write_bp_open(); // item node
@@ -1592,12 +1819,14 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'*') => {
@@ -1607,7 +1836,8 @@ impl<'a> Parser<'a> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(indent);
+                let end_pos = self.parse_unquoted_value_with_indent(indent);
+                self.set_bp_text_end(end_pos);
                 self.write_bp_close();
             }
         }
@@ -1616,19 +1846,20 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an inline scalar value (on the same line as the key).
-    fn parse_inline_value(&mut self, min_indent: usize) -> Result<(), YamlError> {
-        match self.peek() {
+    /// Returns the end position of the scalar content.
+    fn parse_inline_value(&mut self, min_indent: usize) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_unquoted_value_with_indent(min_indent);
-            }
-        }
-        Ok(())
+            _ => self.parse_unquoted_value_with_indent(min_indent),
+        };
+        Ok(end)
     }
 
     /// Parse a value (could be scalar or nested structure).
@@ -1651,12 +1882,14 @@ impl<'a> Parser<'a> {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_double_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'\'') => {
                 self.set_ib();
                 self.write_bp_open();
                 self.parse_single_quoted()?;
+                self.set_bp_text_end(self.pos);
                 self.write_bp_close();
             }
             Some(b'-') if self.peek_at(1) == Some(b' ') || self.peek_at(1) == Some(b'\t') => {
@@ -1678,7 +1911,8 @@ impl<'a> Parser<'a> {
             _ => {
                 self.set_ib();
                 self.write_bp_open();
-                self.parse_unquoted_value_with_indent(min_indent);
+                let end_pos = self.parse_unquoted_value_with_indent(min_indent);
+                self.set_bp_text_end(end_pos);
                 self.write_bp_close();
             }
         }
@@ -1835,18 +2069,27 @@ impl<'a> Parser<'a> {
         // Parse key - can be scalar, quoted, flow mapping, or flow sequence
         self.set_ib();
         self.write_bp_open();
-        match self.peek() {
-            Some(b'{') => self.parse_flow_mapping()?,
-            Some(b'[') => self.parse_flow_sequence()?,
+        let key_end = match self.peek() {
+            Some(b'{') => {
+                self.parse_flow_mapping()?;
+                self.pos
+            }
+            Some(b'[') => {
+                self.parse_flow_sequence()?;
+                self.pos
+            }
             Some(b':') => {
                 // Empty key (null) - ?: means null key
                 // Don't consume anything, write empty node
+                self.pos
             }
             Some(b',') | Some(b']') | Some(b'}') => {
                 // Empty key (null) - ? followed by terminator
+                self.pos
             }
             _ => self.parse_explicit_flow_key_scalar()?,
-        }
+        };
+        self.set_bp_text_end(key_end);
         self.write_bp_close();
 
         // Skip whitespace before possible colon
@@ -1864,12 +2107,15 @@ impl<'a> Parser<'a> {
                 match self.peek() {
                     Some(b'[') => {
                         self.parse_flow_sequence()?;
+                        self.set_bp_text_end(self.pos);
                     }
                     Some(b'{') => {
                         self.parse_flow_mapping()?;
+                        self.set_bp_text_end(self.pos);
                     }
                     _ => {
-                        self.parse_flow_scalar()?;
+                        let end = self.parse_flow_scalar()?;
+                        self.set_bp_text_end(end);
                     }
                 }
                 self.write_bp_close();
@@ -1877,11 +2123,13 @@ impl<'a> Parser<'a> {
                 // Empty value (null)
                 self.set_ib();
                 self.write_bp_open();
+                // Null has no text end
                 self.write_bp_close();
             }
         } else {
             // No colon - value is null
             self.write_bp_open_at(self.input.len());
+            // Null has no text end
             self.write_bp_close();
         }
 
@@ -1902,11 +2150,18 @@ impl<'a> Parser<'a> {
         // Parse key - can be scalar, quoted, flow mapping, or flow sequence
         self.set_ib();
         self.write_bp_open();
-        match self.peek() {
-            Some(b'{') => self.parse_flow_mapping()?,
-            Some(b'[') => self.parse_flow_sequence()?,
+        let key_end = match self.peek() {
+            Some(b'{') => {
+                self.parse_flow_mapping()?;
+                self.pos
+            }
+            Some(b'[') => {
+                self.parse_flow_sequence()?;
+                self.pos
+            }
             _ => self.parse_flow_key_scalar()?,
-        }
+        };
+        self.set_bp_text_end(key_end);
         self.write_bp_close();
 
         // Skip whitespace before colon
@@ -1927,22 +2182,24 @@ impl<'a> Parser<'a> {
         if !matches!(self.peek(), Some(b',') | Some(b']') | Some(b'}') | None) {
             self.set_ib();
             self.write_bp_open();
-            match self.peek() {
+            let val_end = match self.peek() {
                 Some(b'[') => {
                     self.parse_flow_sequence()?;
+                    self.pos
                 }
                 Some(b'{') => {
                     self.parse_flow_mapping()?;
+                    self.pos
                 }
-                _ => {
-                    self.parse_flow_scalar()?;
-                }
-            }
+                _ => self.parse_flow_scalar()?,
+            };
+            self.set_bp_text_end(val_end);
             self.write_bp_close();
         } else {
             // Empty value (null)
             self.set_ib();
             self.write_bp_open();
+            // Null has no text end
             self.write_bp_close();
         }
 
@@ -2025,7 +2282,8 @@ impl<'a> Parser<'a> {
                         // Plain scalar value - wrap in BP
                         self.set_ib();
                         self.write_bp_open();
-                        self.parse_flow_scalar()?;
+                        let end = self.parse_flow_scalar()?;
+                        self.set_bp_text_end(end);
                         self.write_bp_close();
                     }
                 }
@@ -2090,6 +2348,7 @@ impl<'a> Parser<'a> {
             self.set_ib();
             self.write_bp_open();
             self.parse_flow_key()?;
+            self.set_bp_text_end(self.pos);
             self.write_bp_close();
 
             self.skip_flow_whitespace();
@@ -2123,7 +2382,8 @@ impl<'a> Parser<'a> {
                             // Scalar value - wrap in BP
                             self.set_ib();
                             self.write_bp_open();
-                            self.parse_flow_scalar()?;
+                            let end = self.parse_flow_scalar()?;
+                            self.set_bp_text_end(end);
                             self.write_bp_close();
                         }
                     }
@@ -2132,6 +2392,7 @@ impl<'a> Parser<'a> {
                 // Key without colon/value - emit empty value (implicit null)
                 self.set_ib();
                 self.write_bp_open();
+                // Null has no text end
                 self.write_bp_close();
             } else {
                 return Err(YamlError::UnexpectedCharacter {
@@ -2303,51 +2564,62 @@ impl<'a> Parser<'a> {
         }
 
         // Empty key is valid in YAML (e.g., `[ : value ]`)
-        Ok(end - start)
+        // Return absolute end position
+        Ok(end)
     }
 
     /// Parse a scalar value in flow context (string or unquoted).
-    fn parse_flow_scalar(&mut self) -> Result<(), YamlError> {
-        match self.peek() {
+    fn parse_flow_scalar(&mut self) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_flow_unquoted_value();
-            }
-        }
-        Ok(())
+            _ => self.parse_flow_unquoted_value(),
+        };
+        Ok(end)
     }
 
     /// Parse a flow key (for implicit mapping entries).
     /// Like parse_flow_scalar but also stops at `: ` (colon followed by space/flow indicator).
-    fn parse_flow_key_scalar(&mut self) -> Result<(), YamlError> {
-        match self.peek() {
+    fn parse_flow_key_scalar(&mut self) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
             _ => {
                 // Use existing parse_flow_unquoted_key which stops at `:`
-                self.parse_flow_unquoted_key()?;
+                self.parse_flow_unquoted_key()?
             }
-        }
-        Ok(())
+        };
+        Ok(end)
     }
 
     /// Parse an unquoted value in flow context.
-    /// Stops at `,`, `}`, `]`, or newline.
+    /// Stops at `,`, `}`, `]`, `#` (comment), or newline.
+    /// Returns the absolute end position (with trailing whitespace trimmed).
     fn parse_flow_unquoted_value(&mut self) -> usize {
         let start = self.pos;
 
         while let Some(b) = self.peek() {
             match b {
                 b',' | b'}' | b']' => break,
+                b'#' => {
+                    // # is a comment if preceded by whitespace
+                    if self.pos > start && matches!(self.input[self.pos - 1], b' ' | b'\t') {
+                        break;
+                    }
+                    self.advance();
+                }
                 b'\n' | b'\r' => {
                     // Multiline value - check if next line continues the value
                     let mut lookahead = self.pos;
@@ -2366,9 +2638,9 @@ impl<'a> Parser<'a> {
                     }
                     // Check what follows
                     if lookahead >= self.input.len()
-                        || matches!(self.input[lookahead], b',' | b'}' | b']')
+                        || matches!(self.input[lookahead], b',' | b'}' | b']' | b'#')
                     {
-                        // Delimiter or EOF - stop value here
+                        // Delimiter, comment, or EOF - stop value here
                         break;
                     }
                     // Continue parsing on next line
@@ -2391,25 +2663,25 @@ impl<'a> Parser<'a> {
             end -= 1;
         }
 
-        end - start
+        end
     }
 
     /// Parse an explicit flow key scalar.
     /// Unlike implicit flow keys which stop at `:`, explicit keys stop at `: ` (colon+space)
     /// because the colon is part of the explicit value syntax.
-    fn parse_explicit_flow_key_scalar(&mut self) -> Result<(), YamlError> {
-        match self.peek() {
+    fn parse_explicit_flow_key_scalar(&mut self) -> Result<usize, YamlError> {
+        let end = match self.peek() {
             Some(b'"') => {
                 self.parse_double_quoted()?;
+                self.pos
             }
             Some(b'\'') => {
                 self.parse_single_quoted()?;
+                self.pos
             }
-            _ => {
-                self.parse_explicit_flow_unquoted_key()?;
-            }
-        }
-        Ok(())
+            _ => self.parse_explicit_flow_unquoted_key()?,
+        };
+        Ok(end)
     }
 
     /// Parse an explicit unquoted key in flow context.
@@ -2549,7 +2821,8 @@ impl<'a> Parser<'a> {
             end -= 1;
         }
 
-        Ok(end - start)
+        // Return absolute end position
+        Ok(end)
     }
 
     // =========================================================================
@@ -2605,37 +2878,29 @@ impl<'a> Parser<'a> {
     /// Returns the indentation level, or None if block is empty.
     fn detect_block_content_indent(&mut self, base_indent: usize) -> Option<usize> {
         let saved_pos = self.pos;
-        let saved_line = self.line;
 
         // Scan ahead to find first non-empty line
         loop {
             if self.peek().is_none() {
                 // EOF - empty block scalar
                 self.pos = saved_pos;
-                self.line = saved_line;
                 return None;
             }
 
-            // Count spaces at start of line
-            let mut indent = 0;
-            while self.peek() == Some(b' ') {
-                indent += 1;
-                self.advance();
-            }
+            // Count spaces at start of line (SIMD accelerated)
+            let indent = self.skip_spaces_simd();
 
             // Check what's on this line
             match self.peek() {
                 Some(b'\n') => {
                     // Empty line - skip and continue
                     self.advance();
-                    self.line += 1;
                 }
                 Some(b'#') => {
                     // Comment line - skip to end
                     self.skip_to_eol();
                     if self.peek() == Some(b'\n') {
                         self.advance();
-                        self.line += 1;
                     }
                 }
                 Some(b'\r') => {
@@ -2644,18 +2909,15 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(b'\n') {
                         self.advance();
                     }
-                    self.line += 1;
                 }
                 None => {
                     // EOF
                     self.pos = saved_pos;
-                    self.line = saved_line;
                     return None;
                 }
                 _ => {
                     // Found content - restore position and return indent
                     self.pos = saved_pos;
-                    self.line = saved_line;
 
                     if indent <= base_indent {
                         // Content must be more indented than indicator
@@ -2674,30 +2936,28 @@ impl<'a> Parser<'a> {
         content_indent: usize,
         chomping: ChompingIndicator,
     ) -> usize {
+        // Use SIMD to quickly find where the block scalar ends
+        let block_end = simd::find_block_scalar_end(self.input, self.pos, content_indent)
+            .unwrap_or(self.input.len());
+
+        // Now we need to walk through the content to find:
+        // 1. last_content_end - position after last non-empty line
+        // 2. trailing_newline_start - where trailing newlines begin
         let mut last_content_end = self.pos;
         let mut trailing_newline_start = self.pos;
 
-        loop {
-            if self.peek().is_none() {
-                break; // EOF ends block scalar
-            }
-
+        while self.pos < block_end {
             let line_start = self.pos;
 
-            // Count spaces at start of line
-            let mut line_indent = 0;
-            while self.peek() == Some(b' ') {
-                line_indent += 1;
-                self.advance();
-            }
+            // Count spaces at start of line (SIMD accelerated)
+            let _line_indent = self.skip_spaces_simd();
 
             // Check what's on this line
             match self.peek() {
                 Some(b'\n') => {
-                    // Empty line - include in content (counts as trailing newline area)
+                    // Empty line - part of trailing newlines
                     trailing_newline_start = line_start;
                     self.advance();
-                    self.line += 1;
                 }
                 Some(b'\r') => {
                     // Handle \r\n
@@ -2706,23 +2966,11 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(b'\n') {
                         self.advance();
                     }
-                    self.line += 1;
-                }
-                Some(b'#') if line_indent < content_indent => {
-                    // Comment at lower indent - end of block
-                    self.pos = line_start;
-                    break;
                 }
                 None => {
                     break; // EOF
                 }
                 _ => {
-                    if line_indent < content_indent {
-                        // Real content at lower indent - end of block scalar
-                        self.pos = line_start;
-                        break;
-                    }
-
                     // This is a content line - skip to end
                     self.skip_to_eol();
                     last_content_end = self.pos;
@@ -2730,17 +2978,18 @@ impl<'a> Parser<'a> {
 
                     if self.peek() == Some(b'\n') {
                         self.advance();
-                        self.line += 1;
                     } else if self.peek() == Some(b'\r') {
                         self.advance();
                         if self.peek() == Some(b'\n') {
                             self.advance();
                         }
-                        self.line += 1;
                     }
                 }
             }
         }
+
+        // Position should now be at block_end
+        self.pos = block_end;
 
         // Return position based on chomping
         match chomping {
@@ -2770,13 +3019,11 @@ impl<'a> Parser<'a> {
         self.skip_to_eol();
         if self.peek() == Some(b'\n') {
             self.advance();
-            self.line += 1;
         } else if self.peek() == Some(b'\r') {
             self.advance();
             if self.peek() == Some(b'\n') {
                 self.advance();
             }
-            self.line += 1;
         }
 
         // Determine content indentation
@@ -2788,6 +3035,7 @@ impl<'a> Parser<'a> {
                 Some(indent) => indent,
                 None => {
                     // Empty block scalar
+                    self.set_bp_text_end(self.pos);
                     self.write_bp_close();
                     return Ok(());
                 }
@@ -2795,9 +3043,10 @@ impl<'a> Parser<'a> {
         };
 
         // Consume content lines
-        let _content_end = self.consume_block_scalar_content(content_indent, header.chomping);
+        let content_end = self.consume_block_scalar_content(content_indent, header.chomping);
 
         // Close the block scalar node
+        self.set_bp_text_end(content_end);
         self.write_bp_close();
 
         Ok(())
@@ -2812,33 +3061,9 @@ impl<'a> Parser<'a> {
     fn parse_anchor_name(&mut self) -> Result<String, YamlError> {
         let start = self.pos;
 
-        // YAML anchor names can contain any character except flow indicators,
-        // whitespace, and certain special chars.
-        // Colons are allowed if not followed by whitespace (which would make it a key separator).
-        while let Some(b) = self.peek() {
-            match b {
-                // Stop at flow indicators, whitespace, and newlines
-                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' => break,
-                // Colon is allowed in anchor names if not followed by whitespace
-                b':' => {
-                    if let Some(next) = self.peek_at(1) {
-                        if next == b' ' || next == b'\t' || next == b'\n' || next == b'\r' {
-                            break;
-                        }
-                    }
-                    // Colon followed by non-whitespace - part of anchor name
-                    self.advance();
-                }
-                // High byte indicates start of multi-byte UTF-8 - consume all bytes
-                0x80..=0xFF => {
-                    // Multi-byte UTF-8 character - consume continuation bytes
-                    self.advance();
-                }
-                _ => {
-                    self.advance();
-                }
-            }
-        }
+        // Use SIMD to find the end of the anchor name (P4 optimization)
+        let end = simd::parse_anchor_name(self.input, start);
+        self.pos = end;
 
         if self.pos == start {
             return Err(YamlError::InvalidAnchorName {
@@ -2898,6 +3123,7 @@ impl<'a> Parser<'a> {
         // Forward references (alias before anchor) are not supported.
 
         // Close the alias node
+        self.set_bp_text_end(self.pos);
         self.write_bp_close();
 
         Ok(())
@@ -2916,7 +3142,7 @@ impl<'a> Parser<'a> {
         // Position 0 with text position 0
         self.write_bp_open_at(0);
         self.write_ty(true); // Root is a sequence
-        self.type_stack.push(NodeType::Sequence);
+        self.push_type(NodeType::Sequence);
         // Use usize::MAX as a sentinel indent for virtual root
         // This ensures document content at indent 0 creates its own container
         self.indent_stack[0] = usize::MAX;
@@ -2930,7 +3156,7 @@ impl<'a> Parser<'a> {
         self.end_document();
 
         // Close virtual root sequence
-        self.type_stack.pop();
+        self.pop_type();
         self.write_bp_close();
 
         Ok(SemiIndex {
@@ -2938,6 +3164,7 @@ impl<'a> Parser<'a> {
             bp: self.bp_words.clone(),
             ty: self.ty_words.clone(),
             bp_to_text: self.bp_to_text.clone(),
+            bp_to_text_end: self.bp_to_text_end.clone(),
             seq_items: self.seq_item_words.clone(),
             containers: self.container_words.clone(),
             ib_len: self.input.len(),
@@ -3069,7 +3296,7 @@ impl<'a> Parser<'a> {
                     _ => {
                         // Not a flow structure - re-report the tab error
                         return Err(YamlError::TabIndentation {
-                            line: self.line,
+                            line: self.current_line(),
                             offset: self.pos,
                         });
                     }
@@ -3079,9 +3306,7 @@ impl<'a> Parser<'a> {
         };
 
         // Skip to content
-        for _ in 0..indent {
-            self.advance();
-        }
+        self.advance_by(indent);
 
         // close_deeper_indents will handle closing any SequenceItem entries
         // when we return to a lower indent level
@@ -3196,20 +3421,29 @@ impl<'a> Parser<'a> {
                             self.parse_value(indent)?;
                         }
                         _ => {
-                            // Scalar value
+                            // Scalar value - only doc_root if not inside a container
                             self.set_ib();
                             self.write_bp_open();
-                            match self.peek() {
+                            // type_stack.len() == 1 means we're inside only the virtual root sequence
+                            let is_truly_doc_root = self.type_stack.len() <= 1;
+                            let end_pos = match self.peek() {
                                 Some(b'"') => {
                                     self.parse_double_quoted()?;
+                                    self.pos
                                 }
                                 Some(b'\'') => {
                                     self.parse_single_quoted()?;
+                                    self.pos
                                 }
                                 _ => {
-                                    self.parse_unquoted_value_with_indent(indent);
+                                    if is_truly_doc_root {
+                                        self.parse_unquoted_value_doc_root(indent)
+                                    } else {
+                                        self.parse_unquoted_value_with_indent(indent)
+                                    }
                                 }
-                            }
+                            };
+                            self.set_bp_text_end(end_pos);
                             self.write_bp_close();
                         }
                     }
@@ -3233,21 +3467,31 @@ impl<'a> Parser<'a> {
                 if self.looks_like_mapping_entry() {
                     self.parse_mapping_entry(indent)?;
                 } else {
-                    // Bare scalar document (e.g., `---\nplain value` or `---\n"quoted"`)
+                    // Scalar value - either bare document scalar or value in a container
                     self.close_deeper_indents(indent);
                     self.set_ib();
                     self.write_bp_open();
-                    match self.peek() {
+                    // Only use doc_root mode if we're not inside any container
+                    // type_stack.len() == 1 means we're inside only the virtual root sequence
+                    let is_truly_doc_root = self.type_stack.len() <= 1;
+                    let end_pos = match self.peek() {
                         Some(b'"') => {
                             self.parse_double_quoted()?;
+                            self.pos
                         }
                         Some(b'\'') => {
                             self.parse_single_quoted()?;
+                            self.pos
                         }
                         _ => {
-                            self.parse_unquoted_value_with_indent(indent);
+                            if is_truly_doc_root {
+                                self.parse_unquoted_value_doc_root(indent)
+                            } else {
+                                self.parse_unquoted_value_with_indent(indent)
+                            }
                         }
-                    }
+                    };
+                    self.set_bp_text_end(end_pos);
                     self.write_bp_close();
                 }
             }

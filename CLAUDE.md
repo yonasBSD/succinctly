@@ -176,9 +176,17 @@ To regenerate: `cargo bench --bench jq_comparison`
 
 | Size      | succinctly            | yq                    | Speedup    |
 |-----------|-----------------------|-----------------------|------------|
-| **10KB**  |  4.0 ms  (2.5 MiB/s)  |  8.1 ms  (1.2 MiB/s)  | **2.0x**   |
-| **100KB** |  6.7 ms (13.7 MiB/s)  | 19.7 ms  (4.7 MiB/s)  | **2.9x**   |
-| **1MB**   | 32.0 ms (28.8 MiB/s)  |118.9 ms  (7.8 MiB/s)  | **3.7x**   |
+| **10KB**  |  4.0 ms  (2.5 MiB/s)  |  7.2 ms  (1.3 MiB/s)  | **1.8x**   |
+| **100KB** |  8.8 ms (10.5 MiB/s)  | 19.9 ms  (4.6 MiB/s)  | **2.3x**   |
+| **1MB**   | 55.0 ms (16.8 MiB/s)  |117.1 ms  (7.9 MiB/s)  | **2.1x**   |
+
+### yq Query Performance (AMD Ryzen 9 7950X)
+
+| Size      | succinctly            | yq                    | Speedup    |
+|-----------|-----------------------|-----------------------|------------|
+| **10KB**  |  1.8 ms  (5.3 MiB/s)  | 57.4 ms (175 KiB/s)   | **31x**    |
+| **100KB** |  6.1 ms (15.2 MiB/s)  | 71.3 ms  (1.3 MiB/s)  | **11.8x**  |
+| **1MB**   | 47.4 ms (19.5 MiB/s)  |191.1 ms  (4.8 MiB/s)  | **4.0x**   |
 
 To regenerate: `cargo bench --bench yq_comparison`
 
@@ -196,5 +204,107 @@ For detailed documentation on optimisation techniques used in this project, see 
 
 **Key insights** (see [docs/optimisations/README.md](docs/optimisations/README.md) for full details):
 - Wider SIMD != automatically faster (AVX-512 JSON was 10% slower than AVX2)
-- Algorithmic improvements beat micro-optimisations (cumulative index: 627x speedup)
+- Algorithmic improvements beat micro-optimisations (cumulative index: 627x speedup; YAML streaming: 2.3x speedup)
 - Simpler data structures often outperform complex ones due to cache behaviour
+- Caching hot values eliminates repeated lookups (type checking: 1-17% improvement)
+- Hardware prefetchers beat software prefetch for sequential access (prefetch: +30% regression!)
+- SIMD newline scanning + indentation checking enables fast block boundary detection (block scalars: 19-25% improvement!)
+- Micro-benchmark wins ≠ real-world improvements (threshold tuning: +8-15% regression despite micro-bench suggesting improvement)
+- Eliminating phases beats optimizing them (YAML streaming: removed DOM conversion entirely for 2.3x gain)
+
+**Recent YAML optimizations:**
+- ✅ P2.5 (Cached Type Checking): 1-17% improvement depending on nesting depth
+  - See [docs/parsing/yaml.md#p25-cached-type-checking](docs/parsing/yaml.md#p25-cached-type-checking) for details
+  - Best for deeply nested YAML (Kubernetes configs, CI/CD files)
+- ❌ P2.6 (Software Prefetching): **REJECTED** - 30% regression on large files
+  - Modern CPU hardware prefetchers are superior for sequential parsing
+  - Software prefetch causes cache pollution and interferes with hardware
+  - See [docs/parsing/yaml.md#p26-software-prefetching-for-large-files---rejected-](docs/parsing/yaml.md#p26-software-prefetching-for-large-files---rejected-) for analysis
+- ✅ P2.7 (Block Scalar SIMD): **19-25% improvement** on block scalar parsing - **largest Phase 2 optimization!**
+  - AVX2 scans 32-byte chunks for newlines, checks indentation using SIMD
+  - 100x100 lines: 247 µs → 195 µs (-21%, 1.27x faster)
+  - Throughput: 1.39 GiB/s → 1.76 GiB/s (+27%)
+  - See [docs/parsing/yaml.md#p27-block-scalar-simd---accepted-](docs/parsing/yaml.md#p27-block-scalar-simd---accepted-) for full analysis
+- ❌ P2.8 (SIMD Threshold Tuning): **REJECTED** - 8-15% regression on quoted strings
+  - Micro-benchmarks suggested SIMD threshold tuning would help (showed 2-4% gain)
+  - End-to-end tests showed severe regressions instead
+  - Modern CPUs (branch prediction, inlining) make threshold tuning counterproductive
+  - See [docs/parsing/yaml.md#p28-simd-threshold-tuning---rejected-](docs/parsing/yaml.md#p28-simd-threshold-tuning---rejected-) for full analysis
+- ❌ P3 (Branchless Character Classification): **REJECTED** - 25-44% regression on simple parsing
+  - Replaced `matches!` macros with lookup tables to eliminate branches
+  - Micro-benchmarks showed 3-29% improvement for character classification
+  - End-to-end tests showed catastrophic 25-44% regressions
+  - Modern branch predictors (93-95% accuracy) beat lookup tables
+  - `.map_or()` overhead and cache pollution from 256-byte tables dominated any benefit
+  - Third consecutive optimization where micro-benchmarks mislead (P2.6, P2.8, P3 all failed)
+  - See [docs/parsing/yaml.md#p3-branchless-character-classification---rejected-](docs/parsing/yaml.md#p3-branchless-character-classification---rejected-) for full analysis
+- ✅ P4 (Anchor/Alias SIMD): **6-17% improvement** on anchor-heavy workloads
+  - AVX2 SIMD scans for anchor name terminators in 32-byte chunks
+  - anchors/100: 13.60µs → 11.65µs (-14.6%, 1.17x faster)
+  - anchors/1000: 155.5µs → 139.2µs (-10.1%, 1.11x faster)
+  - k8s_100: 33.92µs → 31.40µs (-7.4%, 1.08x faster)
+  - Micro-benchmarks confirmed: 9-12x faster for 32-64 byte anchor names
+  - **First successful optimization since P2.7** - proves SIMD string searching wins when targeting real bottlenecks
+  - Best for: Kubernetes manifests, CI/CD configs with many anchors/aliases
+  - See [docs/parsing/yaml.md#p4-anchoralias-simd---accepted-](docs/parsing/yaml.md#p4-anchoralias-simd---accepted-) for full analysis
+- ❌ P5 (Flow Collection Fast Path): **REJECTED** - aborted at analysis stage before implementation
+  - Micro-benchmarks showed 8-14x SIMD wins for 64-128 byte flow collections
+  - Real YAML flow collections are typically 10-30 bytes (too small for SIMD to win)
+  - SIMD only wins at 32+ bytes, but 90% of real flow collections are < 30 bytes
+  - **Lessons from P2.6/P2.8/P3 applied** - rejected during analysis to avoid predicted regression
+  - Key insight: Micro-benchmark wins only translate when optimizing inputs that exist in real workloads
+  - See [docs/parsing/yaml.md#p5-flow-collection-fast-path---rejected-](docs/parsing/yaml.md#p5-flow-collection-fast-path---rejected-) for full analysis
+- ❌ P6 (BMI2 Operations): **REJECTED** - YAML's grammar prevents DSV-style quote indexing
+  - **Primary reason**: YAML cannot use BMI2 like DSV does (grammar incompatibility)
+    - DSV: Quotes are context-free (`""` escape), can build global quote index in one pass using BMI2 `toggle64`
+    - YAML: Backslash escaping (`\"`) requires escape preprocessing BEFORE quote detection
+    - Circular dependency: Need escape mask to build quote mask, but escape handling is what we're optimizing
+    - Multi-pass approach (escape → quote → parse) slower than current early-exit SIMD
+  - **Wrong approach tested**: Micro-benchmarks tested per-string parsing (not index building)
+    - DSV BMI2 builds global document index (scans everything once)
+    - Tested YAML per-string parsing (early-exit SIMD wins on short strings)
+    - Apples-to-oranges comparison revealed fundamental grammar difference
+  - **Key insight**: BMI2 quote indexing only works when escaping is context-free (CSV's `""`, not YAML's `\"`)
+  - **Additional context-sensitivity**: YAML has two quote types (`"` vs `'`), block scalars (`|` `>`), and context-dependent quote meaning
+  - See [docs/parsing/yaml.md#p6-bmi2-operations-pdeppext---rejected-](docs/parsing/yaml.md#p6-bmi2-operations-pdeppext---rejected-) for full analysis
+- ❌ P7 (Newline Index): **REJECTED** - use case mismatch (CLI feature, not parsing optimization)
+  - **Discovery**: JSON's `NewlineIndex` is NOT built during parsing
+    - Only used in `jq-locate` CLI tool for `--line X --column Y` → byte offset conversion
+    - Never built during JSON parsing, jq queries, or benchmarks
+    - Zero performance impact on actual JSON processing
+  - **YAML's current approach**: Lazy O(n) `current_line()` only on error paths
+    - 4 call sites, all in error reporting (TabIndentation, UnexpectedToken, etc.)
+    - Comment: "Only called on error paths, so we pay the cost only when needed"
+    - Benchmarks use valid YAML (no errors, so `current_line()` never called)
+  - **Two possible interpretations**:
+    - Option A (CLI feature): Add `yq-locate` tool with on-demand NewlineIndex (no benchmark impact)
+    - Option B (misguided): Build index during parsing (O(n) overhead with zero benefit for valid YAML)
+  - **Why Option B would fail**: Adds build cost to hot path (parsing) to optimize cold path (errors/CLI)
+  - **Pattern recognition**: Not all JSON features are optimizations - NewlineIndex is CLI UX, not performance
+  - See [docs/parsing/yaml.md#p7-newline-index---rejected-](docs/parsing/yaml.md#p7-newline-index---rejected-) for full analysis
+- ❌ P8 (AVX-512 Variants): **REJECTED** - benchmark design flaw + JSON precedent (7% slower at realistic sizes)
+  - **Primary reason**: Memory-bound workload doesn't benefit from wider SIMD
+    - JSON AVX-512 was **7-17% slower** than AVX2 and removed from codebase
+    - YAML is similarly memory-bound (sequential text parsing)
+    - Memory bandwidth bottleneck prevents wider vectors from helping
+  - **Micro-benchmark design flaw**:
+    - Measured loop iterations instead of work performed
+    - AVX2: 8 iterations for 256B (32B chunks)
+    - AVX-512: 4 iterations for 256B (64B chunks)
+    - "2x speedup" was artificial - half the iterations, not twice the efficiency
+  - **Realistic size results** (AMD Ryzen 9 7950X):
+    - 64B: **7% slower** (18.59ns vs 17.34ns) - memory bandwidth bottleneck
+    - 128B: **Neutral** (18.94ns vs 18.95ns) - break-even point
+    - 256B+: "Wins" misleading (fewer iterations, not faster per-byte)
+  - **Zen 4 limitation**: Splits 512-bit ops into two 256-bit paths (overhead without benefit)
+  - **Pattern recognition**: P5/P6/P7/P8 all rejected for mismatch (size/grammar/use case/benchmark)
+  - **Key lesson**: Wider SIMD ≠ faster for memory-bound workloads (AVX2 already saturates RAM bandwidth)
+  - See [docs/parsing/yaml.md#p8-avx-512-variants---rejected-](docs/parsing/yaml.md#p8-avx-512-variants---rejected-) for full analysis
+- ✅ P9 (Direct YAML-to-JSON Streaming): **2.3x improvement** on `yq` identity queries - **largest Phase 2 optimization!**
+  - Eliminated intermediate OwnedValue DOM by streaming directly from YAML cursor to JSON
+  - 10KB: 257µs → 108µs (38.1 → 90.5 MiB/s, **+137%**)
+  - 100KB: 1.93ms → 828µs (47.7 → 111.1 MiB/s, **+133%**)
+  - Single-pass YAML→JSON escape transcoding without intermediate string allocation
+  - **Bottleneck shift**: Parsing now 40% of time (was 15%), DOM conversion eliminated
+  - Best for: `yq '.'` identity queries, format conversion, streaming output
+  - See [docs/parsing/yaml.md#p9-direct-yaml-to-json-streaming---accepted-](docs/parsing/yaml.md#p9-direct-yaml-to-json-streaming---accepted-) for full analysis

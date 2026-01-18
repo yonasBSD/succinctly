@@ -41,19 +41,24 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Direct BP open index to text position mapping.
     /// Entry i = text byte offset for the i-th BP open.
     bp_to_text: Vec<u32>,
+    /// End positions for scalars. For each BP open, stores the end byte offset.
+    /// For containers, stores 0 (containers don't have a text end position).
+    bp_to_text_end: Vec<u32>,
     /// Sequence item markers - 1 if BP position is a sequence item wrapper
     seq_items: W,
     /// Container markers - 1 if BP position has a TY entry (is a mapping or sequence)
     containers: W,
+    /// Cumulative popcount per word for containers (for fast rank on containers)
+    containers_rank: Vec<u32>,
     /// Anchor definitions: anchor name → BP position of the anchored value
     anchors: BTreeMap<String, usize>,
     /// Alias references: BP position of alias → target BP position (resolved at parse time)
     aliases: BTreeMap<usize, usize>,
 }
 
-/// Build cumulative popcount index for IB.
+/// Build cumulative popcount index for a bitvector.
 /// Returns a vector where entry i = total 1-bits in words [0, i).
-fn build_ib_rank(words: &[u64]) -> Vec<u32> {
+fn build_cumulative_rank(words: &[u64]) -> Vec<u32> {
     let mut rank = Vec::with_capacity(words.len() + 1);
     let mut cumulative: u32 = 0;
     rank.push(0);
@@ -62,6 +67,20 @@ fn build_ib_rank(words: &[u64]) -> Vec<u32> {
         rank.push(cumulative);
     }
     rank
+}
+
+/// Build cumulative popcount index for IB.
+/// Returns a vector where entry i = total 1-bits in words [0, i).
+#[inline]
+fn build_ib_rank(words: &[u64]) -> Vec<u32> {
+    build_cumulative_rank(words)
+}
+
+/// Build cumulative popcount index for containers.
+/// Returns a vector where entry i = total 1-bits in words [0, i).
+#[inline]
+fn build_containers_rank(words: &[u64]) -> Vec<u32> {
+    build_cumulative_rank(words)
 }
 
 impl YamlIndex<Vec<u64>> {
@@ -74,6 +93,7 @@ impl YamlIndex<Vec<u64>> {
 
         let ib_len = yaml.len();
         let ib_rank = build_ib_rank(&semi.ib);
+        let containers_rank = build_containers_rank(&semi.containers);
 
         Ok(Self {
             ib: semi.ib,
@@ -83,8 +103,10 @@ impl YamlIndex<Vec<u64>> {
             ty: semi.ty,
             ty_len: semi.ty_len,
             bp_to_text: semi.bp_to_text,
+            bp_to_text_end: semi.bp_to_text_end,
             seq_items: semi.seq_items,
             containers: semi.containers,
+            containers_rank,
             anchors: semi.anchors,
             aliases: semi.aliases,
         })
@@ -104,12 +126,14 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         ty: W,
         ty_len: usize,
         bp_to_text: Vec<u32>,
+        bp_to_text_end: Vec<u32>,
         seq_items: W,
         containers: W,
         anchors: BTreeMap<String, usize>,
         aliases: BTreeMap<usize, usize>,
     ) -> Self {
         let ib_rank = build_ib_rank(ib.as_ref());
+        let containers_rank = build_containers_rank(containers.as_ref());
 
         Self {
             ib,
@@ -119,8 +143,10 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             ty,
             ty_len,
             bp_to_text,
+            bp_to_text_end,
             seq_items,
             containers,
+            containers_rank,
             anchors,
             aliases,
         }
@@ -139,6 +165,19 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         // so the index is rank1(bp_pos) if the bit is 1
         let open_idx = self.bp.rank1(bp_pos);
         self.bp_to_text.get(open_idx).map(|&pos| pos as usize)
+    }
+
+    /// Get the text end byte offset for a BP position.
+    ///
+    /// For scalars, returns the end position. For containers and null values, returns `None`.
+    /// The value 0 is used as a sentinel meaning "no end position" (null/empty values).
+    #[inline]
+    pub fn bp_to_text_end_pos(&self, bp_pos: usize) -> Option<usize> {
+        let open_idx = self.bp.rank1(bp_pos);
+        self.bp_to_text_end
+            .get(open_idx)
+            .map(|&pos| pos as usize)
+            .filter(|&pos| pos > 0) // 0 is sentinel for "no end position"
     }
 
     /// Get a reference to the interest bits words.
@@ -229,6 +268,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
     /// Count containers at BP positions 0..bp_pos.
     ///
     /// This gives the TY index for a BP position that is a container.
+    /// Uses a cumulative popcount index for O(1) lookup.
     #[inline]
     pub fn count_containers_before(&self, bp_pos: usize) -> usize {
         let container_words = self.containers.as_ref();
@@ -239,11 +279,10 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         let word_idx = bp_pos / 64;
         let bit_idx = bp_pos % 64;
 
-        let mut count = 0usize;
-        for word in container_words.iter().take(word_idx) {
-            count += word.count_ones() as usize;
-        }
+        // Use cumulative index for full words (O(1) lookup)
+        let mut count = self.containers_rank[word_idx.min(container_words.len())] as usize;
 
+        // Add partial word bits
         if word_idx < container_words.len() && bit_idx > 0 {
             let mask = (1u64 << bit_idx) - 1;
             count += (container_words[word_idx] & mask).count_ones() as usize;

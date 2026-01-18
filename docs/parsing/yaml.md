@@ -737,6 +737,2592 @@ Each phase is independently useful and can be released separately.
 
 ---
 
+## Implemented: SIMD Optimizations (Phase 1.5)
+
+The YAML parser includes SIMD-accelerated operations for hot paths in parsing.
+
+### Implementation
+
+Located in `src/yaml/simd/`:
+- `mod.rs` - Platform dispatch and scalar fallbacks
+- `neon.rs` - ARM NEON implementation (16 bytes/iteration)
+- `x86.rs` - SSE2/AVX2 implementation (16-32 bytes/iteration)
+
+### Functions
+
+```rust
+/// Find next `"` or `\` in double-quoted strings
+pub fn find_quote_or_escape(input: &[u8], start: usize, end: usize) -> Option<usize>;
+
+/// Find next `'` in single-quoted strings
+pub fn find_single_quote(input: &[u8], start: usize, end: usize) -> Option<usize>;
+
+/// Count leading spaces (indentation) from position
+pub fn count_leading_spaces(input: &[u8], start: usize) -> usize;
+```
+
+### Platform-Specific Details
+
+#### ARM64 (NEON)
+
+Uses the multiplication trick for movemask (no native `movemask` on ARM):
+
+```rust
+const MAGIC: u64 = 0x0102040810204080;
+let low_packed = (low_u64.wrapping_mul(MAGIC) >> 56) as u8;
+let high_packed = (high_u64.wrapping_mul(MAGIC) >> 56) as u8;
+(low_packed as u16) | ((high_packed as u16) << 8)
+```
+
+#### x86_64 (SSE2/AVX2)
+
+- Runtime feature detection for AVX2
+- SSE2 baseline (16 bytes/iteration)
+- AVX2 fast path (32 bytes/iteration) when available
+
+### Benchmark Results
+
+#### Apple M1 Max (ARM64 NEON)
+
+##### String Scanning
+
+| Benchmark              | Scalar         | SIMD           | Improvement    |
+|------------------------|----------------|----------------|----------------|
+| yaml/quoted/double/10  | 1.57µs         | 1.44µs         | **8-9% faster**|
+| yaml/quoted/double/100 | 7.57µs         | 6.97µs         | **8-9% faster**|
+| yaml/quoted/double/1000| 67.1µs (688 MiB/s) | 63.0µs (738 MiB/s) | **7.3% throughput** |
+
+##### Indentation Scanning
+
+End-to-end yq identity filter benchmarks after adding SIMD indentation:
+
+| Pattern       | Size  | Before       | After        | Improvement     |
+|---------------|-------|--------------|--------------|-----------------|
+| comprehensive | 1KB   | 4.15 ms      | 3.58 ms      | **+14-24% faster** |
+| comprehensive | 10KB  | 4.91 ms      | 4.23 ms      | **+14-18% faster** |
+| comprehensive | 100KB | 11.40 ms     | 10.73 ms     | **+5-8% faster**   |
+| users         | 1KB   | 3.91 ms      | 3.43 ms      | **+12-16% faster** |
+| users         | 10KB  | 4.76 ms      | 4.26 ms      | **+10-14% faster** |
+
+##### Unquoted Structural Scanning (Chunked Skip)
+
+SIMD search for `\n`, `#`, `:` in unquoted values (`find_unquoted_structural`):
+
+**Parser-level benchmarks (yaml/large):**
+
+| Size   | Before       | After        | Improvement     |
+|--------|--------------|--------------|-----------------|
+| 1 KB   | 4.09 µs      | 3.99 µs      | ~1.5% (noise)   |
+| 10 KB  | 28.9 µs      | 28.3 µs      | **+3.8%**       |
+| 100 KB | 264 µs       | 257 µs       | **+5.2%**       |
+| 1 MB   | 2.51 ms      | 2.33 ms      | **+8.3%**       |
+
+**End-to-end yq identity benchmarks:**
+
+| Size   | Before       | After        | Improvement     |
+|--------|--------------|--------------|-----------------|
+| 100 KB | 11.8 ms      | 10.8 ms      | **+7.8%**       |
+| 1 MB   | 73.7 ms      | 71.4 ms      | **+2.7%**       |
+
+The optimization scales with file size - larger files benefit more because SIMD setup cost is amortized over more data and unquoted values tend to be longer.
+
+**⚠️ Post-Implementation Analysis (2026-01-17):**
+
+End-to-end benchmarks on ARM (M1 Max) showed **no measurable improvement** and small regressions at 10KB:
+- `yq_identity_comparison/succinctly/10kb`: **+6% regression**
+- `yq_identity_comparison/succinctly/100kb`: no change
+- `yq_identity_comparison/succinctly/1mb`: no change
+
+**Root Cause Analysis:** SIMD overhead dominates for typical YAML values (10-40 bytes).
+
+See [Tuning Opportunities](#unquoted-structural-scanning-tuning) below for proposed fixes.
+
+#### AMD Ryzen 9 7950X (x86_64 AVX2/AVX-512) - Baseline (2026-01-17)
+
+**Platform:** AMD Ryzen 9 7950X 16-Core (AVX-512, BMI2, POPCNT)
+**OS:** Linux 6.6.87 WSL2
+**Compiler:** rustc with `-C target-cpu=native`
+
+##### Simple Key-Value Pairs
+| Count  | Time      | Throughput   |
+|--------|-----------|--------------|
+| 10     | 702 ns    | 176 MiB/s    |
+| 100    | 3.72 µs   | 379 MiB/s    |
+| 1,000  | 34.98 µs  | 457 MiB/s    |
+| 10,000 | 364 µs    | 491 MiB/s    |
+
+##### Nested Structures
+| Depth | Width | Time      | Throughput   |
+|-------|-------|-----------|--------------|
+| 3     | 3     | 3.31 µs   | 300 MiB/s    |
+| 5     | 2     | 4.98 µs   | 340 MiB/s    |
+| 10    | 2     | 196.6 µs  | 427 MiB/s    |
+| 3     | 5     | 12.54 µs  | 342 MiB/s    |
+
+##### Sequences
+| Items  | Time     | Throughput   |
+|--------|----------|--------------|
+| 10     | 678 ns   | 112 MiB/s    |
+| 100    | 3.28 µs  | 258 MiB/s    |
+| 1,000  | 31.51 µs | 284 MiB/s    |
+| 10,000 | 309 µs   | 290 MiB/s    |
+
+##### Quoted Strings (Regular)
+| Count | Type   | Time     | Throughput   |
+|-------|--------|----------|--------------|
+| 10    | Double | 712 ns   | 163 MiB/s    |
+| 10    | Single | 698 ns   | 166 MiB/s    |
+| 100   | Double | 4.56 µs  | 331 MiB/s    |
+| 100   | Single | 4.41 µs  | 343 MiB/s    |
+| 1,000 | Double | 42.1 µs  | 361 MiB/s    |
+| 1,000 | Single | 41.3 µs  | 368 MiB/s    |
+
+##### Long Quoted Strings (100 strings each)
+| String Length | Type   | Time      | Throughput   |
+|---------------|--------|-----------|--------------|
+| 64 bytes      | Double | 5.39 µs   | 1.27 GiB/s   |
+| 64 bytes      | Single | 5.41 µs   | 1.27 GiB/s   |
+| 256 bytes     | Double | 11.56 µs  | 2.14 GiB/s   |
+| 256 bytes     | Single | 11.32 µs  | 2.19 GiB/s   |
+| 1024 bytes    | Double | 34.24 µs  | 2.81 GiB/s   |
+| 1024 bytes    | Single | 34.27 µs  | 2.81 GiB/s   |
+| 4096 bytes    | Double | 128.8 µs  | 2.97 GiB/s   |
+| 4096 bytes    | Single | 128.5 µs  | 2.98 GiB/s   |
+
+##### Large Files
+| Size   | Time      | Throughput   |
+|--------|-----------|--------------|
+| 1 KB   | 2.79 µs   | 342 MiB/s    |
+| 10 KB  | 21.3 µs   | 448 MiB/s    |
+| 100 KB | 194.3 µs  | 491 MiB/s    |
+
+**Summary:** Baseline throughput ranges from 176-491 MiB/s for structured data, with string scanning achieving 2.8-3.0 GiB/s. This establishes a performance baseline before AVX2/AVX-512 optimizations.
+
+#### AMD Ryzen 9 7950X - P0+ Optimized Results (2026-01-17)
+
+**Optimizations Implemented:**
+- **P0**: Multi-character classification infrastructure (AVX2/SSE2)
+- **P0+**: Hybrid scalar/SIMD space skipping integration into parser hot paths
+
+##### Performance Improvements vs Baseline
+
+| Workload Category | Baseline Range | P0+ Optimized Range | Improvement |
+|-------------------|----------------|---------------------|-------------|
+| Simple KV         | 176-491 MiB/s  | 187-550 MiB/s       | **+4-7%** |
+| Nested structures | 300-427 MiB/s  | 326-456 MiB/s       | **+9-10%** |
+| Sequences         | 112-290 MiB/s  | 121-378 MiB/s       | **+7-8%** |
+| Quoted strings    | 163-368 MiB/s  | 180-405 MiB/s       | **+10-11%** |
+| Long strings      | 2.8-3.0 GiB/s  | 3.4-3.8 GiB/s       | **+2-21%** |
+| Large files       | 342-491 MiB/s  | 378-559 MiB/s       | **+6-8%** |
+
+**Key Achievements:**
+- ✅ **Structured data: +4-7% faster** (hybrid SIMD space skipping in hot paths)
+- ✅ **String scanning: +2-21% faster** (AVX2 quote/escape detection + smart dispatch)
+- ✅ **Large files: +6-8% faster** (559 MiB/s on 100KB files)
+- ✅ **No regressions** across any workload
+- ✅ **Overall throughput: 187-559 MiB/s** for structured data
+
+##### Selected Benchmark Improvements
+
+| Benchmark | Baseline | P0+ Optimized | Speedup |
+|-----------|----------|---------------|---------|
+| simple_kv/10000 | 364 µs (491 MiB/s) | 326 µs (550 MiB/s) | **+7.1%** |
+| sequences/10000 | 309 µs (290 MiB/s) | 274 µs (366 MiB/s) | **+6.8%** |
+| nested/d3_w5 | 12.54 µs (342 MiB/s) | 11.26 µs (380 MiB/s) | **+10.2%** |
+| quoted/double/1000 | 42.1 µs (361 MiB/s) | 37.9 µs (405 MiB/s) | **+11.1%** |
+| long_strings/4096b/double | 128.8 µs (2.97 GiB/s) | 105.2 µs (3.63 GiB/s) | **+18.3%** |
+| long_strings/4096b/single | 128.5 µs (2.98 GiB/s) | 100.6 µs (3.79 GiB/s) | **+21.7%** |
+| large/100kb | 194.3 µs (491 MiB/s) | 170.4 µs (559 MiB/s) | **+12.3%** |
+| large/10kb | 21.3 µs (448 MiB/s) | 19.6 µs (487 MiB/s) | **+8.0%** |
+| large/1kb | 2.79 µs (342 MiB/s) | 2.52 µs (378 MiB/s) | **+9.7%** |
+
+##### Implementation Details
+
+**P0 Infrastructure** ([`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs)):
+- `classify_yaml_chars_avx2()` - Detect 8 character types in 32 bytes
+- `classify_yaml_chars_sse2()` - Detect 8 character types in 16 bytes
+- `count_leading_spaces()` - Fast indentation counting
+- `find_quote_or_escape()`, `find_single_quote()` - String scanning
+
+**P0+ Integration** ([`src/yaml/parser.rs`](../../src/yaml/parser.rs)):
+- Hybrid scalar/SIMD approach: check first 8 bytes scalar, use SIMD for longer runs
+- Integrated into 3 hot paths: sequence indent checking, block scalar indentation
+- Avoids SIMD dispatch overhead for typical 2-4 space YAML indents
+
+---
+
+### P1: YFSM (YAML Finite State Machine) - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+Attempted to replicate JSON's PFSM success (33-77% improvement) by implementing table-driven state machine for YAML string parsing.
+
+**Implementation Details:**
+- 5-state machine: Block, InDoubleQuote, InSingleQuote, InEscape, InComment
+- Pre-computed tables: `TRANSITION_TABLE[256]`, `PHI_TABLE[256]` (4KB total)
+- Branch-free state transitions via table lookups
+- All 719 tests passed ✅
+
+**Performance Results (AMD Ryzen 9 7950X):**
+
+| Benchmark | P0+ Baseline | YFSM | Change |
+|-----------|-------------|------|--------|
+| quoted/double/1000 | 46.898 µs @ 990.95 MiB/s | 47.073 µs @ 987.64 MiB/s | **-0.3%** |
+| quoted/single/1000 | 50.073 µs @ 851.24 MiB/s | 50.250 µs @ 849.27 MiB/s | **-0.4%** |
+| long_strings/double/64b | 7.6155 µs @ 923.71 MiB/s | 7.4822 µs @ 939.83 MiB/s | **+1.7%** |
+| long_strings/double/256b | 19.577 µs @ 1.2548 GiB/s | 19.384 µs @ 1.2770 GiB/s | **+1.0%** |
+
+**Conclusion:** YFSM provides **0-2% improvement** vs expected **15-25%**. Rejected because:
+
+1. ❌ **No significant performance gain** - YAML strings are too simple compared to JSON
+2. ❌ **P0+ SIMD already optimal** - Table lookups (2 per byte) slower than SIMD (32 bytes at once)
+3. ❌ **Wrong optimization target** - YAML bottlenecks are indentation/context, not strings
+4. ❌ **Added complexity** - 4KB tables + generator + state machine for minimal benefit
+
+**Why YFSM Failed:**
+
+| Factor | JSON (PFSM Success) | YAML (YFSM Failure) |
+|--------|---------------------|---------------------|
+| String complexity | High (nested, escapes, surrogates) | Low (flat, simple escapes) |
+| Baseline performance | ~600 MiB/s | ~990 MiB/s (P0+ SIMD) |
+| SIMD applicability | Moderate (complex patterns) | High (simple quote/escape) |
+| Table lookup cost | Worth it (complex logic) | Not worth it (simple SIMD wins) |
+
+---
+
+### P2.5: Cached Type Checking - IMPLEMENTED ✅
+
+**Status:** Completed 2026-01-17
+
+**Motivation:** The parser frequently checks `type_stack.last() == Some(&NodeType::X)` to determine the current container type when deciding whether to open new containers. This involves:
+1. `Vec::last()` - O(1) but requires a bounds check and pointer math
+2. `Option` unwrapping for comparison
+3. Reference comparison (`&NodeType`)
+
+For a hot path called once per structural element, these small costs accumulate.
+
+**Implementation:**
+
+Added a cached `current_type: Option<NodeType>` field to the `Parser` struct that mirrors the top of `type_stack`:
+
+```rust
+struct Parser<'a> {
+    type_stack: Vec<NodeType>,
+    current_type: Option<NodeType>,  // ← New field
+    // ...
+}
+
+#[inline]
+fn push_type(&mut self, node_type: NodeType) {
+    self.type_stack.push(node_type);
+    self.current_type = Some(node_type);
+}
+
+#[inline]
+fn pop_type(&mut self) -> Option<NodeType> {
+    let popped = self.type_stack.pop();
+    self.current_type = self.type_stack.last().copied();
+    popped
+}
+```
+
+**Benefits:**
+1. **Direct comparison**: `self.current_type == Some(NodeType::Mapping)` instead of `self.type_stack.last() == Some(&NodeType::Mapping)`
+2. **Register allocation**: Compiler can keep `current_type` in a register
+3. **Fewer memory accesses**: No need to access `Vec` internals
+4. **Zero cost**: Only 8 bytes added to `Parser` struct (one-time cost)
+
+**Performance Results (AMD Ryzen 9 7950X):**
+
+| Workload | Baseline | Optimized | Improvement | Note |
+|----------|----------|-----------|-------------|------|
+| Deeply nested (100 levels) | 16.5 µs | 13.7 µs | **-16.8%** | **Best case** |
+| Deeply nested (50 levels) | 5.34 µs | 4.93 µs | **-7.9%** | Strong |
+| Deeply nested (20 levels) | 1.58 µs | 1.55 µs | **-3.5%** | Good |
+| Wide structure (500 width) | 13.5 µs | 13.3 µs | **-2.2%** | Modest |
+| Simple KV (1kb) | 2.54 µs | 2.47 µs | **-2.0%** | End-to-end |
+| Simple KV (10kb) | 19.2 µs | 18.9 µs | **-1.4%** | End-to-end |
+| Simple KV (100kb) | 170 µs | 168 µs | **-1.1%** | End-to-end |
+| Simple KV (1mb) | 1.55 ms | 1.56 ms | +0.6% | Neutral (large) |
+
+**Key Findings:**
+- **Deeply nested YAML** (100 levels): 16.8% faster - excellent for Kubernetes configs with deep nesting
+- **Typical workloads** (1kb-100kb): Consistent 1-2% improvement
+- **Large files** (1mb+): Neutral (cache effects dominate)
+- **No regressions** in real-world scenarios
+
+**Code Locations:**
+- Implementation: [`src/yaml/parser.rs:187-200`](../../src/yaml/parser.rs#L187-L200)
+- Micro-benchmarks: [`benches/yaml_type_stack_micro.rs`](../../benches/yaml_type_stack_micro.rs)
+- Full analysis: See benchmark output above
+
+**Complexity:** Very low - only 2 helper methods and 1 cached field. All type stack operations now go through `push_type()` and `pop_type()`.
+
+---
+
+### P2.6: Software Prefetching for Large Files - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+**Hypothesis:** Large YAML files (100kb-1mb+) suffer from cache misses. Adding software prefetch hints (`_mm_prefetch`) ahead of the parser should reduce latency by loading data into cache before it's needed.
+
+**Implementation Details:**
+- Added `_mm_prefetch` with `_MM_HINT_T0` (temporal locality hint)
+- Prefetch distance: 256 bytes ahead
+- Locations tested:
+  1. `parse_double_quoted` loop (every iteration)
+  2. `parse_single_quoted` loop (every iteration)
+  3. `parse_unquoted_value_with_indent_impl` loop (every line)
+  4. `parse_documents` main loop (every iteration)
+
+```rust
+#[cfg(target_arch = "x86_64")]
+if self.pos + 256 < self.input.len() {
+    unsafe {
+        use core::arch::x86_64::_mm_prefetch;
+        _mm_prefetch(
+            self.input.as_ptr().add(self.pos + 256) as *const i8,
+            core::arch::x86_64::_MM_HINT_T0,
+        );
+    }
+}
+```
+
+**Performance Results (AMD Ryzen 9 7950X):**
+
+| File Size | Baseline | With Prefetch | Change | Note |
+|-----------|----------|---------------|--------|------|
+| 1kb       | 2.91 µs  | 2.93 µs       | +0.5%  | Neutral (noise) |
+| 10kb      | 19.9 µs  | 20.6 µs       | **+3.7%** ❌ | Regression |
+| 100kb     | 177 µs   | 179 µs        | +0.8%  | Neutral (noise) |
+| **1mb**   | **2.58 ms** | **3.36 ms**   | **+30.3%** ❌ | **Severe regression** |
+
+**Conclusion:** Software prefetching is **counterproductive** for YAML parsing. The **30% regression on 1MB files** proves that hardware prefetchers are superior for sequential workloads.
+
+**Why Prefetching Failed:**
+
+1. **Hardware prefetchers already optimal**
+   - Modern AMD Ryzen (Zen 4) has sophisticated L1/L2 stream prefetchers
+   - Automatically detect sequential access patterns
+   - YAML parser accesses memory left-to-right sequentially - perfect for hardware
+
+2. **Cache pollution**
+   - Aggressive prefetching (every loop iteration) evicts hot data
+   - Prefetched data displaces useful cache lines in L1/L2
+   - In 1MB case: repeatedly prefetching 256 bytes ahead causes thrashing
+
+3. **SIMD already handles locality**
+   - `find_quote_or_escape` - processes 32 bytes at once (AVX2)
+   - `find_single_quote` - processes 32 bytes at once
+   - `classify_yaml_chars` - processes 32 bytes at once
+   - SIMD operations inherently fetch data into cache
+
+4. **Sequential access pattern**
+   - Hardware prefetchers excel at sequential patterns
+   - Software prefetch adds no value
+   - Actually interferes with hardware prefetcher heuristics
+
+5. **Prefetch distance too short**
+   - 256 bytes ahead is too close for modern CPUs
+   - L1: 32KB, L2: 1MB per core
+   - Hardware would have already loaded it by the time we access
+
+**When Software Prefetching Works:**
+
+Prefetching helps when:
+- ✅ Access pattern is **non-sequential** (pointer chasing, tree traversal)
+- ✅ Hardware can't predict next access (hash lookups, random jumps)
+- ✅ Prefetch distance is **large** (>>512 bytes)
+- ✅ Prefetching is **sparse** (not every iteration)
+
+YAML parsing **fails all criteria**:
+- ❌ Sequential left-to-right parsing
+- ❌ Predictable pattern (hardware handles it perfectly)
+- ❌ Short distance (256 bytes)
+- ❌ Dense prefetching (every loop iteration)
+
+**Lessons Learned:**
+- Trust hardware prefetchers for sequential workloads on modern x86_64
+- Software prefetching can **harm** performance via cache pollution
+- SIMD operations already optimize memory locality
+- Measure before optimizing - intuition can be wrong
+
+**Full analysis:** `/tmp/prefetch_analysis.md`
+
+---
+
+### P2.7: Block Scalar SIMD - ACCEPTED ✅
+
+**Status:** Implemented and accepted 2026-01-17
+
+**Impact:** **19-25% improvement** on block scalar parsing - largest single optimization in YAML Phase 2!
+
+**Problem:** Block scalars (literal `|` and folded `>` styles) require line-by-line indentation checking to find where the block ends. The original implementation processed one line per iteration:
+1. Count leading spaces on current line
+2. Check if indent < min_indent (block ends)
+3. Skip to end of line
+4. Repeat
+
+This is inefficient for long block scalars (hundreds of lines).
+
+**Solution:** Use SIMD to scan for ALL newlines in 32-byte chunks (AVX2), then check indentation on each line using vectorized space counting. This processes multiple lines per iteration instead of one-by-one.
+
+**Implementation** ([`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs)):
+
+```rust
+/// Find the end of a block scalar by scanning for a line with insufficient indentation.
+pub fn find_block_scalar_end(
+    input: &[u8],
+    start: usize,
+    min_indent: usize,
+) -> Option<usize>
+```
+
+**Algorithm:**
+1. Process input in 32-byte chunks (AVX2)
+2. Use `_mm256_cmpeq_epi8` to find all newlines (`\n`) in chunk
+3. For each newline bit set:
+   - Count leading spaces on next line using SIMD
+   - If indent < min_indent, return position (block ends)
+4. Continue to next chunk
+5. Fall back to SSE2 (16 bytes) if AVX2 unavailable
+6. Fall back to scalar for final bytes
+
+**Integration** ([`src/yaml/parser.rs:2888`](../../src/yaml/parser.rs#L2888)):
+- Call `simd::find_block_scalar_end()` to quickly find block end position
+- Then walk through content to identify chomping positions (last_content_end, trailing_newline_start)
+- Hybrid approach: SIMD for finding boundaries, scalar for correctness
+
+**Performance Results (AMD Ryzen 9 7950X):**
+
+| Benchmark               | Baseline    | SIMD       | Improvement | Speedup  |
+|-------------------------|-------------|------------|-------------|----------|
+| 10x10lines              | 2.81 µs     | 2.77 µs    | -1.4%       | 1.01x    |
+| **50x50lines**          | 61.26 µs    | 50.97 µs   | **-16.8%**  | **1.20x** |
+| **100x100lines**        | 247.41 µs   | 195.25 µs  | **-21.1%**  | **1.27x** |
+| **10x1000lines**        | 237.86 µs   | 193.56 µs  | **-18.6%**  | **1.23x** |
+| **long_10x100lines**    | 56.12 µs    | 45.11 µs   | **-19.6%**  | **1.24x** |
+| **long_50x100lines**    | 280.98 µs   | 223.93 µs  | **-20.3%**  | **1.25x** |
+| **long_100x100lines**   | 556.38 µs   | 443.33 µs  | **-20.3%**  | **1.26x** |
+
+**Throughput Gains:**
+
+| Benchmark               | Baseline      | SIMD          | Improvement |
+|-------------------------|---------------|---------------|-------------|
+| 50x50lines              | 1.40 GiB/s    | 1.68 GiB/s    | **+20%**    |
+| 100x100lines            | 1.39 GiB/s    | 1.76 GiB/s    | **+27%**    |
+| 10x1000lines            | 1.44 GiB/s    | 1.77 GiB/s    | **+23%**    |
+| long_10x100lines        | 1.38 GiB/s    | 1.72 GiB/s    | **+25%**    |
+| long_50x100lines        | 1.38 GiB/s    | 1.73 GiB/s    | **+25%**    |
+| long_100x100lines       | 1.39 GiB/s    | 1.75 GiB/s    | **+26%**    |
+
+**Key Findings:**
+- **Small blocks** (10x10): Minimal benefit (-1.4%) - SIMD overhead dominates
+- **Medium blocks** (50x50 to 100x100): Strong 16-21% improvements
+- **Large blocks** (10x1000, long variants): Consistent 19-25% gains
+- **Scaling**: Improvement increases with block size (SIMD amortization)
+- **No regressions**: Every non-trivial workload shows improvement
+
+**Why It Works:**
+
+1. **SIMD newline scanning** - Process 32 bytes per iteration vs 1 byte
+2. **SIMD indentation counting** - Vectorized space counting reduces per-line overhead
+3. **Early termination** - Find block end upfront, avoid unnecessary iteration
+4. **Batch processing** - Handle multiple lines per SIMD iteration
+
+**Comparison to Other Phase 2 Optimizations:**
+
+| Optimization | Impact | Status |
+|--------------|--------|--------|
+| P2.1 Indentation SIMD | ~3-5% | ✅ Accepted |
+| P2.2 Classify chars SIMD | ~2-4% | ✅ Accepted |
+| P2.3 String scanning SIMD | ~10-15% | ✅ Accepted |
+| P2.5 Cached type checking | ~1-17% | ✅ Accepted |
+| P2.6 Software prefetching | **+30% regression** | ❌ **Rejected** |
+| **P2.7 Block scalar SIMD** | **19-25%** | ✅ **Accepted** ← **Best!** |
+
+This is the **largest single improvement** in YAML Phase 2!
+
+**Lessons Learned:**
+- Hybrid SIMD/scalar approach works well for finding boundaries
+- Newline scanning with AVX2 is highly efficient
+- Block scalars are common in real-world YAML (K8s configs, CI/CD files)
+- SIMD amortizes better with larger blocks
+
+**Code Locations:**
+- SIMD implementation: [`src/yaml/simd/x86.rs:760-950`](../../src/yaml/simd/x86.rs#L760-L950)
+- Scalar fallback: [`src/yaml/simd/mod.rs:180-220`](../../src/yaml/simd/mod.rs#L180-L220)
+- Parser integration: [`src/yaml/parser.rs:2888-2889`](../../src/yaml/parser.rs#L2888-L2889)
+- Benchmarks: [`benches/yaml_bench.rs:295-333`](../../benches/yaml_bench.rs#L295-L333)
+
+---
+
+### P2.8: SIMD Threshold Tuning - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+**Hypothesis:** SIMD functions have setup overhead. By tuning when to use SIMD vs scalar (thresholds), we could avoid paying SIMD cost for inputs too small to benefit.
+
+**Expected Impact:** 2-4% improvement on workloads with many short strings/indentations
+
+**Implementation Details:**
+
+Based on micro-benchmark data, implemented three threshold changes:
+
+1. **`skip_spaces_simd` threshold**: 8 → 12 bytes
+   - Rationale: Micro-benchmarks showed SIMD wins at 16+ spaces, breaks even at 12-14
+
+2. **`find_quote_or_escape` threshold**: None → 16 bytes minimum
+   - Added scalar path for strings < 16 bytes
+   - Rationale: Micro-benchmarks showed SIMD loses 0.58x on < 16 bytes
+
+3. **`find_single_quote` threshold**: None → 16 bytes minimum
+   - Same as find_quote_or_escape
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Operation | Size | Scalar | SIMD | Winner | Speedup |
+|-----------|------|--------|------|--------|---------|
+| count_spaces | 8 | 3.02 ns | 3.24 ns | Scalar | 0.93x |
+| count_spaces | **16** | 5.47 ns | 1.52 ns | **SIMD** | **3.60x** |
+| find_quote | 12 | 3.96 ns | 6.82 ns | Scalar | 0.58x |
+| find_quote | **16** | 5.12 ns | 2.09 ns | **SIMD** | **2.45x** |
+
+Micro-benchmarks suggested SIMD threshold should be 14-16 bytes.
+
+**End-to-End Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Benchmark | Baseline | After Tuning | Change |
+|-----------|----------|--------------|--------|
+| quoted/double/10 | 740 ns | 817 ns | **+10.5%** ❌ |
+| quoted/single/10 | 713 ns | 823 ns | **+15.5%** ❌ |
+| quoted/double/100 | 4.27 µs | 4.61 µs | **+8.0%** ❌ |
+| quoted/single/100 | 4.20 µs | 4.54 µs | **+8.1%** ❌ |
+| quoted/double/1000 | 37.7 µs | 38.8 µs | **+3.0%** ❌ |
+
+**Severe regressions across all workloads!**
+
+**Why It Failed:**
+
+1. **Micro-benchmarks don't match real usage**
+   - Isolated function tests miss compiler optimizations (inlining, devirtualization)
+   - Don't capture branch prediction effects
+   - Artificial inputs (quote at end) ≠ real YAML patterns
+   - Parser state management overhead dominates in practice
+
+2. **Branch misprediction cost**
+   - Adding `if end - start < 16` conditionals to hot paths
+   - Modern CPUs speculatively execute both paths
+   - Misprediction penalty >> SIMD setup cost on Zen 4
+
+3. **Inlining and optimization broken**
+   - SIMD functions are heavily inlined by LLVM
+   - New scalar paths prevent aggressive optimization
+   - Larger code increases icache pressure
+
+4. **Current thresholds were already optimal**
+   - Existing 8-byte threshold for `skip_spaces_simd` works well
+   - Always-SIMD for strings is faster due to inlining
+   - Code was likely empirically tuned during development
+
+5. **Setup cost is negligible on modern CPUs**
+   - AMD Zen 4: Extremely fast SIMD dispatch
+   - Speculative execution hides latency
+   - Fast L1 cache (32KB, 4-cycle latency)
+   - "Setup cost" from micro-benchmarks doesn't materialize in real parsing
+
+**Conclusion:** Threshold tuning based on micro-benchmarks is **counterproductive**. Modern CPUs (branch prediction, speculative execution, fast SIMD) make "obvious" optimizations harmful.
+
+**Lessons Learned:**
+- Micro-benchmark wins ≠ real-world improvements
+- Trust existing well-tuned code
+- Always validate with end-to-end benchmarks
+- Simpler code often performs better on modern CPUs
+- Adding conditionals to hot paths usually hurts performance
+
+**All changes reverted.** Current SIMD thresholds remain unchanged.
+
+---
+
+### P3: Branchless Character Classification - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+**Hypothesis:** Replace branchy character classification (`matches!` macros with multiple OR conditions) with branchless lookup tables to eliminate branch mispredictions in hot parsing loops.
+
+**Expected Impact:** 2-4% improvement (technique used successfully in simdjson)
+
+**Implementation Details:**
+
+Created 256-byte lookup tables for common character classes:
+- `HORIZONTAL_WHITESPACE`: `b' ' | b'\t'`
+- `WHITESPACE`: `b' ' | b'\t' | b'\n' | b'\r'`
+- `FLOW_TERMINATOR`: `b',' | b']' | b'}'`
+- `FLOW_KEY_TERMINATOR`: `b':' | b',' | b'}' | b']'`
+
+Replaced 20+ instances of branchy checks:
+```rust
+// Before:
+while matches!(self.peek(), Some(b' ') | Some(b'\t')) {
+    self.advance();
+}
+
+// After:
+while self.peek().map_or(false, char_class::is_horizontal_whitespace) {
+    self.advance();
+}
+```
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Test | Branchy | Branchless | Result |
+|------|---------|------------|--------|
+| Single char (space) | 593 ps | 573 ps | +3.4% faster ✓ |
+| Single char (letter) | 602 ps | 572 ps | +5.0% faster ✓ |
+| Loop 16 bytes | 7.7 ns | 5.5 ns | **+29% faster** ✓ |
+| Loop 64 bytes | 17.1 ns | 21.3 ns | -25% slower ❌ |
+
+Micro-benchmarks suggested 3-29% improvement on small inputs.
+
+**End-to-End Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Benchmark | Baseline | Branchless | Change |
+|-----------|----------|------------|--------|
+| simple_kv/10 | 679 ns | 850 ns | **+25% regression** ❌ |
+| simple_kv/100 | 3.51 µs | 5.05 µs | **+44% regression** ❌ |
+| simple_kv/1000 | 31.2 µs | 44.6 µs | **+43% regression** ❌ |
+| simple_kv/10000 | 312 µs | 445 µs | **+43% regression** ❌ |
+
+**Catastrophic regressions across all workloads!**
+
+**Why It Failed:**
+
+1. **`.map_or()` overhead dominates**
+   - Option combinator creates function call indirection
+   - Option unwrapping overhead
+   - Closure allocation/inlining complexity
+   - This overhead >> benefit of branchless table lookup
+
+2. **Modern branch predictors are excellent**
+   - AMD Zen 4: 93-95% accuracy on predictable patterns
+   - Whitespace in YAML clusters (indentation, between tokens)
+   - Branch cost < 1 cycle when predicted correctly
+   - Lookup table: always pays 1 L1 cache access
+
+3. **Compiler already optimizes `matches!`**
+   - LLVM converts to efficient 2-4 instruction sequences
+   - Same instruction count as table lookup
+   - But no memory dependency!
+
+4. **Cache line pollution**
+   - 256-byte lookup tables occupy 4 cache lines
+   - Evict hot parser data from L1 cache
+   - Multiple tables increase cache pressure
+
+5. **Inlining broken**
+   - Cross-module function calls harder to inline
+   - `matches!` macro expands at call site (perfect for optimization)
+   - Even `#[inline(always)]` can't match macro inlining
+
+**Conclusion:** "Branchless is faster" techniques from 2000s don't apply to modern CPUs with sophisticated branch predictors. For predictable patterns like YAML parsing, branches are faster than table lookups.
+
+**Key Insight:** This is the **third rejected optimization** showing micro-benchmarks mislead:
+- P2.6 (Prefetching): +30% regression
+- P2.8 (Thresholds): +8-15% regression
+- **P3 (Branchless): +25-44% regression**
+
+All showed micro-benchmark improvements but end-to-end regressions!
+
+**Lessons Learned:**
+- Micro-benchmark wins ≠ real-world improvements (proven three times now!)
+- Modern branch predictors >> lookup tables for predictable patterns
+- Trust compiler optimizations (`matches!` is already optimal)
+- Option combinators have hidden costs in hot loops
+- Cache is precious - don't waste it on lookup tables
+
+**All changes reverted.** Existing `matches!` macros remain unchanged.
+
+---
+
+### P4: Anchor/Alias SIMD - ACCEPTED ✅
+
+**Status:** Implemented and accepted 2026-01-17
+
+**Hypothesis:** Use AVX2 SIMD to accelerate anchor/alias name parsing by scanning for terminator characters in parallel, reducing hot-path overhead in Kubernetes and CI/CD YAML configurations.
+
+**Expected Impact:** 5-15% improvement on anchor-heavy files
+
+**Implementation Details:**
+
+Created SIMD anchor name parser in [`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs):
+
+```rust
+/// Parse anchor/alias name using AVX2 SIMD to find terminator characters.
+#[target_feature(enable = "avx2")]
+unsafe fn parse_anchor_name_avx2(input: &[u8], start: usize) -> usize {
+    // Search for YAML anchor name terminators in 32-byte chunks:
+    // - Whitespace: space, tab, newline, CR
+    // - Flow indicators: [ ] { } ,
+    // - Colons (part of key separator)
+
+    while pos + 32 <= end {
+        let chunk = _mm256_loadu_si256(input.as_ptr().add(pos) as *const __m256i);
+
+        // Check all terminator types in parallel
+        let is_space = _mm256_cmpeq_epi8(chunk, space);
+        let is_tab = _mm256_cmpeq_epi8(chunk, tab);
+        // ... 8 more character checks
+
+        // Combine all terminator checks
+        let terminators = _mm256_or_si256(ws, flow);
+        let terminators = _mm256_or_si256(terminators, is_colon);
+
+        let mask = _mm256_movemask_epi8(terminators);
+        if mask != 0 {
+            return pos + mask.trailing_zeros() as usize;
+        }
+        pos += 32;
+    }
+    // Scalar fallback for remaining bytes
+}
+```
+
+Replaced scalar byte-by-byte scanning in [`src/yaml/parser.rs:3061`](../../src/yaml/parser.rs#L3061):
+
+```rust
+// Before (scalar):
+while let Some(b) = self.peek() {
+    match b {
+        b' ' | b'\t' | b'\n' | b'\r' | b'[' | b']' | b'{' | b'}' | b',' => break,
+        b':' => { /* check if followed by whitespace */ },
+        _ => self.advance(),
+    }
+}
+
+// After (SIMD):
+let end = simd::parse_anchor_name(self.input, start);
+self.pos = end;
+```
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Anchor Name Length | Scalar | SIMD | Speedup |
+|--------------------|--------|------|---------|
+| short_4 | 3.11 ns (1.20 GiB/s) | 2.88 ns (1.29 GiB/s) | 1.08x |
+| medium_16 | 9.76 ns (1.53 GiB/s) | 8.72 ns (1.71 GiB/s) | 1.12x |
+| long_32 | 18.21 ns (1.58 GiB/s) | 1.99 ns (14.53 GiB/s) | **9.16x** ✅ |
+| very_long_64 | 40.63 ns (1.47 GiB/s) | 3.38 ns (17.64 GiB/s) | **12.03x** ✅ |
+
+Character scanning (finding `&` and `*`):
+
+| Input Size | Scalar | SIMD | Speedup |
+|------------|--------|------|---------|
+| small_100 | 3.18 ns (20.2 GiB/s) | 2.33 ns (27.6 GiB/s) | 1.37x |
+| medium_1kb | 24.49 ns (27.6 GiB/s) | 13.66 ns (49.6 GiB/s) | **1.79x** ✅ |
+
+**End-to-End Benchmark Results (AMD Ryzen 9 7950X):**
+
+| Benchmark | Baseline | P4 SIMD | Time Change | Throughput Gain |
+|-----------|----------|---------|-------------|-----------------|
+| **anchors/10** | 1.530 µs (293 MiB/s) | 1.387 µs (323 MiB/s) | **-9.9%** | **+11%** ✅ |
+| **anchors/100** | 13.60 µs (319 MiB/s) | 11.65 µs (372 MiB/s) | **-14.6%** | **+17%** ✅ |
+| **anchors/1000** | 155.5 µs (293 MiB/s) | 139.2 µs (327 MiB/s) | **-10.1%** | **+11%** ✅ |
+| **anchors/5000** | 794.7 µs (301 MiB/s) | 749.5 µs (319 MiB/s) | **-6.2%** | **+6.6%** ✅ |
+| **k8s_10** | 4.077 µs (334 MiB/s) | 3.965 µs (343 MiB/s) | **-2.9%** | **+3%** ✅ |
+| **k8s_50** | 16.37 µs (384 MiB/s) | 16.24 µs (387 MiB/s) | **-1.1%** | **+1.1%** ✅ |
+| **k8s_100** | 33.92 µs (367 MiB/s) | 31.40 µs (396 MiB/s) | **-7.4%** | **+8%** ✅ |
+
+**Consistent improvements across all anchor-heavy workloads!**
+
+**Why P4 Succeeded (Unlike P2.6, P2.8, P3):**
+
+1. **Real algorithmic win**
+   - SIMD string searching is proven technique (like quotes, newlines)
+   - Processes 32 bytes in ~2ns vs scalar ~40ns for 64-byte names
+   - Clear performance advantage, not microoptimization
+
+2. **No hidden costs**
+   - Unlike P3 (Branchless): No `.map_or()` overhead
+   - Unlike P2.6 (Prefetching): No cache pollution
+   - Unlike P2.8 (Thresholds): No branch prediction interference
+   - Pure SIMD string scanning with scalar fallback
+
+3. **Targets actual bottleneck**
+   - Anchor parsing is hot path in Kubernetes/CI configs
+   - Long anchor names (32+ chars) common in real YAML:
+     - `&default_resource_limits`
+     - `&common_labels_for_deployment`
+     - `&production_database_configuration`
+
+4. **Micro-benchmarks aligned with reality**
+   - 9-12x wins for 32-64 byte names → 6-17% end-to-end improvement
+   - First time micro-benchmark wins translated to real gains!
+   - Previous failed opts (P2.6, P2.8, P3) showed micro wins but end-to-end regressions
+
+**Scaling Behavior:**
+
+- **Small (10 anchors):** 10% improvement - SIMD setup cost visible
+- **Medium (100-1000):** 11-17% improvement - **best gains**
+- **Large (5000):** 6.6% improvement - other bottlenecks emerge
+- **K8s (realistic):** 1-8% improvement - typical real-world gain
+
+**Key Lesson:**
+
+This is the **first optimization since P2.7 (Block Scalar SIMD)** to show end-to-end improvements. Unlike P2.6/P2.8/P3 which all showed micro-benchmark wins but catastrophic end-to-end regressions, P4 proves that:
+
+- **Micro-benchmark wins CAN translate to real gains** when targeting real bottlenecks
+- **SIMD string searching** is fundamentally different from branchless/prefetch tricks
+- **Algorithmic improvements** beat microoptimizations dependent on CPU behavior
+
+**Files Modified:**
+- [`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs) - Added `parse_anchor_name_avx2()`, `parse_anchor_name_scalar()`, `parse_anchor_name()`
+- [`src/yaml/simd/mod.rs`](../../src/yaml/simd/mod.rs) - Exported `parse_anchor_name()` public API
+- [`src/yaml/parser.rs:3061`](../../src/yaml/parser.rs#L3061) - Replaced scalar loop with SIMD call
+
+**Changes committed:** Optimization accepted and retained.
+
+---
+
+### P5: Flow Collection Fast Path - REJECTED ❌
+
+**Status:** Analyzed and rejected 2026-01-17 (not implemented)
+
+**Hypothesis:** Use SIMD techniques from JSON parser to accelerate flow collection parsing (`[a, b, c]` and `{key: value}`), since flow collections are structurally similar to JSON.
+
+**Expected Impact:** 10-20% improvement on flow-heavy YAML files
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+**Skip Whitespace:**
+
+| Size | Scalar | SIMD | Speedup |
+|------|--------|------|---------|
+| 4 bytes | 1.37 ns | 1.50 ns | 0.91x (scalar wins) ❌ |
+| 16 bytes | 6.43 ns | 6.48 ns | 0.99x (tie) |
+| 64 bytes | 25.9 ns | 1.84 ns | **14.1x faster** ✅ |
+| 128 bytes | 43.3 ns | 3.48 ns | **12.4x faster** ✅ |
+
+**Find Structural Characters:**
+
+| Size | Scalar | SIMD | Speedup |
+|------|--------|------|---------|
+| 8 bytes | 3.85 ns | 3.70 ns | 1.04x (tiny win) |
+| 32 bytes | 12.5 ns | 1.43 ns | **8.7x faster** ✅ |
+| 128 bytes | 53.8 ns | 5.04 ns | **10.7x faster** ✅ |
+
+**Micro-benchmarks showed massive SIMD wins for large inputs (8-14x faster)!**
+
+**Why It Was Rejected (Before Implementation):**
+
+After analyzing micro-benchmark results against real YAML data, a critical size mismatch was discovered:
+
+**Real flow collections from test suite:**
+```yaml
+items: [1, 2, 3]                          # 9 bytes
+person: {name: Alice, age: 30}             # 22 bytes
+items: ["hello", 'world', plain]          # 26 bytes
+data: {users: [{name: Alice}, {name: Bob}]} # 44 bytes
+- {one: two, three: four}                 # 25 bytes
+```
+
+**Typical flow collections: 10-30 bytes**
+**SIMD wins start at: 32+ bytes**
+
+**The Problem:**
+
+90% of real flow collections are < 30 bytes, but SIMD only wins at 32+ bytes. For typical inputs:
+- 4-16 byte whitespace: Scalar wins or ties
+- 8-byte structural search: Essentially tied
+- SIMD overhead (dispatch, setup) would dominate on small inputs
+
+**This is the P2.8/P3 Pattern:**
+
+| Optimization | Micro Win | Real Data | Expected Result |
+|--------------|-----------|-----------|-----------------|
+| P2.8 (Thresholds) | 2-4% on large | Most < 16 bytes | +8-15% regression ❌ |
+| P3 (Branchless) | 3-29% on loops | Predictable | +25-44% regression ❌ |
+| **P5 (Flow SIMD)** | **8-14x on 64+ bytes** | **Most < 30 bytes** | Predicted regression ⚠️ |
+
+**Decision Rationale:**
+
+This is the **fourth time** micro-benchmarks have shown wins on large inputs while real data is small:
+1. P2.6 (Prefetching): Micro wins → +30% regression
+2. P2.8 (Thresholds): Micro wins → +8-15% regression
+3. P3 (Branchless): Micro wins → +25-44% regression
+4. **P5 (Flow SIMD)**: Micro wins (8-14x) → **aborted before implementation**
+
+**Lesson learned:** Optimization aborted during analysis phase to avoid wasting implementation effort on a predicted failure.
+
+**Why P4 (Anchor SIMD) succeeded but P5 would fail:**
+- **P4**: Targeted 32-64 byte anchor names common in Kubernetes configs (real data matches SIMD sweet spot)
+- **P5**: Would target 10-30 byte flow collections (real data too small for SIMD to win)
+
+**Key Insight:**
+
+**Micro-benchmark wins only translate to real gains when optimizing inputs that actually exist in real workloads.**
+
+Analyzing real data sizes BEFORE implementation saved significant development time and prevented another regression.
+
+**No implementation or end-to-end benchmarks performed.** Optimization rejected at analysis stage.
+
+---
+
+### P6: BMI2 Operations (PDEP/PEXT) - REJECTED ❌
+
+**Status:** Analyzed and rejected 2026-01-17 (not implemented)
+
+**Goal:** Use BMI2 instructions (PDEP/PEXT) for bit manipulation in escape sequence handling, similar to successful DSV quote masking.
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+| String Size | Type | Scalar | SIMD+Scalar | BMI2 | BMI2 vs SIMD |
+|-------------|------|--------|-------------|------|--------------|
+| **12B** | no escape | 5.99ns | **3.51ns** | 3.83ns | **1.1x slower** ❌ |
+| **30B** | dense escape | 7.44ns | 8.87ns | **7.22ns** | 1.2x vs scalar |
+| **102B** | no escape | 55.97ns | 4.76ns | **3.25ns** | **1.5x faster** ✅ |
+| **103B** | sparse escape | 62.84ns | 4.88ns | **4.08ns** | **1.2x faster** ✅ |
+| **1002B** | no escape | 561.58ns | **26.84ns** | 29.82ns | **1.1x slower** ❌ |
+
+**BMI2 Sweet Spot:** 100-200 byte strings (1.2-1.5x faster than SIMD+Scalar)
+
+**Real YAML Benchmark Strings:**
+```yaml
+key1: "This is a quoted string with value 1"  # 45 bytes total, 36 bytes content
+```
+- Typical quoted strings: **32-45 bytes** (at threshold, minimal benefit)
+- String content only: **32-36 bytes**
+- Estimated distribution:
+  - < 50 bytes: ~70% of strings
+  - 50-100 bytes: ~20% of strings
+  - 100+ bytes: ~10% of strings
+
+**Critical Issues:**
+
+1. **Size Mismatch** (Same pattern as P5):
+   - BMI2 sweet spot: 100-200 bytes (1.2-1.5x win)
+   - Real data: 32-50 bytes (at threshold, minimal benefit)
+   - Weighted average: **likely 0-5% gain at best**
+
+2. **Correctness Bug:**
+   ```rust
+   // Prototype implementation (WRONG):
+   unsafe fn compute_escaped_positions_bmi2(backslash_mask: u64) -> u64 {
+       backslash_mask << 1  // Too simplistic!
+   }
+   ```
+   This doesn't handle:
+   - Consecutive backslashes: `\\` (second `\` is escaped, not an escaper)
+   - Escape sequences spanning chunk boundaries
+   - Fixing would add overhead, eliminating marginal wins
+
+3. **Early-Exit Disadvantage:**
+   For long strings (1KB+), SIMD+Scalar wins because:
+   - It finds the closing quote and returns immediately
+   - BMI2 processes full 32-byte chunks regardless
+   - Result: **1.1x regression** on 1KB strings
+
+**Comparison to DSV (Where BMI2 Succeeded):**
+
+| Aspect | DSV (Success) | YAML (Cannot Apply) |
+|--------|---------------|---------------------|
+| **Use case** | Build quote state index | Individual string parsing |
+| **Quote grammar** | Context-free (`""` escape) | Context-sensitive (`\"` escape) |
+| **Index feasibility** | ✅ One pass | ❌ Needs escape preprocessing |
+| **BMI2 application** | `toggle64` for quote state | Would need escape mask first |
+| **Algorithm** | PDEP scatter + carry | Circular dependency |
+| **Data independence** | Processes all data | Early-exit on individual strings |
+
+**Why DSV BMI2 Works But YAML Cannot Use Same Approach:**
+
+**DSV builds a global quote index:**
+```csv
+field1,"field,2",field3
+Quotes: ------^-------^--------
+Index:  000000111111110000000000  (BMI2 toggle64 builds this in one pass)
+```
+- Quote escaping: `""` is still two quote characters (detectable in bitmask)
+- Context-free: Every `"` is either start or end of quote region
+- One pass: Scan document once, build index using BMI2
+- Index answers: "Is position X inside quotes?" (O(1) with rank/select)
+
+**YAML cannot build quote index (grammar prevents it):**
+```yaml
+key: "value with \" escape"
+     ^-----------------^
+```
+
+**Fundamental problem:** Need escape mask before quote mask
+1. Find all `"` positions → `00000100000000001000000000`
+2. Find all `\` positions → `00000000000000010000000000`
+3. Mark escaped bytes → `00000000000000001000000000` (the `"` after `\`)
+4. Remove escaped quotes → Needs carry logic (what we're trying to avoid!)
+5. Run BMI2 toggle → Would work, but step 4 already required similar complexity
+
+**Additional YAML complications:**
+- **Two quote types**: `"` (backslash escape) vs `'` (doubled quote escape)
+- **Block scalars**: `|` and `>` aren't quotes but need indentation tracking
+- **Context-dependent**: Quote meaning depends on block vs flow context
+
+**Why this matters:**
+- DSV: Build index faster than parsing sequentially
+- YAML: Building index requires most of the parsing work anyway
+- YAML's current approach (early-exit SIMD) is optimal for its grammar
+
+**Alternative considered:** Multi-pass approach
+1. Pass 1: Build backslash mask
+2. Pass 2: Build quote mask (excluding escaped quotes)
+3. Pass 3: Parse using masks
+
+Result: 3 passes slower than current 1 pass with early-exit SIMD
+
+**Comparison to P5:**
+
+| Aspect | P5 (Flow SIMD) | P6 (BMI2) |
+|--------|---------------|-----------|
+| **Sweet spot** | 64-128 bytes (8-14x win) | 100-200 bytes (1.2-1.5x win) |
+| **Real data** | 10-30 bytes | 32-50 bytes |
+| **Mismatch severity** | Severe (10x gap) | Moderate (3x gap) |
+| **Correctness** | Correct | Has bugs |
+| **Expected gain** | Regression | 0-5% |
+
+P6 is less severe than P5, but still not worth implementing.
+
+**Decision: ABORT P6**
+
+**Primary reason: YAML's grammar prevents DSV-style quote indexing**
+
+YAML cannot use BMI2 like DSV does because:
+
+1. ❌ **Grammar incompatibility** - YAML needs escape preprocessing before quote detection
+   - DSV: `""` is still two quote characters (context-free)
+   - YAML: `\"` is backslash + quote (different characters)
+   - Cannot build quote bitmask without already handling escapes
+
+2. ❌ **Circular dependency** - Escape handling is what we're trying to optimize
+   - DSV: Build quote index in one pass using BMI2 `toggle64`
+   - YAML: Need escape mask → quote mask → parse (3 passes)
+   - Current approach (early-exit SIMD) is already optimal for YAML's grammar
+
+3. ❌ **Wrong use case tested** - Micro-benchmarks tested individual string parsing
+   - DSV BMI2: Builds global index for entire document
+   - My P6 test: Per-string parsing (early-exit SIMD wins on short strings)
+   - Comparison was apples-to-oranges
+
+**Secondary reasons (from micro-benchmark analysis):**
+
+4. ❌ **Size mismatch** - Real strings (32-50B) below sweet spot (100-200B)
+5. ❌ **Marginal wins** - Even at 100B, only 1.2-1.5x faster (vs DSV's 10x)
+6. ❌ **Correctness issues** - Prototype has bugs requiring complex fixes
+
+**Key Lessons:**
+
+1. **Grammar matters**: BMI2 quote indexing works for DSV because quotes are context-free. YAML's backslash escaping breaks this assumption.
+
+2. **Use case alignment**: DSV builds an index (scans everything once). YAML parses sequentially (early-exit optimization). Can't directly apply index-building techniques to sequential parsing.
+
+3. **When to use BMI2 for quotes**: Only when quote escaping is context-free (CSV's `""`, not YAML's `\"`).
+
+**No implementation or end-to-end benchmarks performed.** Optimization rejected at analysis stage after:
+1. Micro-benchmarks revealed size mismatch for per-string parsing approach
+2. Grammar analysis showed quote indexing (DSV approach) is impossible for YAML
+
+---
+
+### P7: Newline Index - REJECTED ❌
+
+**Status:** Analyzed and rejected 2026-01-17 (not implemented)
+
+**Goal:** Build a newline index (bitvector + rank structure) for fast line number lookups, similar to JSON's `NewlineIndex`.
+
+**Analysis Findings:**
+
+**JSON's `NewlineIndex` usage:**
+- **NOT built during parsing** - only in `jq-locate` CLI tool
+- **Purpose:** Convert `--line X --column Y` to byte offset for user convenience
+- **Never used in:** JSON parsing, jq queries, or benchmarks
+- **Zero performance impact** on actual JSON processing
+
+**From `jq_locate.rs`:**
+```rust
+let offset = match (args.offset, args.line, args.column) {
+    (Some(off), None, None) => off,  // Direct offset - no index needed
+    (None, Some(line), Some(column)) => {
+        // Only build index if user provides line/column
+        let newline_index = NewlineIndex::build(&text);
+        newline_index.to_offset(line, column)?
+    }
+};
+```
+
+**YAML's current approach:**
+```rust
+fn current_line(&self) -> usize {
+    // Count newlines from start to current position
+    self.input[..self.pos].iter().filter(|&&b| b == b'\n').count() + 1
+}
+```
+- **Cost:** O(n) linear scan
+- **Comment:** "Only called on error paths, so we pay the cost only when needed."
+- **Call sites:** 4 total, all in error reporting (TabIndentation, UnexpectedToken, etc.)
+
+**Two possible interpretations of P7:**
+
+**Option A: CLI Tool Feature (like JSON)**
+- Add `yq-locate` tool for YAML
+- Build NewlineIndex only in CLI tool, on-demand
+- **No impact on parsing or benchmarks**
+- **Not a performance optimization** - just a UX feature
+
+**Option B: Build Index During Parsing (misguided)**
+- Build NewlineIndex during every YAML parse
+- Use for O(1) error reporting
+- **Impact on benchmarks:**
+  - Build cost: O(n) scan + storage (1 bit per byte + rank index)
+  - Benefit: Zero (benchmarks use valid YAML, never call `current_line()`)
+  - **Result: Pure overhead, regression**
+
+**Critical differences from JSON:**
+
+| Aspect | JSON | YAML |
+|--------|------|------|
+| **Builds NewlineIndex during parse?** | ❌ No | ❌ No (would be mistake) |
+| **Uses in benchmarks?** | ❌ No | ❌ No |
+| **Uses in CLI tools?** | ✅ Yes (`jq-locate`) | ❓ No `yq-locate` yet |
+| **Line number for errors** | Lazy O(n) scan | Lazy O(n) scan |
+
+**Why Option B would fail:**
+
+**Benchmark workloads:**
+- All valid YAML (no parse errors)
+- `current_line()` never called
+- Build index: O(n) cost
+- Use index: 0 times
+- **Net: Pure overhead** ❌
+
+**Error reporting:**
+- Build index: O(n) cost
+- Use index: 1-2 times per error
+- Save: O(n) → O(1) per lookup
+- **But:** Error reporting is not a hot path!
+
+**Why this differs from P5/P6:**
+
+| Optimization | Issue |
+|--------------|-------|
+| P5 (Flow SIMD) | Size mismatch (SIMD sweet spot vs real data) |
+| P6 (BMI2) | Grammar mismatch (can't apply DSV techniques) |
+| **P7 (Newline Index)** | **Use case mismatch** (CLI feature, not parsing optimization) |
+
+**Decision: REJECT P7 as a performance optimization**
+
+Reasons:
+1. ❌ **Not a performance feature** - JSON doesn't build it during parsing
+2. ❌ **No benchmark impact** - Only useful for CLI tools (not implemented)
+3. ❌ **Would cause regression** - O(n) build cost with zero benefit for valid YAML
+4. ❌ **Misunderstood precedent** - NewlineIndex is CLI UX, not optimization
+
+**Alternative (not a performance optimization):**
+- Could add `yq-locate` CLI tool with on-demand NewlineIndex
+- Would match JSON's approach (build only when needed)
+- **Not relevant to parsing performance benchmarks**
+
+**Key Lesson:**
+
+Not all features in JSON are performance optimizations. NewlineIndex is a CLI convenience feature built on-demand, not during normal parsing. Applying it to YAML parsing would be adding overhead to the hot path (parsing) to optimize the cold path (CLI tool that doesn't exist yet).
+
+**No implementation or micro-benchmarks performed.** Optimization rejected at analysis stage after discovering JSON's NewlineIndex is not built during parsing.
+
+---
+
+### P8: AVX-512 Variants - REJECTED ❌
+
+**Status:** Micro-benchmarked and rejected 2026-01-18
+
+Attempted to use AVX-512 (64-byte SIMD) instead of AVX2 (32-byte) for YAML primitives, expecting wider vectors to improve throughput on systems with AVX-512 support (AMD Ryzen 9 7950X).
+
+**Implementation Details:**
+- Created `benches/yaml_avx512_micro.rs` with three AVX-512 primitives:
+  1. `classify_yaml_chars_avx512` - 64-byte character classification
+  2. `find_block_scalar_end_avx512` - 64-byte block scalar boundary detection
+  3. `parse_anchor_name_avx512` - 64-byte anchor name parsing
+- Used AVX-512-BW instructions (`_mm512_cmpeq_epi8_mask` for mask generation)
+- Benchmarked against AVX2 implementations at 6 input sizes (32B to 4KB)
+
+**Micro-Benchmark Results (AMD Ryzen 9 7950X):**
+
+**Character Classification (classify_yaml_chars):**
+
+| Size | AVX2 Time | AVX2 Throughput | AVX-512 Time | AVX-512 Throughput | Speedup |
+|------|-----------|-----------------|--------------|-------------------|---------|
+| 32B  | 17.49 ns  | 1.70 GiB/s      | 1.66 ns      | 17.92 GiB/s       | **10.5x** ❌ *Invalid (optimization artifact)* |
+| 64B  | 17.34 ns  | 3.44 GiB/s      | 18.59 ns     | 3.21 GiB/s        | **0.93x (7% slower)** ❌ |
+| 128B | 18.95 ns  | 6.29 GiB/s      | 18.94 ns     | 6.30 GiB/s        | **1.00x (neutral)** |
+| 256B | 58.33 ns  | 4.09 GiB/s      | 29.05 ns     | 8.21 GiB/s        | **2.01x faster** ⚠️ *Misleading* |
+| 1KB  | 164.74 ns | 5.79 GiB/s      | 138.97 ns    | 6.86 GiB/s        | **1.19x faster** ⚠️ *Misleading* |
+| 4KB  | 422.42 ns | 9.03 GiB/s      | 380.55 ns    | 10.02 GiB/s       | **1.11x faster** ⚠️ *Misleading* |
+
+**Critical Issue: Flawed Benchmark Design**
+
+The benchmark measured **loop iterations**, not realistic work:
+
+```rust
+// AVX2: processes 32 bytes per iteration
+while pos + 32 <= input.len() {
+    results.push(classify_yaml_chars_avx2(input, pos));
+    pos += 32;  // 8 iterations for 256B input
+}
+
+// AVX-512: processes 64 bytes per iteration
+while pos + 64 <= input.len() {
+    results.push(classify_yaml_chars_avx512(input, pos));
+    pos += 64;  // 4 iterations for 256B input
+}
+```
+
+**Why the "2x speedup" at 256B is artificial:**
+- AVX2 does 8 iterations (256 ÷ 32)
+- AVX-512 does 4 iterations (256 ÷ 64)
+- Benchmark measures **number of function calls**, not **amount of work per call**
+- AVX-512 appears "2x faster" because it does **half the iterations**, not because it's twice as efficient
+
+**In real YAML parsing:**
+- We scan linearly through input looking for specific characters
+- Both AVX2 and AVX-512 would need to examine the same positions
+- AVX-512's wider vector doesn't reduce total work, just changes loop structure
+
+**Realistic Small-Size Results:**
+
+At actual YAML chunk sizes (64-128B), AVX-512 shows:
+- **64B: 7% slower** (18.59ns vs 17.34ns) - Memory bandwidth bottleneck
+- **128B: Neutral** (18.94ns vs 18.95ns) - Break-even point
+
+**Why AVX-512 Cannot Help YAML:**
+
+**1. JSON Precedent - AVX-512 Was 7-17% Slower**
+
+From `docs/archive/avx512-json-results.md`:
+```markdown
+The AVX-512 JSON parser implementation has been **removed** from the codebase
+because it was consistently **7-17% slower** than AVX2 across all workloads.
+```
+
+Key quote from `CLAUDE.md`:
+> "Wider SIMD != automatically faster (AVX-512 JSON was 10% slower than AVX2)"
+
+**2. Memory-Bound Workload**
+
+Both JSON and YAML parsing are memory-bound:
+- Throughput limited by RAM bandwidth, not compute
+- Wider SIMD vectors = more data demand per cycle
+- Memory subsystem can't keep up → stalls
+
+From `docs/optimisations/cache-memory.md`:
+> **This is why AVX-512 JSON parsing was 7-17% slower** - the workload was memory-bound.
+
+**3. Zen 4 Architecture Limitation**
+
+AMD Ryzen 9 7950X (Zen 4) splits 512-bit operations:
+- Physical execution units: 256-bit wide
+- 512-bit operations split into two 256-bit ops
+- Adds overhead without benefit
+- AVX2 uses native 256-bit paths directly
+
+**4. Benchmark Design Doesn't Reflect Real Parsing**
+
+The micro-benchmark's "wins" at 256B+ come from:
+- Doing fewer loop iterations (not more work per iteration)
+- Not matching real YAML parsing patterns
+- Real parsing: sequential scan, early-exit on character match
+- Benchmark: process entire input in fixed chunks
+
+**5. Pattern Recognition: P5/P6/P7/P8 Rejections**
+
+All four recent optimizations rejected for **mismatch between assumptions and reality**:
+- **P5:** Size mismatch (SIMD sweet spot vs real data)
+- **P6:** Grammar mismatch (can't apply DSV techniques)
+- **P7:** Use case mismatch (CLI feature, not optimization)
+- **P8:** Benchmark mismatch (measures iterations, not work)
+
+**Decision: REJECT P8**
+
+**Primary reasons:**
+1. **Micro-benchmark design flaw** - measures loop iterations instead of work performed
+2. **Realistic sizes (64-128B) show regression/neutral** - no benefit where it matters
+3. **JSON precedent** - AVX-512 was 7-17% slower and removed from codebase
+4. **Memory-bound workload** - YAML parsing limited by RAM bandwidth like JSON
+5. **Zen 4 splits 512-bit ops** - overhead without benefit on target platform
+6. **High risk of end-to-end regression** - no validation of real-world benefit
+
+**Key Lesson:**
+
+Wider SIMD is not automatically faster. For memory-bound workloads like sequential text parsing:
+- **Bottleneck:** RAM bandwidth (can't feed wider vectors fast enough)
+- **AVX2 (32B):** Already saturates memory bandwidth
+- **AVX-512 (64B):** Doubles data demand → more stalls, slower throughput
+
+**Pattern:** When JSON and YAML both parse sequentially through memory, same bottlenecks apply. JSON's AVX-512 failure strongly predicts YAML's would fail too.
+
+**No end-to-end benchmarks performed.** Optimization rejected after micro-benchmark analysis revealed flawed design and JSON's precedent confirmed memory-bound workloads don't benefit from wider SIMD.
+
+**Files created (to be cleaned up):**
+- `benches/yaml_avx512_micro.rs` - AVX-512 micro-benchmarks (DELETE)
+
+---
+
+### P9: Direct YAML-to-JSON Streaming - ACCEPTED ✅
+
+**Status:** Implemented and accepted 2026-01-15
+
+**Hypothesis:** The `yq` identity query (`yq '.'`) was bottlenecked by converting YAML → OwnedValue DOM → JSON. Direct streaming from YAML cursor to JSON output should bypass the intermediate representation and significantly improve throughput.
+
+**Problem Analysis:**
+
+Old approach had 3 phases:
+1. **Parse YAML** → Build semi-index (285µs for 100KB)
+2. **Convert to DOM** → Traverse index, build OwnedValue tree (952µs) ← **Bottleneck**
+3. **Serialize JSON** → Format OwnedValue as JSON string (690µs)
+
+**Total:** 1.93ms (47.7 MiB/s)
+
+**Implementation Details:**
+
+Created direct streaming path in [`src/yaml/light.rs`](../../src/yaml/light.rs):
+
+**New API:**
+```rust
+impl YamlCursor {
+    /// Convert entire YAML document to JSON string
+    pub fn to_json_document(&self) -> String;
+
+    /// Stream YAML value to JSON output
+    pub fn to_json(&self) -> String;
+
+    /// Write YAML value as JSON to output buffer
+    fn write_json_to(&self, output: &mut String);
+}
+```
+
+**Key techniques:**
+
+1. **Single-pass transcoding** - Convert YAML escape sequences directly to JSON escapes without intermediate string allocation
+2. **Inline type coercion** - Handle YAML special values (`null`, `true`, `.inf`, `.nan`) during streaming
+3. **Cursor-based iteration** - Use `uncons_cursor()` to iterate sequences/mappings without materializing arrays
+
+**Escape sequence mapping:**
+```rust
+// YAML → JSON escape translation (single pass)
+'\n' → "\n"    // newline (same)
+'\t' → "\t"    // tab (same)
+'\"' → "\""    // quote (same)
+'\\' → "\\"    // backslash (same)
+'\a' → "\u0007" // bell → JSON unicode
+'\x41' → "A"    // hex → decoded character
+'\u0041' → "A"  // 4-digit unicode → decoded
+'\U0001F600' → "\uD83D\uDE00" // 8-digit → surrogate pair
+```
+
+**Fast path in yq_runner:**
+```rust
+// Before: YAML → OwnedValue → JSON (3 steps)
+let owned = yaml_to_owned_value(root.value());
+let json = owned.to_json();
+
+// After: YAML → JSON (1 step)
+let json = root.to_json_document();
+```
+
+**End-to-End Results (AMD Ryzen 9 7950X):**
+
+| File Size | OLD (3-phase) | NEW (streaming) | Speedup | Throughput Improvement |
+|-----------|---------------|-----------------|---------|------------------------|
+| **10 KB** | 257µs (38.1 MiB/s) | 108µs (90.5 MiB/s) | **2.37x** | **+137%** ✅ |
+| **100 KB** | 1.93ms (47.7 MiB/s) | 828µs (111.1 MiB/s) | **2.33x** | **+133%** ✅ |
+
+**Phase breakdown (100KB file):**
+
+| Phase | OLD Time | OLD % | NEW Time | NEW % |
+|-------|----------|-------|----------|-------|
+| Parse | 285µs | 14.8% | 334µs | 40.3% |
+| Convert | 952µs | 49.4% | 494µs | 59.7% |
+| Serialize | 690µs | 35.8% | — | — |
+| **Total** | **1.93ms** | **100%** | **828µs** | **100%** |
+
+**Micro-Benchmark Results (benches/yaml_transcode_micro.rs):**
+
+| Workload | Throughput | Notes |
+|----------|------------|-------|
+| **Realistic config** | 276 MiB/s | YAML with quoted strings, escapes |
+| **Escape-heavy** | 263 MiB/s | Many `\n`, `\t`, `\"`, `\U` escapes |
+| **Double-quoted** | 328-518 MiB/s | Scales with escape complexity |
+| **Single-quoted** | 343-368 MiB/s | Simpler escape rules |
+| **Large (500 items)** | 284 MiB/s | Realistic multi-document workload |
+
+**Key Achievements:**
+
+1. ✅ **2.3x faster end-to-end** for `yq` identity queries
+2. ✅ **Eliminated intermediate DOM** - no OwnedValue allocation
+3. ✅ **Single-pass escape handling** - direct YAML→JSON transcoding
+4. ✅ **No correctness issues** - all type coercions handled inline
+5. ✅ **Parsing now 40% of total time** (was 15%) - shifts bottleneck to index building
+
+**Bottleneck Shift:**
+
+Before P9: **DOM conversion was 49% of time** (slow path)
+After P9: **Parsing is 40% of time** (new bottleneck)
+
+This makes further **parsing optimizations more valuable**, but analysis shows:
+- All rejected parsing optimizations (P2.6, P2.8, P3, P5, P6, P7, P8) were rejected for fundamental reasons (grammar incompatibility, CPU beats manual optimization, wrong data patterns)
+- None of those reasons change just because parsing is a bigger fraction of total time
+- Current parsing throughput (559 MiB/s) is already excellent with P0+/P2.5/P2.7/P4
+
+**Why P9 Succeeded:**
+
+Unlike P2.6/P2.8/P3 micro-optimizations that regressed:
+- **Algorithmic improvement** - Eliminated entire DOM conversion phase
+- **No hidden costs** - Direct streaming has no cache pollution, branch misprediction, or overhead
+- **Real bottleneck** - DOM conversion was genuinely slow (952µs for 100KB)
+- **Proven technique** - Zero-copy streaming is established optimization pattern
+
+**Files Modified:**
+- [`src/yaml/light.rs`](../../src/yaml/light.rs) - Added `to_json_document()`, `to_json()`, `write_json_to()`, `write_json_string()`
+- [`src/bin/succinctly/yq_runner.rs`](../../src/bin/succinctly/yq_runner.rs) - Fast path for identity filter
+- [`benches/yaml_transcode_micro.rs`](../../benches/yaml_transcode_micro.rs) - Comprehensive transcoding benchmarks
+- [`examples/yaml_profile.rs`](../../examples/yaml_profile.rs) - Old vs new approach comparison
+
+**Commit:** a045669 (2026-01-15)
+
+---
+
+### P4: NEON `classify_yaml_chars` Port - REJECTED ❌
+
+**Status:** Tested and rejected 2026-01-17
+
+Attempted to port x86's successful P0 `classify_yaml_chars` optimization to ARM64 NEON, expecting similar benefits for bulk character classification.
+
+**Implementation Details:**
+- Ported `YamlCharClass` struct with 8 u16 bitmasks (16 bytes per classification)
+- Implemented `classify_yaml_chars_neon()` using NEON intrinsics
+- Added `find_newline_neon()` for completeness
+- Integrated into parser with `skip_unquoted_simd()` for ARM64
+- All tests passed ✅
+
+**Performance Results (Apple M1 Max):**
+
+| Benchmark           | Baseline     | NEON Classify | Change       |
+|---------------------|--------------|---------------|--------------|
+| simple_kv/100       | 3.74 µs      | 4.50 µs       | **+20.3%** ❌ |
+| simple_kv/1000      | 33.8 µs      | 42.0 µs       | **+24.3%** ❌ |
+| simple_kv/10000     | 333 µs       | 416 µs        | **+25.0%** ❌ |
+| nested/d5_w2        | 4.98 µs      | 5.52 µs       | **+10.8%** ❌ |
+| large/10kb          | 21.9 µs      | 26.4 µs       | **+20.3%** ❌ |
+| large/100kb         | 196 µs       | 230 µs        | **+17.3%** ❌ |
+| large/1mb           | 1.91 ms      | 2.22 ms       | **+16.2%** ❌ |
+
+**Root Cause: NEON lacks native `movemask`**
+
+The x86 `_mm_movemask_epi8` instruction extracts the high bit of each byte into a 16/32-bit integer in **1 instruction, 1 cycle**. NEON has no equivalent, requiring expensive emulation:
+
+```rust
+// NEON movemask emulation (~10 instructions, 5-8 cycles)
+unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
+    // Step 1: Shift right by 7 to get 0 or 1 in each byte
+    let high_bits = vshrq_n_u8::<7>(v);
+
+    // Step 2: Extract 16 bytes as two u64 values (SIMD→scalar transfer!)
+    let low_u64 = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(high_bits));
+    let high_u64 = vgetq_lane_u64::<1>(vreinterpretq_u64_u8(high_bits));
+
+    // Step 3: Multiplication trick to pack 8 bits from each u64
+    const MAGIC: u64 = 0x0102040810204080;
+    let low_packed = (low_u64.wrapping_mul(MAGIC) >> 56) as u8;
+    let high_packed = (high_u64.wrapping_mul(MAGIC) >> 56) as u8;
+
+    (low_packed as u16) | ((high_packed as u16) << 8)
+}
+```
+
+**Cost Analysis:**
+
+| Platform | Instruction | Cost       | Operations for 8-class classify |
+|----------|-------------|------------|--------------------------------|
+| x86_64   | `movemask`  | 1 cycle    | 8 movemask = ~8 cycles         |
+| ARM64    | Emulation   | 5-8 cycles | 8 emulations = **40-64 cycles** |
+
+The `classify_yaml_chars` function calls `neon_movemask` 8 times (once per character class), making the overhead **5-8x worse** than x86.
+
+**Why NEON Classify Failed:**
+
+| Factor                    | x86_64 (Success)           | ARM64 (Failure)              |
+|---------------------------|----------------------------|------------------------------|
+| `movemask` cost           | 1 instruction              | ~10 instructions             |
+| 8-class classification    | ~8 cycles                  | ~40-64 cycles                |
+| SIMD→scalar transfers     | Cheap (`movemask` is fast) | Expensive (lane extraction)  |
+| Multiplication overhead   | None                       | 2 multiplies per movemask    |
+| Break-even point          | ~4 bytes                   | >64 bytes (if at all)        |
+
+**Attempted Mitigations (All Failed):**
+
+1. **Raised threshold to 32 bytes** - Still 15-20% slower
+2. **Process 2×16-byte chunks** - Marginal improvement, still slower than scalar
+3. **Conditional SIMD activation** - Added branching overhead without benefit
+
+**Conclusion:** Rejected because:
+
+1. ❌ **10-25% performance regression** - NEON movemask emulation too expensive
+2. ❌ **Fundamental architectural mismatch** - x86 `movemask` has no NEON equivalent
+3. ❌ **SIMD→scalar transfer cost** - Lane extraction + multiplication negates SIMD benefit
+4. ❌ **Existing NEON functions are optimal** - `find_quote_or_escape_neon` and `count_leading_spaces_neon` work because they exit on first match (1 movemask call), not bulk classification (8 calls)
+
+**Recommendation:** For ARM64, stick with:
+- Single-purpose NEON functions (`find_quote_or_escape`, `find_single_quote`, `count_leading_spaces`)
+- These work because they only need **one** movemask call per chunk
+- Bulk classification should remain scalar on ARM64
+
+---
+
+### P4: Pure Broadword (SWAR) Classification - TESTED, NEUTRAL ⚖️
+
+**Status:** Implemented and benchmarked 2026-01-17. Code kept but disabled.
+
+Following the P3 NEON rejection, we implemented a pure broadword (SWAR) approach that avoids NEON intrinsics entirely, using only u64 arithmetic operations.
+
+**Implementation Details:**
+- Uses classic `(x - 0x0101...) & ~x & 0x8080...` trick to detect zero bytes
+- XOR with broadcast byte to find character matches
+- Multiplication trick (`0x0102040810204080`) to extract bitmask
+- Processes 8 bytes per u64, or 16 bytes using two operations
+- No NEON intrinsics, no SIMD→scalar lane extraction
+
+**Key Insight:** The multiplication trick magic constant must be `0x0102040810204080`, not `0x0002040810204081`. The former correctly maps bit positions 0,8,16,24,32,40,48,56 to result bits 0-7.
+
+**Code Location:** [`src/yaml/simd/neon.rs:171-367`](../../src/yaml/simd/neon.rs#L171-L367)
+
+**Micro-Benchmark Results (Apple M1 Max):**
+
+| Benchmark | Baseline | Broadword | Change |
+|-----------|----------|-----------|--------|
+| simple_kv/10 | 1.54 µs | 1.63 µs | **+6%** ❌ |
+| simple_kv/100 | 5.9 µs | 6.7 µs | **+14%** ❌ |
+| simple_kv/1000 | 48.3 µs | 55.2 µs | **+14%** ❌ |
+| large/1kb | 5.0 µs | 5.0 µs | **0%** |
+| large/10kb | 33.8 µs | 33.8 µs | **0%** |
+| large/100kb | 301 µs | 301 µs | **0%** |
+| large/1mb | 2.71 ms | 2.71 ms | **0%** |
+| long_strings/double/64b | 8.8 µs | 8.5 µs | **-3%** ✅ |
+| long_strings/double/1024b | 40.6 µs | 40.4 µs | **-0.5%** |
+| long_strings/double/4096b | 151 µs | 150 µs | **-1%** |
+
+**Analysis:**
+
+1. **Simple KV workloads: Regression** - Short keys/values don't benefit from 16-byte classification. The overhead of function calls, bitmask computation, and conditional checks outweighs any skip benefit.
+
+2. **Large files: Neutral** - The large file benchmarks show zero change because:
+   - Most values are still short (average ~20 bytes)
+   - The 16-byte threshold means we rarely activate SIMD
+   - When we do activate, the benefit is consumed by overhead
+
+3. **Long strings: Small improvement** - Only workloads with genuinely long unquoted values (>64 bytes) show improvement, and even then only ~3%.
+
+**Why Broadword Failed to Help:**
+
+| Factor | Expected | Reality |
+|--------|----------|---------|
+| Bytes per operation | 16 | 16 (same as NEON) |
+| Operations per classify | ~24 arithmetic ops | ~24 (correct) |
+| Overhead vs scalar | Lower (no intrinsics) | Similar (still function call + branching) |
+| Break-even point | ~16 bytes | >64 bytes |
+| Typical YAML value length | 5-30 bytes | Too short to benefit |
+
+**Conclusion:** The broadword approach is algorithmically correct and faster than NEON movemask emulation, but:
+
+1. ❌ **Overhead too high** for typical YAML values (5-30 bytes)
+2. ❌ **Break-even point too high** (~64+ bytes needed for benefit)
+3. ❌ **ARM64 scalar is excellent** - simple byte-by-byte loop is well-optimized
+4. ⚖️ **Neutral on large files** - no regression, but no improvement either
+
+**Decision:** Code is kept but integration is disabled. The infrastructure may be useful for:
+- YAML documents with unusually long unquoted values
+- Future optimization attempts with different activation strategies
+- Reference implementation for other projects
+
+**Code kept at:**
+- Broadword primitives: [`src/yaml/simd/neon.rs:171-220`](../../src/yaml/simd/neon.rs#L171-L220)
+- Classification functions: [`src/yaml/simd/neon.rs:253-367`](../../src/yaml/simd/neon.rs#L253-L367)
+- Parser integration (disabled): [`src/yaml/parser.rs:438-471`](../../src/yaml/parser.rs#L438-L471)
+
+---
+
+### Portable Broadword Module (IMPLEMENTED ✅)
+
+**Status:** Added 2026-01-17 for non-SIMD platform support.
+
+The broadword implementation has been refactored into a portable module at [`src/yaml/simd/broadword.rs`](../../src/yaml/simd/broadword.rs) that works on any platform without CPU-specific intrinsics.
+
+**Use Cases:**
+1. **Non-x86/non-ARM platforms** - WebAssembly, RISC-V, MIPS, etc.
+2. **Testing/comparison** - Use `--features broadword-yaml` to compare broadword vs NEON on ARM64
+3. **Fallback** - Automatic fallback for platforms without SIMD
+
+**Feature Flag:**
+```toml
+[features]
+broadword-yaml = []  # Use broadword instead of NEON on ARM64
+```
+
+**ARM64 Benchmark Results (Broadword vs NEON):**
+
+| Benchmark | NEON | Broadword | Change |
+|-----------|------|-----------|--------|
+| simple_kv/10 | 1.57 µs | 1.53 µs | **-2.9%** ✅ |
+| simple_kv/100 | 6.0 µs | 5.79 µs | **-3.8%** ✅ |
+| simple_kv/1000 | 47.9 µs | 47.1 µs | **-1.8%** ✅ |
+| simple_kv/10000 | 503 µs | 491 µs | **-2.4%** ✅ |
+| nested/d5_w2 | 6.5 µs | 6.7 µs | **+3.0%** ❌ |
+| sequences/10000 | 397 µs | 381 µs | **-3.9%** ✅ |
+| quoted/double/100 | 6.7 µs | 6.6 µs | **-2.4%** ✅ |
+| long_strings/double/1024b | 41.3 µs | 44.7 µs | **+7.8%** ❌ |
+| long_strings/double/4096b | 146.5 µs | 162.4 µs | **+11%** ❌ |
+| large/1kb | 4.4 µs | 4.4 µs | **-1.2%** ✅ |
+| large/10kb | 29.6 µs | 28.8 µs | **-2.5%** ✅ |
+| large/100kb | 266 µs | 263 µs | **-1.0%** ⚖️ |
+| large/1mb | 2.46 ms | 2.45 ms | **-0.1%** ⚖️ |
+
+**End-to-End Benchmarks (yq_comparison):**
+
+| Benchmark | NEON | Broadword | Change |
+|-----------|------|-----------|--------|
+| succinctly/10kb | 4.17 ms | 4.24 ms | **+1.6%** ⚖️ |
+| succinctly/100kb | 9.0 ms | 9.3 ms | **+3.4%** ❌ |
+| succinctly/1mb | 53.1 ms | 54.3 ms | **+2.3%** ❌ |
+
+**Analysis:**
+
+The portable broadword module shows **mixed results compared to NEON**:
+
+1. **Simple KV workloads: Slightly faster** (-2 to -4%) - Broadword's lower overhead benefits short operations.
+
+2. **Long strings: Slower** (+8 to +11%) - NEON's 16-byte processing is more efficient for long strings, as expected from the earlier P4 analysis.
+
+3. **Large files: Neutral** (±1%) - The difference is within noise for bulk parsing.
+
+4. **Overall: Comparable** - For general YAML workloads, broadword is competitive with NEON. The main regressions are in long quoted strings.
+
+**Conclusion:**
+
+The portable broadword module is a viable fallback for platforms without SIMD:
+- ✅ **No significant regression** for typical YAML workloads
+- ✅ **Simpler code** without NEON intrinsics
+- ✅ **Works everywhere** - any platform with u64 arithmetic
+- ❌ **Long strings are slower** - but this is a rare case in typical YAML
+
+**Code Location:**
+- Portable module: [`src/yaml/simd/broadword.rs`](../../src/yaml/simd/broadword.rs)
+- Feature flag dispatch: [`src/yaml/simd/mod.rs:65-283`](../../src/yaml/simd/mod.rs#L65-L283)
+
+---
+
+### Broadword vs Scalar Performance (MEASURED ✅)
+
+**Status:** Measured 2026-01-17
+
+To quantify the benefit of broadword over pure byte-by-byte processing, we added a `scalar-yaml` feature flag that disables all SIMD and broadword optimizations.
+
+**Feature Flags:**
+```toml
+[features]
+broadword-yaml = []  # Use broadword instead of NEON on ARM64
+scalar-yaml = []     # Use pure scalar (byte-by-byte) - baseline
+```
+
+**ARM64 Micro-Benchmark Results (Broadword vs Scalar):**
+
+| Benchmark | Broadword | Scalar | Broadword Speedup |
+|-----------|-----------|--------|-------------------|
+| simple_kv/10 | 1.63 µs | 1.54 µs | -5% ❌ |
+| simple_kv/100 | 5.89 µs | 5.64 µs | -4% ❌ |
+| simple_kv/1000 | 49.2 µs | 46.8 µs | -5% ❌ |
+| simple_kv/10000 | 501 µs | 497 µs | -1% ⚖️ |
+| nested/d10_w2 | 220 µs | 237 µs | **+7%** ✅ |
+| sequences/100 | 5.12 µs | 4.84 µs | -5% ❌ |
+| sequences/1000 | 38.6 µs | 41.7 µs | **+7%** ✅ |
+| sequences/10000 | 388 µs | 379 µs | -2% ⚖️ |
+| **quoted/double/100** | 6.51 µs | 7.60 µs | **+15%** ✅ |
+| **quoted/single/100** | 6.63 µs | 6.85 µs | **+3%** ✅ |
+| **quoted/double/1000** | 56.0 µs | 66.1 µs | **+15%** ✅ |
+| **quoted/single/1000** | 54.5 µs | 57.1 µs | **+5%** ✅ |
+| **long_strings/double/64b** | 7.70 µs | 9.61 µs | **+20%** ✅ |
+| **long_strings/single/64b** | 7.52 µs | 8.74 µs | **+14%** ✅ |
+| **long_strings/double/256b** | 14.7 µs | 25.2 µs | **+42%** ✅ |
+| **long_strings/single/256b** | 13.96 µs | 22.0 µs | **+37%** ✅ |
+| **long_strings/double/1024b** | 45.0 µs | 85.1 µs | **+47%** ✅ |
+| **long_strings/single/1024b** | 42.1 µs | 68.3 µs | **+38%** ✅ |
+| **long_strings/double/4096b** | 164 µs | 332 µs | **+51%** ✅ |
+| **long_strings/single/4096b** | 154 µs | 271 µs | **+43%** ✅ |
+| large/1kb | 4.46 µs | 4.37 µs | -2% ⚖️ |
+| large/10kb | 29.4 µs | 28.1 µs | -4% ❌ |
+| large/100kb | 269 µs | 267 µs | -1% ⚖️ |
+| large/1mb | 2.51 ms | 2.60 ms | **+4%** ✅ |
+
+**End-to-End Benchmarks (yq_comparison):**
+
+| Benchmark | Broadword | Scalar | Broadword Speedup |
+|-----------|-----------|--------|-------------------|
+| succinctly/10kb | 4.25 ms | 4.24 ms | 0% ⚖️ |
+| succinctly/100kb | 8.96 ms | 9.77 ms | **+8%** ✅ |
+| succinctly/1mb | 54.8 ms | 55.4 ms | **+1%** ⚖️ |
+| nested/1kb (broadword) | 3.55 ms | 3.75 ms | **+5%** ✅ |
+| nested/10kb (broadword) | 3.88 ms | 4.09 ms | **+5%** ✅ |
+
+**Analysis:**
+
+The broadword optimization shows **strong benefits where it matters most**:
+
+1. **Quoted strings: +15-20% faster** - The broadword find_quote/find_single_quote functions process 8 bytes per iteration vs 1 byte for scalar, showing clear wins in quoted content.
+
+2. **Long strings: +40-50% faster** - This is where broadword shines. Scanning 4KB strings is 2x faster with broadword because it can skip 8 bytes at a time.
+
+3. **Simple KV workloads: ~5% slower** - Surprising regression, likely due to:
+   - Short strings where setup overhead > vectorization benefit
+   - Unquoted values don't use find_quote/find_single_quote
+   - Indentation counting dominates (broadword helps less here)
+
+4. **Large files: Neutral to slight improvement** - End-to-end performance is similar because:
+   - Most time is spent in parser logic, not scanning
+   - Benefits in quoted strings balance out overhead in unquoted content
+
+**Conclusion:**
+
+Broadword provides **significant speedup (40-50%)** for the operations it optimizes:
+- ✅ **Quoted string scanning** - Strong improvement with quoted content
+- ✅ **Long string scanning** - 2x faster for multi-KB strings
+- ⚖️ **Short strings/simple KV** - Minimal or slightly negative impact
+- ⚖️ **End-to-end** - Modest overall improvement (+1-8%)
+
+For platforms without SIMD (WebAssembly, RISC-V), broadword is **essential** for acceptable performance with quoted strings. On ARM64 with NEON, broadword is **competitive** and can be used as a simpler alternative.
+
+**Code Location:**
+- Scalar implementations: [`src/yaml/simd/mod.rs:348-372`](../../src/yaml/simd/mod.rs#L348-L372)
+- Feature dispatch: [`src/yaml/simd/mod.rs:65-283`](../../src/yaml/simd/mod.rs#L65-L283)
+
+---
+
+## x86_64 Optimization Implementation Plan
+
+This section details planned and implemented SIMD optimizations for x86_64 (AMD Ryzen 9 7950X and similar).
+
+### P0 Optimizations (IMPLEMENTED ✅)
+
+**Status:** Completed 2026-01-17
+
+The YAML parser now includes enhanced SIMD operations in [`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs):
+
+| Function | SSE2 | AVX2 | Usage | Speedup (Measured) |
+|----------|------|------|-------|-------------------|
+| `find_quote_or_escape` | ✓ | ✓ | Double-quoted string scanning | **+11-18%** |
+| `find_single_quote` | ✓ | ✓ | Single-quoted string scanning | **+13-23%** |
+| `count_leading_spaces` | ✓ | ✓ | Indentation counting | **+14-24%** |
+| `classify_yaml_chars` | ✓ | ✓ | Bulk character classification (8 types) | **(infrastructure)** |
+| `find_newline` | ✓ | ✓ | Newline detection | **(infrastructure)** |
+
+**Throughput:** 16 bytes/iteration (SSE2), 32 bytes/iteration (AVX2)
+
+**Improvements Delivered:**
+1. ✅ Multi-character classification (8 character types in parallel)
+2. ✅ Enhanced AVX2 paths for all string scanning functions
+3. ✅ Context-sensitive pattern detection (e.g., `: ` and `- ` via bitmask operations)
+4. ✅ Newline detection infrastructure for future optimizations
+
+### JSON Parser Techniques (Proven on x86_64)
+
+Analysis of [`src/json/simd/`](../../src/json/simd/) reveals these techniques:
+
+#### 1. **Multi-Character Classification** ([x86.rs](../../src/json/simd/x86.rs), [avx2.rs](../../src/json/simd/avx2.rs))
+
+JSON classifies 6 character classes in parallel per 16/32-byte chunk:
+- Quotes (`"`)
+- Backslashes (`\`)
+- Opens (`{`, `[`)
+- Closes (`}`, `]`)
+- Delimiters (`,`, `:`)
+- Value characters (alphanumeric, `.`, `-`, `+`)
+
+**Technique:** Single SIMD load + multiple comparisons + movemask → 6 bitmasks
+
+```rust
+unsafe fn classify_chars(chunk: __m256i) -> CharClass {
+    let eq_quote = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'"' as i8));
+    let eq_backslash = _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\\' as i8));
+    // ... more comparisons
+    CharClass {
+        quotes: _mm256_movemask_epi8(eq_quote) as u32,
+        backslashes: _mm256_movemask_epi8(eq_backslash) as u32,
+        // ... 4 more masks
+    }
+}
+```
+
+**Benefit:** 1 load + 6-8 vector ops = bulk classification
+
+#### 2. **PFSM Tables** ([pfsm_tables.rs](../../src/json/pfsm_tables.rs))
+
+Pre-computed state transition tables eliminate branching:
+
+```rust
+pub const TRANSITION_TABLE: [u32; 256];  // (byte, state) → next_state
+pub const PHI_TABLE: [u32; 256];         // (byte, state) → output_bits (IB/BP)
+```
+
+**Access pattern:**
+```rust
+let trans = TRANSITION_TABLE[byte as usize];
+let next_state = (trans >> (state * 8)) & 0xFF;
+let phi = PHI_TABLE[byte as usize];
+let output_bits = (phi >> (state * 8)) & 0x07;
+```
+
+**Benefit:** Branch-free state machine, predictable memory access
+
+#### 3. **BMI2 Bit Manipulation** ([bmi2.rs](../../src/json/simd/bmi2.rs))
+
+PDEP/PEXT for efficient bitmask manipulation:
+- **PEXT:** Extract bits matching mask positions
+- **PDEP:** Deposit bits to mask positions
+
+**Warning:** AMD Zen 1/2 have 18-cycle PDEP/PEXT (microcode). Only use on:
+- Intel Haswell+ (3 cycles)
+- AMD Zen 3+ (3 cycles)
+
+Current system (Ryzen 9 7950X = Zen 4) is **fast path eligible**.
+
+#### 4. **Range-Based Character Detection**
+
+Efficient alphanumeric detection using unsigned comparison trick:
+
+```rust
+// Check if c >= 'a' && c <= 'z'
+let v_a = _mm256_set1_epi8(b'a' as i8);
+let range = _mm256_set1_epi8((b'z' - b'a') as i8);
+let sub_a = _mm256_sub_epi8(chunk, v_a);
+let lowercase = _mm256_cmpeq_epi8(_mm256_min_epu8(sub_a, range), sub_a);
+```
+
+**Benefit:** Single comparison for range instead of 2 comparisons
+
+---
+
+### Proposed Optimizations for YAML (x86_64)
+
+Based on baseline benchmarks and JSON techniques, here are high-value optimizations:
+
+#### **Optimization 1: Multi-Character Classification**
+
+**Target:** Core parsing loop in [`src/yaml/parser.rs`](../../src/yaml/parser.rs)
+
+**Approach:** Classify YAML structural characters in bulk, similar to JSON.
+
+**YAML Structural Characters:**
+| Character(s) | Meaning | Detection |
+|-------------|---------|-----------|
+| `:` + space | Mapping separator | Compare + AND with shifted space mask |
+| `-` + space | Sequence item | Compare + AND with shifted space mask |
+| `#` | Comment start | Compare |
+| `"`, `'` | Quote delimiters | Compare (already done) |
+| `\n` | Line boundary | Compare |
+| ` ` (space) | Indentation/whitespace | Compare (already done) |
+| `{`, `}`, `[`, `]` | Flow style | Compare |
+| `\|`, `>` | Block scalars | Compare |
+| `&`, `*` | Anchors/aliases | Compare |
+
+**Implementation:**
+
+```rust
+#[derive(Debug, Clone, Copy)]
+struct YamlCharClass {
+    newlines: u32,       // \n
+    colons: u32,         // :
+    hyphens: u32,        // -
+    spaces: u32,         // space (for indentation + context detection)
+    quotes_double: u32,  // "
+    quotes_single: u32,  // '
+    backslashes: u32,    // \
+    flow_open: u32,      // { or [
+    flow_close: u32,     // } or ]
+    block_scalar: u32,   // | or >
+    anchors: u32,        // & or *
+    hash: u32,           // # (comments)
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn classify_yaml_chars_avx2(chunk: __m256i) -> YamlCharClass {
+    // Similar to JSON classify_chars, but for YAML characters
+    // ~12 comparisons, 1 load = still faster than byte-by-byte
+}
+```
+
+**Context-Sensitive Detection:**
+- `: ` pattern: `colon_mask & (space_mask << 1)` = positions where `:` followed by space
+- `- ` pattern: `hyphen_mask & (space_mask << 1)` = sequence items
+
+**Expected Improvement:** 10-20% faster parsing (reduces branches in hot loops)
+
+**Files to Modify:**
+- `src/yaml/simd/x86.rs` - Add `classify_yaml_chars_*` functions
+- `src/yaml/parser.rs` - Use classification in parsing loops (lines 666-1647)
+
+---
+
+#### **Optimization 2: Newline Index with SIMD**
+
+**Target:** Indentation tracking (currently line-by-line)
+
+**Approach:** Pre-scan entire document for newlines using SIMD, build rank/select index.
+
+**Algorithm:**
+
+1. **SIMD Newline Detection** (32 bytes/iter with AVX2):
+```rust
+#[target_feature(enable = "avx2")]
+unsafe fn find_newlines_avx2(input: &[u8]) -> Vec<u64> {
+    let newline_vec = _mm256_set1_epi8(b'\n' as i8);
+    let mut newline_bits = vec![0u64; input.len().div_ceil(64)];
+
+    for (chunk_idx, chunk) in input.chunks(32).enumerate() {
+        let data = _mm256_loadu_si256(chunk.as_ptr() as *const __m256i);
+        let matches = _mm256_cmpeq_epi8(data, newline_vec);
+        let mask = _mm256_movemask_epi8(matches) as u32;
+
+        // Deposit mask into newline_bits at appropriate word/bit position
+        // (details omitted for brevity)
+    }
+    newline_bits
+}
+```
+
+2. **Build Lightweight Rank Index:**
+```rust
+pub struct NewlineIndex {
+    newlines: Vec<u64>,         // Bit vector of newline positions
+    cumulative_rank: Vec<u32>,  // Rank every 512 bits (8 words)
+}
+```
+
+3. **O(1) Line Number Lookup:**
+```rust
+fn line_at_offset(&self, offset: usize) -> usize {
+    // rank1(offset) = line number
+    let word_idx = offset / 64;
+    let base_rank = self.cumulative_rank[word_idx / 8];
+    let residual = ...; // popcount within word
+    base_rank + residual
+}
+```
+
+**Expected Improvement:**
+- Newline pre-scan: ~3-5% overhead
+- Line lookups: O(n) → O(1) (useful for `locate_offset()`)
+- Net: ~2-5% faster overall (amortized over large files)
+
+**Files to Modify:**
+- New file: `src/yaml/newline_index.rs`
+- `src/yaml/parser.rs` - Use newline index for line tracking
+- `src/yaml/locate.rs` - Use for O(1) line lookups
+
+---
+
+#### **Optimization 3: YFSM Tables (YAML Finite State Machine)**
+
+**Target:** Replace branchy state machine with table lookups (like JSON PFSM)
+
+**Challenge:** YAML has more states than JSON due to context sensitivity.
+
+**JSON States (4):**
+- InJson, InString, InEscape, InValue
+
+**YAML States (8-10 needed):**
+- Block, InKey, InValue, InString, InEscape, InSingle, FlowMap, FlowSeq, InBlockScalar, InComment
+
+**Table Size:**
+- Transition: `256 * 10 bytes = 2.5 KB` (fits in L1 cache)
+- Phi output: `256 * 10 bytes = 2.5 KB`
+
+**Challenge:** YAML's indentation sensitivity requires external stack state (indent levels).
+
+**Hybrid Approach:**
+1. **YFSM handles string/escape states** (table-driven, branch-free)
+2. **Indentation stack remains** (inherently sequential, can't be table-ized)
+3. **Structural characters use YFSM** for IB/BP emission
+
+**Implementation:**
+
+```rust
+pub const YAML_TRANSITION_TABLE: [u64; 256];  // 8 states packed in u64
+pub const YAML_PHI_TABLE: [u64; 256];         // Output bits per state
+
+#[inline]
+fn yfsm_step(byte: u8, state: YfsmState) -> (YfsmState, u8) {
+    let trans = YAML_TRANSITION_TABLE[byte as usize];
+    let next_state = ((trans >> (state as u32 * 8)) & 0xFF) as u8;
+
+    let phi = YAML_PHI_TABLE[byte as usize];
+    let output = ((phi >> (state as u32 * 8)) & 0xFF) as u8;
+
+    (next_state.into(), output)
+}
+```
+
+**Expected Improvement:** 15-25% faster (proven from JSON: PFSM gave 33-77% speedup)
+
+**Files to Create/Modify:**
+- New: `src/yaml/yfsm_tables.rs` - Pre-computed tables
+- New: `src/bin/generate_yfsm_tables.rs` - Table generator
+- `src/yaml/parser.rs` - Use YFSM in place of manual state transitions
+
+---
+
+#### **Optimization 4: Speculative Inline Parsing**
+
+**Target:** Common YAML patterns (e.g., `key: value`)
+
+**Approach:** Fast-path for simple key-value pairs without full state machine.
+
+**Pattern Detection (SIMD-assisted):**
+
+```rust
+#[target_feature(enable = "avx2")]
+unsafe fn is_simple_kv_line(line: &[u8]) -> Option<(usize, usize)> {
+    // Find colon position using SIMD
+    let colon_vec = _mm256_set1_epi8(b':' as i8);
+    // ... (similar to find_quote_or_escape)
+
+    // Verify: colon followed by space, no quotes before colon
+    if colon_found && line[colon_pos + 1] == b' ' {
+        return Some((indent, colon_pos));
+    }
+    None
+}
+```
+
+**Fast Path:**
+- Detect `  key: value` pattern
+- Skip full parser, directly emit IB/BP bits
+- Fall back to full parser for complex cases
+
+**Expected Improvement:** 10-15% on config files (many simple KV pairs)
+
+**Files to Modify:**
+- `src/yaml/parser.rs` - Add speculative parse path before full parse
+
+---
+
+#### **Optimization 5: AVX-512 Exploration (Optional)**
+
+**Platform:** AMD Ryzen 9 7950X has AVX-512 support (F, DQ, BW, VL, VBMI, VBMI2, VNNI).
+
+**Approach:** Process 64 bytes/iteration instead of 32.
+
+**Functions to AVX-512-ize:**
+- `classify_yaml_chars_avx512` - 64-byte classification
+- `find_newlines_avx512` - 64-byte newline scan
+- `count_leading_spaces_avx512` - 64-byte space counting
+
+**Warning from JSON experience:**
+> "Wider SIMD != automatically faster (AVX-512 JSON was 10% slower than AVX2)"
+> — [docs/optimisations/README.md](../optimisations/README.md)
+
+**Reasons AVX-512 can be slower:**
+- Frequency throttling (CPU reduces clock speed with AVX-512)
+- Cache alignment issues
+- Overhead of extracting 64-bit masks
+
+**Recommendation:**
+- Implement AVX-512 variants
+- Benchmark against AVX2
+- Only use if >5% faster
+- Provide runtime dispatch
+
+**Files to Create:**
+- `src/yaml/simd/avx512.rs` - AVX-512 implementations (if beneficial)
+
+---
+
+### Implementation Priority
+
+| Priority | Optimization | Expected Gain | Complexity | Status |
+|----------|--------------|---------------|------------|--------|
+| ~~**P0**~~ | ~~Multi-Character Classification~~ | ~~10-20%~~ | Medium | ✅ **DONE** (+4-10%) |
+| ~~**P0+**~~ | ~~Hybrid Scalar/SIMD Integration~~ | ~~5-10%~~ | Low | ✅ **DONE** (+4-7%) |
+| ~~**P1**~~ | ~~YFSM Tables~~ | ~~15-25%~~ | High | ❌ **REJECTED** (0-2%) |
+| ~~**P2**~~ | ~~Integrate classify_yaml_chars~~ | ~~5-10%~~ | Medium | ✅ **DONE** (+8-17%) |
+| ~~**P2.5**~~ | ~~Cached Type Checking~~ | ~~1-2%~~ | Low | ✅ **DONE** (+1-17%) |
+| ~~**P2.6**~~ | ~~Software Prefetching~~ | ~~5-10%~~ | Low | ❌ **REJECTED** (+30% regression!) |
+| ~~**P2.7**~~ | ~~Block Scalar SIMD~~ | ~~10-20%~~ | Medium | ✅ **DONE** (+19-25%) **← Best!** |
+| ~~**P2.8**~~ | ~~SIMD Threshold Tuning~~ | ~~1-3%~~ | Very Low | ❌ **REJECTED** (+8-15% regression!) |
+| ~~**P3**~~ | ~~Branchless Character Classification~~ | ~~2-4%~~ | Low | ❌ **REJECTED** (+25-44% regression!) |
+| ~~**P4**~~ | ~~Anchor/Alias SIMD~~ | ~~5-15%~~ | Medium | ✅ **DONE** (+6-17%) |
+| ~~**P5**~~ | ~~Flow Collection Fast Path~~ | ~~10-20%~~ | Medium | ❌ **REJECTED** (size mismatch - aborted at analysis) |
+| ~~**P6**~~ | ~~BMI2 operations (PDEP/PEXT)~~ | ~~3-8%~~ | Medium | ❌ **REJECTED** (grammar mismatch - aborted at analysis) |
+| ~~**P7**~~ | ~~Newline Index~~ | ~~2-5%~~ | Medium | ❌ **REJECTED** (use case mismatch - CLI feature, not optimization) |
+| ~~**P8**~~ | ~~AVX-512 variants~~ | ~~0-10%~~ | Medium | ❌ **REJECTED** (benchmark mismatch + JSON precedent - micro-benchmarked, 7% slower at 64B) |
+
+**Achieved So Far:** P0 + P0+ + P2 + P2.5 + P2.7 + P4 = **+34-59% overall** improvement, **largest single gain: Block Scalar SIMD (+19-25%)**
+
+**P2 Results (2026-01-17):**
+- simple_kv/1000: **-12%** (41.9µs → 36.8µs)
+- simple_kv/10000: **-11%** (418µs → 371µs)
+- large/100kb: **-11%** (222µs → 198µs)
+- large/1mb: **-17%** (2.18ms → 1.82ms)
+- End-to-end vs yq: **30x faster** on 10KB, **10.5x** on 100KB, **3.3x** on 1MB
+
+**P2.5 Results (2026-01-17) - Cached Type Checking:**
+- Optimization: Cache `current_type` field to avoid `type_stack.last()` overhead
+- Deeply nested (100 levels): **-16.8%** time improvement
+- Small/medium files (1kb-100kb): **-1.0% to -2.0%** consistent improvement
+- Large files (1mb): Neutral (±0.6%)
+- Best for: Kubernetes configs, CI/CD files with moderate nesting
+- Implementation: 2 helper methods (`push_type`, `pop_type`), 1 cached field
+
+**P2.7 Results (2026-01-17) - Block Scalar SIMD:**
+- Optimization: AVX2 newline scanning + SIMD indentation checking for block scalars (`|`, `>`)
+- **Largest single optimization in Phase 2!**
+- 50x50 lines: **-16.8%** (61.26µs → 50.97µs, 1.20x faster)
+- 100x100 lines: **-21.1%** (247.41µs → 195.25µs, 1.27x faster)
+- 10x1000 lines: **-18.6%** (237.86µs → 193.56µs, 1.23x faster)
+- long_100x100: **-20.3%** (556.38µs → 443.33µs, 1.26x faster)
+- Throughput gains: **+20-27%** (1.38-1.39 GiB/s → 1.68-1.77 GiB/s)
+- Best for: YAML files with literal/folded block scalars (common in K8s ConfigMaps, CI/CD configs)
+- Implementation: ~250 lines SIMD code (AVX2/SSE2 + scalar fallback)
+- See: [`src/yaml/simd/x86.rs`](../../src/yaml/simd/x86.rs) and [`src/yaml/parser.rs:2888`](../../src/yaml/parser.rs#L2888)
+
+**P4 Results (2026-01-17) - Anchor/Alias SIMD:**
+- Optimization: AVX2 SIMD for anchor/alias name parsing (scan for terminators in 32-byte chunks)
+- Anchor-heavy workloads: **-6% to -17%** time improvement
+- anchors/100: **-14.6%** (13.60µs → 11.65µs, 1.17x faster)
+- anchors/1000: **-10.1%** (155.5µs → 139.2µs, 1.11x faster)
+- k8s_100: **-7.4%** (33.92µs → 31.40µs, 1.08x faster)
+- Throughput gains: **+6-17%** (293-384 MiB/s → 319-396 MiB/s)
+- Best for: Kubernetes manifests, CI/CD configs with many anchors/aliases
+- Micro-benchmark wins confirmed: **9-12x faster** for 32-64 byte anchor names
+- **First successful optimization since P2.7** - micro-benchmark wins translated to real gains!
+- Implementation: ~120 lines SIMD code (AVX2 + scalar fallback)
+- See: [`src/yaml/simd/x86.rs:755`](../../src/yaml/simd/x86.rs#L755) and [`src/yaml/parser.rs:3061`](../../src/yaml/parser.rs#L3061)
+
+**Remaining Target:** P5-P7 = **+5-18% potential** (conservative estimate)
+
+---
+
+### Benchmarking Strategy
+
+After each optimization:
+
+1. **Run micro-benchmarks:**
+```bash
+cargo bench --bench yaml_bench
+```
+
+2. **Compare against baseline:**
+```bash
+# Save results to dated file
+cargo bench --bench yaml_bench > .ai/scratch/yaml_bench_after_P0_opt.txt
+```
+
+3. **Update docs with results** in this section
+
+4. **Profile hot paths:**
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release --example yaml_profile
+./target/release/examples/yaml_profile data/bench/yaml/100kb.yaml
+```
+
+---
+
+### Hardware-Specific Notes
+
+**AMD Ryzen 9 7950X (Zen 4):**
+- ✓ AVX2: 32 bytes/cycle (use this as primary path)
+- ✓ AVX-512: 64 bytes/cycle (benchmark carefully)
+- ✓ BMI2: 3-cycle PDEP/PEXT (Zen 3+, usable)
+- ✓ POPCNT: 1-cycle (use liberally)
+- L1 cache: 512 KB (16×32 KB) - tables fit easily
+- L2 cache: 16 MB (16×1 MB) - excellent for working set
+- L3 cache: 32 MB - shared, use for large buffers
+
+**Optimization Guideline:**
+- Favor AVX2 over AVX-512 unless proven faster
+- Use BMI2 where appropriate (fast on Zen 4)
+- Keep hot tables <32 KB for L1 residency
+- Align buffers to 32-byte boundaries for AVX2
+
+---
+
+### References
+
+**Implemented JSON Optimizations:**
+- [SIMD x86 module](../../src/json/simd/x86.rs)
+- [AVX2 module](../../src/json/simd/avx2.rs)
+- [PFSM tables](../../src/json/pfsm_tables.rs)
+- [BMI2 utilities](../../src/json/simd/bmi2.rs)
+
+**Optimization Documentation:**
+- [SIMD techniques](../optimisations/simd.md)
+- [Bit manipulation](../optimisations/bit-manipulation.md)
+- [State machines](../optimisations/state-machines.md)
+- [Optimization overview](../optimisations/README.md)
+
+---
+
+### Unquoted Structural Scanning Tuning ✅ RESOLVED
+
+The initial `find_unquoted_structural` SIMD optimization showed regressions on typical YAML workloads. This section documents the analysis and **successful resolution via P2 optimization**.
+
+**Resolution (2026-01-17):** Implemented conditional SIMD using `classify_yaml_chars`:
+- Inline scalar loop for common case (short values)
+- SIMD fast-path only activated for runs ≥32 bytes remaining
+- Results: **+8-17% improvement** on large files, no regressions on small files
+- See [`src/yaml/parser.rs:770-810`](../../src/yaml/parser.rs#L770-L810) for implementation
+
+#### Problem Analysis
+
+**Typical YAML value lengths** (from benchmark data):
+- `simple string without special chars` = 32 bytes
+- `Lorem ipsum dolor sit amet` = 26 bytes
+- `email@example.com` = 17 bytes
+- `User Name` = 9 bytes
+
+**Issue 1: SIMD overhead dominates for short values**
+
+Most YAML values are 10-40 bytes. SIMD processes 16-32 bytes/chunk but has setup cost:
+- Bounds checking
+- Slice creation
+- Runtime feature detection (AVX2)
+- Vector register setup
+
+For a 20-byte value ending at newline, scalar loop (~20 iterations) may be faster than SIMD setup + 1 chunk.
+
+**Issue 2: Repeated SIMD calls on non-terminating characters**
+
+Current code pattern:
+```rust
+loop {
+    if let Some(offset) = simd::find_unquoted_structural(...) {
+        self.pos = found_pos;
+        match self.input[found_pos] {
+            b':' => {
+                // Check if followed by whitespace
+                if !is_terminator { self.advance(); }  // Advance by 1, then SIMD again
+            }
+        }
+    }
+}
+```
+
+For `http://example.com:8080/path`, this finds `:` at position 4, checks context, advances 1, then SIMDs again to find `:` at position 21. Each SIMD call scans 16-32 bytes to find a character 5-10 bytes away.
+
+**Issue 3: Searching entire input unnecessarily**
+
+```rust
+simd::find_unquoted_structural(self.input, self.pos, self.input.len())
+```
+
+Passes `input.len()` as end bound, but newline typically terminates within 50-100 bytes.
+
+#### Proposed Tuning Opportunities
+
+**Opportunity 1: Minimum Length Threshold**
+
+Only use SIMD when remaining data is long enough to benefit:
+
+```rust
+const SIMD_THRESHOLD: usize = 32;
+
+let remaining = self.input.len() - self.pos;
+if remaining >= SIMD_THRESHOLD {
+    // Use SIMD
+} else {
+    // Use scalar - faster for short values
+}
+```
+
+**Expected impact:** Avoids SIMD overhead for 80%+ of values.
+
+**Opportunity 2: Scalar Fast-Path for First N Bytes**
+
+Check first 16-32 bytes scalar before invoking SIMD:
+
+```rust
+// Fast scalar check for first 32 bytes
+let check_len = remaining.min(32);
+for i in 0..check_len {
+    match self.input[self.pos + i] {
+        b'\n' => { self.pos += i; break; }
+        b'#' if preceded_by_space => { self.pos += i; break; }
+        b':' if followed_by_whitespace => { self.pos += i; break; }
+        _ => {}
+    }
+}
+// Only use SIMD if not found in first 32 bytes
+```
+
+**Expected impact:** Most values terminate within 32 bytes, avoiding SIMD entirely.
+
+**Opportunity 3: Continue from Found Position + 1**
+
+When `#` or `:` doesn't terminate, skip to position+1 before next search:
+
+```rust
+// Instead of: self.advance() then SIMD from self.pos
+// Do: remember last position, SIMD from last_pos + 1
+let search_start = found_pos + 1;
+```
+
+**Expected impact:** Reduces redundant scanning of already-checked bytes.
+
+**Opportunity 4: Newline-Only Fast Path**
+
+For most values, `\n` is found first. A simpler single-character search is faster:
+
+```rust
+// Try newline-only search first
+if let Some(nl_offset) = memchr(b'\n', &input[start..]) {
+    // Check if there's a # or : before newline (less common)
+    let segment = &input[start..start + nl_offset];
+    if !segment.iter().any(|&b| b == b'#' || b == b':') {
+        return Some(nl_offset);  // Fast path
+    }
+}
+// Fall back to 3-character SIMD search
+```
+
+**Expected impact:** 5-10% faster on typical config files.
+
+**Opportunity 5: Bounded Search Range**
+
+Limit search to reasonable line length instead of entire input:
+
+```rust
+const MAX_LINE_SCAN: usize = 256;
+let end = (self.pos + MAX_LINE_SCAN).min(self.input.len());
+simd::find_unquoted_structural(self.input, self.pos, end)
+```
+
+**Expected impact:** Reduces cache pressure on large files.
+
+#### Recommended Fix
+
+Combine **Opportunity 1 + 2**: Add minimum threshold with scalar fast-path.
+
+```rust
+fn parse_unquoted_value_with_indent(&mut self, start_indent: usize) -> usize {
+    let start = self.pos;
+
+    loop {
+        let remaining = self.input.len() - self.pos;
+
+        // Fast scalar path for typical short values (< 32 bytes to newline)
+        let check_len = remaining.min(32);
+        let mut found_terminator = false;
+
+        for i in 0..check_len {
+            let b = self.input[self.pos + i];
+            match b {
+                b'\n' => {
+                    self.pos += i;
+                    found_terminator = true;
+                    break;
+                }
+                b'#' if self.pos + i > start
+                    && self.input[self.pos + i - 1] == b' ' => {
+                    self.pos += i;
+                    found_terminator = true;
+                    break;
+                }
+                b':' if self.pos + i + 1 < self.input.len()
+                    && matches!(self.input[self.pos + i + 1], b' ' | b'\t' | b'\n') => {
+                    self.pos += i;
+                    found_terminator = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if found_terminator {
+            break;
+        }
+
+        // Only use SIMD if scalar didn't find terminator in first 32 bytes
+        if remaining > 32 {
+            // ... existing SIMD code for long values ...
+        }
+    }
+}
+```
+
+**Expected improvement:** Eliminate 6% regression at 10KB, potential 3-5% improvement at all sizes.
+
+#### Implementation Status
+
+| Opportunity | Status | Expected Impact |
+|-------------|--------|-----------------|
+| 1. Minimum threshold | Proposed | High |
+| 2. Scalar fast-path | Proposed | High |
+| 3. Continue from position+1 | Proposed | Medium |
+| 4. Newline-only fast path | Proposed | Medium |
+| 5. Bounded search range | Proposed | Low |
+
+---
+
+### Alternative: Pre-indexed Structural Characters
+
+An alternative approach is to pre-index all structural character positions upfront, then use succinct data structures for O(1) navigation.
+
+#### Concept
+
+Instead of calling `find_unquoted_structural` repeatedly during parsing:
+
+1. **One-time SIMD scan**: Build a bitvector marking all positions with `\n`, `#`, or `:`
+2. **Navigation via rank/select**: Use `select1(rank1(pos) + 1)` to jump to next structural char in O(1)
+
+```rust
+// Pre-indexing phase (once, O(n))
+let structural_bv = build_structural_bitvector(input);  // marks \n, #, : positions
+
+// Query phase (per value, O(1))
+fn next_structural(&self, pos: usize) -> Option<usize> {
+    let rank = self.structural_bv.rank1(pos);
+    self.structural_bv.select1(rank + 1)
+}
+```
+
+#### Analysis
+
+**Advantages:**
+- O(1) navigation after one-time O(n) scan
+- Eliminates repeated SIMD setup overhead
+- Natural fit for semi-indexing architecture
+
+**Disadvantages:**
+- Still requires context checks (is `#` preceded by space? is `:` followed by whitespace?)
+- Memory overhead: ~n/8 bytes for bitvector + rank directory
+- Doesn't address the root cause: most values are short
+
+**Comparison with current approach:**
+
+| Aspect | Per-value SIMD | Pre-indexed |
+|--------|----------------|-------------|
+| Setup cost | Per call | Once |
+| Memory | None | ~n/8 + rank |
+| Short values | High overhead | Still needs context check |
+| Long values | Efficient | More efficient |
+
+#### Better Alternative: Batch Classification
+
+The more natural fit is the simdjson-style approach where the **initial SIMD pass classifies all characters in bulk**:
+
+```rust
+// Pass 1 (SIMD): Classify ALL characters, build structural bitmasks
+for offset in (0..input.len()).step_by(32) {
+    let class = classify_yaml_chars(input, offset);  // Already implemented!
+
+    // Find ": " patterns with bit operations
+    let colon_space = class.colons & (class.spaces >> 1);
+
+    // Find "# " patterns (preceded by space)
+    let space_hash = (class.spaces << 1) & class.hash;
+
+    // Combine structural positions
+    structural_mask |= class.newlines | colon_space | space_hash;
+}
+
+// Pass 2 (Sequential): Walk bitmasks + input to build IB/BP/TY
+```
+
+This approach:
+- Uses the existing `classify_yaml_chars` function ([x86.rs:38-57](../../src/yaml/simd/x86.rs#L38-L57))
+- Classifies 8 character types simultaneously per 32-byte chunk
+- Uses bit operations to find patterns like `": "` without per-byte checks
+- Avoids the per-value SIMD calls that cause the current regression
+
+#### Resolution ✅
+
+**Implemented (2026-01-17):** Combined scalar fast-path with conditional SIMD activation:
+
+```rust
+// Inline scalar loop for common case (short values)
+while let Some(b) = self.peek() {
+    match b {
+        b'\n' => break,
+        b'#' | b':' => { /* validate context */ }
+        _ => {
+            // SIMD only for long runs (≥32 bytes remaining)
+            #[cfg(target_arch = "x86_64")]
+            if self.input.len() - self.pos >= 32 {
+                if let Some(skip) = self.skip_unquoted_simd(start) {
+                    self.advance_by(skip);
+                    continue;
+                }
+            }
+            self.advance();
+        }
+    }
+}
+```
+
+**Results:**
+- simple_kv/1000: **-12%** (41.9µs → 36.8µs)
+- large/1mb: **-17%** (2.18ms → 1.82ms)
+- No regressions on small values
+
+The key insight: keep the scalar loop as the main path, only invoke SIMD when there's enough data to justify the overhead.
+
+---
+
+### Integration with Parser
+
+#### String Scanning
+
+The `parse_double_quoted()` and `parse_single_quoted()` functions use SIMD to skip to the next interesting character:
+
+```rust
+fn parse_double_quoted(&mut self) -> Result<usize, YamlError> {
+    self.advance(); // Skip opening quote
+    loop {
+        // SIMD fast-path: find next quote or backslash
+        if let Some(offset) = simd::find_quote_or_escape(self.input, self.pos, self.input.len()) {
+            self.advance_by(offset);
+            match self.peek() {
+                Some(b'"') => { self.advance(); return Ok(self.pos - start); }
+                Some(b'\\') => { /* handle escape */ }
+                _ => { self.advance(); }
+            }
+        } else {
+            return Err(YamlError::UnclosedQuote { ... });
+        }
+    }
+}
+```
+
+#### Indentation Counting
+
+The `count_indent()` function uses SIMD to count leading spaces at line starts:
+
+```rust
+fn count_indent(&self) -> Result<usize, YamlError> {
+    // SIMD-accelerated space counting (16 bytes/iteration on ARM, 32 on AVX2)
+    let count = simd::count_leading_spaces(self.input, self.pos);
+
+    // Check for tab at the position after spaces (YAML error handling)
+    let next_pos = self.pos + count;
+    if next_pos < self.input.len() && self.input[next_pos] == b'\t' {
+        if count == 0 {
+            return Err(YamlError::TabIndentation { ... });
+        }
+    }
+    Ok(count)
+}
+```
+
+---
+
 ## High-Performance Pure Rust Oracle
 
 This section details how to achieve rapidyaml-level performance (~150 MB/s) in pure Rust by combining rapidyaml's architectural insights with succinctly's proven optimization techniques.
@@ -1046,6 +3632,165 @@ Having parsing and indexing in the same codebase enables optimizations impossibl
 4. **Aligned Processing**: Ensure line-start positions align with SIMD boundaries where possible.
 
 5. **Streaming Index**: Build cumulative rank arrays incrementally, enabling O(1) queries before parse completes.
+
+---
+
+## Succinct Index Optimization Opportunities
+
+### Pipeline Phase Analysis
+
+Profiling the end-to-end pipeline on 1MB YAML files reveals:
+
+| Phase | Time | Throughput | Description |
+|-------|------|------------|-------------|
+| **Read** | 0.2ms | - | File I/O |
+| **Build** | 3.0ms | 329 MiB/s | Parse + index construction |
+| **Cursor** | ~0ms | - | Create root cursor |
+| **To JSON** | 28.9ms | 35 MiB/s | Traverse + serialize |
+
+**Key insight**: The To JSON phase takes **10x longer** than Build. Optimization efforts should focus on traversal and serialization, not parsing.
+
+### Current Succinct Data Structures
+
+| Structure | Description | Rank/Select Index |
+|-----------|-------------|-------------------|
+| **IB** (Interest Bits) | Mark structural positions | ✓ `ib_rank` cumulative |
+| **BP** (Balanced Parens) | Tree structure | ✓ RangeMin for O(1) `find_close` |
+| **TY** (Type Bits) | 0=mapping, 1=sequence | ✗ Linear scan |
+| **seq_items** | Sequence item markers | ✗ Linear scan |
+| **containers** | Container markers | ✓ `containers_rank` cumulative |
+| **bp_to_text** | BP position → text start offset | ✓ Dense array O(1) |
+| **bp_to_text_end** | BP position → text end offset | ✓ Dense array O(1) |
+
+### Opportunity 1: Cumulative Index for `containers` ✓ IMPLEMENTED
+
+**Status**: Implemented. `containers_rank: Vec<u32>` added to `YamlIndex`.
+
+**Result**: `count_containers_before()` now uses O(1) cumulative lookup instead of O(n) iteration.
+
+**Measured Impact**: ~7% improvement in To JSON phase (30ms → 28ms for 1MB).
+
+### Opportunity 2: Cumulative Index for `seq_items`
+
+Same pattern as containers. Lower priority since seq_items is checked less frequently.
+
+### Opportunity 3: Pack `is_container` Flag into `bp_to_text`
+
+**Current**: Separate bitvector lookup per node.
+
+**Proposed**: Use top bit of `bp_to_text` entries as is_container flag:
+```rust
+// Entry format: (is_container << 31) | text_offset
+// Text offsets < 2GB, so top bit is available
+pub fn bp_to_text_pos(&self, bp_pos: usize) -> (usize, bool) {
+    let entry = self.bp_to_text[idx];
+    let text_pos = (entry & 0x7FFF_FFFF) as usize;
+    let is_container = (entry >> 31) != 0;
+    (text_pos, is_container)
+}
+```
+
+**Impact**: Eliminates separate bitvector lookup, improves cache locality.
+
+**Cost**: None (uses existing storage).
+
+### Opportunity 4: String Boundary Pre-computation ✓ IMPLEMENTED
+
+**Status**: Implemented. `bp_to_text_end: Vec<u32>` added to `YamlIndex`.
+
+The To JSON phase previously spent significant time in:
+1. `find_plain_scalar_end()` - scanned forward to find scalar boundary for each scalar node
+2. `YamlString::as_str()` - decodes quoted strings, handles escapes
+
+**Implementation**: During Build phase, record scalar end positions:
+- Added `bp_to_text_end: Vec<u32>` parallel to `bp_to_text`
+- Parser records end position after parsing each scalar (quoted, unquoted, block)
+- All scalar parsing functions now return trimmed end positions
+- `YamlCursor::text_end_position()` provides O(1) lookup
+
+**Code Changes**:
+- `src/yaml/parser.rs`: Added `set_bp_text_end()` helper, updated ~20 call sites
+- `src/yaml/index.rs`: Added `bp_to_text_end` field and `bp_to_text_end_pos()` getter
+- `src/yaml/light.rs`: Added `text_end_position()` method, modified `value()` to use pre-computed end
+
+**Measured Impact**: ~5-7% improvement in yq identity benchmarks (10KB files).
+
+| Benchmark | Before | After | Improvement |
+|-----------|--------|-------|-------------|
+| yq_identity/10kb | 4.4 ms | 4.1 ms | **+7%** |
+| yq_identity/100kb | 10.8 ms | 10.7 ms | **+1%** |
+| yq_identity/1mb | 72.5 ms | 71.5 ms | **+1%** |
+
+The improvement is most significant for smaller files where per-scalar overhead is more noticeable. Larger files are dominated by other costs (I/O, string serialization).
+
+### Opportunity 5: SIMD JSON String Escaping
+
+The JSON output path processes strings byte-by-byte for escaping.
+
+**Proposed**: Use SIMD to scan for characters needing escape (`"`, `\`, control chars):
+```rust
+// Find first byte needing escape in 32-byte chunks
+let needs_escape = vpcmpeqb(chunk, quote) | vpcmpeqb(chunk, backslash) | ...;
+let mask = movemask(needs_escape);
+if mask == 0 {
+    // Fast path: copy 32 bytes directly
+    output.push_str(unsafe { str::from_utf8_unchecked(&chunk) });
+}
+```
+
+**Impact**: 2-4x faster string serialization for clean strings.
+
+### Opportunity 6: Streaming Identity Output
+
+For identity queries (`.`), the current fast path still builds intermediate cursors:
+```rust
+while let Some((cursor, rest)) = docs.uncons_cursor() {
+    let json = cursor.to_json();  // Still traverses tree
+    writeln!(writer, "{}", json)?;
+}
+```
+
+**Proposed**: Direct streaming with position tracking:
+```rust
+// Stream-copy text segments between structural positions
+for (start, end) in structural_segments {
+    // Validate segment, copy directly to output
+    output.write_all(&input[start..end])?;
+}
+```
+
+**Impact**: Near-zero traversal cost for identity queries.
+
+### Priority Ranking
+
+| Opportunity | Effort | Impact | Priority | Status |
+|-------------|--------|--------|----------|--------|
+| 1. `containers_rank` | Low | Medium | **P1** | ✓ Done |
+| 4. String boundaries | Medium | High | **P1** | ✓ Done |
+| 3. Pack flag in bp_to_text | Low | Low | **P2** | Pending |
+| 5. SIMD JSON escaping | Medium | Medium | **P2** | Pending |
+| 2. `seq_items_rank` | Low | Low | **P3** | Pending |
+| 6. Streaming identity | High | High | **P3** | Pending |
+
+### Detailed Bottleneck Analysis
+
+Profiling 1MB YAML (111,529 nodes, 93% strings) reveals:
+
+| Component | Time | % of Total | Notes |
+|-----------|------|------------|-------|
+| Tree traversal (`value()` calls) | ~25 ms | 90% | The dominant cost |
+| String formatting overhead | ~2.7 ms | 10% | Much smaller than expected |
+
+**Per-node breakdown** (104,091 string nodes):
+- Time per node: ~225 ns
+- Time per string: ~241 ns
+
+**Key functions called per scalar** (before `bp_to_text_end` optimization):
+1. `compute_base_indent_and_root_flag()` - scans backward to line start, forward to find `:`, `-`, `?`
+2. ~~`find_plain_scalar_end()` - scans forward to find scalar boundary~~ **(eliminated by bp_to_text_end)**
+3. `is_in_flow_context()` - quick path if no `[` or `{` in recent text
+
+**Post-optimization status**: String boundary pre-computation (Opportunity 4) has been implemented. The `find_plain_scalar_end()` function is now unused during traversal - scalar end positions are looked up in O(1) from `bp_to_text_end`. Measured improvement: ~5-7% for 10KB files.
 
 ---
 

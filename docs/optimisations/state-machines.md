@@ -294,6 +294,66 @@ Then chain results: select appropriate outcome based on previous state.
 | Batch zero writing   | `json/bit_writer.rs`   | Bulk bit operations   | Reduces ops   |
 | 3-state FSM          | `json/pfsm_*.rs`       | Minimal state count   | Cache-friendly|
 
+### Successful Optimizations
+
+| Technique                    | Result     | Reason                                    |
+|------------------------------|------------|-------------------------------------------|
+| Lazy line number computation | **+2-6%**  | Avoid per-byte work only needed on errors |
+| Direct indexing in hot loops | **+2-5%**  | Eliminate Option overhead in tight loops  |
+
+#### Lazy Line Number Computation (YAML)
+
+Line numbers are only needed for error reporting, but were tracked on every byte:
+
+```rust
+// Before: track line on every byte (slow)
+fn advance(&mut self) {
+    if self.pos < self.input.len() {
+        if self.input[self.pos] == b'\n' {
+            self.line += 1;  // Paid on EVERY byte
+        }
+        self.pos += 1;
+    }
+}
+
+// After: compute on-demand only for errors (fast)
+fn advance(&mut self) {
+    if self.pos < self.input.len() {
+        self.pos += 1;
+    }
+}
+
+fn current_line(&self) -> usize {
+    // Only called on error paths
+    self.input[..self.pos].iter().filter(|&&b| b == b'\n').count() + 1
+}
+```
+
+**Result**: 2-6% faster across YAML workloads.
+
+#### Direct Indexing vs Option Pattern
+
+The peek/advance pattern has hidden overhead:
+
+```rust
+// Before: Option wrapping overhead
+fn skip_to_eol(&mut self) {
+    while let Some(b) = self.peek() {  // Option created each iteration
+        if b == b'\n' { break; }
+        self.advance();  // Function call + bounds check
+    }
+}
+
+// After: direct indexing
+fn skip_to_eol(&mut self) {
+    while self.pos < self.input.len() && self.input[self.pos] != b'\n' {
+        self.pos += 1;
+    }
+}
+```
+
+**Result**: Sequences improved 4.7-5.4%, strings improved 2.5-6.2%.
+
 ### Failed Optimizations
 
 | Technique              | Result  | Reason                            |
@@ -301,6 +361,60 @@ Then chain results: select appropriate outcome based on previous state.
 | NEON PFSM shuffle      | -47%    | Shuffle overhead exceeds benefit  |
 | AVX-512 FSM            | -10%    | Memory-bound, not compute-bound   |
 | BMI1 mask iteration    | -26%    | FSM needs all bytes, not just structural |
+| SIMD lookahead quote skip | -2 to -6% | Short strings, SIMD overhead dominates |
+
+#### SIMD Quote Scanning in Lookahead (YAML) - Failed
+
+Attempted to use existing SIMD `find_quote_or_escape()` in lookahead functions to skip quoted keys faster:
+
+```rust
+// Before: byte-by-byte scanning
+while i < self.input.len() {
+    if self.input[i] == quote {
+        if quote == b'\'' && i + 1 < self.input.len() && self.input[i + 1] == b'\'' {
+            i += 2;
+            continue;
+        }
+        i += 1;
+        break;
+    } else if self.input[i] == b'\\' && quote == b'"' {
+        i += 2;
+    } else if self.input[i] == b'\n' {
+        return false;
+    } else {
+        i += 1;
+    }
+}
+
+// After (slower!): SIMD scanning
+loop {
+    let line_end = self.input[i..].iter()
+        .position(|&b| b == b'\n')  // Extra linear scan!
+        .map(|p| i + p)
+        .unwrap_or(self.input.len());
+
+    match simd::find_quote_or_escape(self.input, i, line_end) {
+        Some(offset) => {
+            let pos = i + offset;
+            if self.input[pos] == b'"' {
+                i = pos + 1;
+                break;
+            } else {
+                i = pos + 2;  // Skip escape
+            }
+        }
+        None => return false,
+    }
+}
+```
+
+**Why it failed** (2-6% regression):
+1. **YAML keys are short**: Typical keys are <50 bytes; SIMD setup cost dominates
+2. **Extra linear scan**: Finding `line_end` is another O(n) scan not needed by scalar version
+3. **Function call overhead**: SIMD dispatch adds cost for short strings
+4. **Match statement overhead**: Option matching in loop adds branches
+
+**Lesson**: SIMD only pays off for long strings (>100 bytes). Lookahead functions typically process short keys where byte-by-byte is faster.
 
 ---
 
@@ -346,6 +460,8 @@ fn process_byte(byte: u8, state: u8) -> (u8, u8) {
 3. **Fast-path common cases**: Most JSON bytes are string content
 4. **SIMD for classification, not FSM**: Use SIMD to find interesting bytes
 5. **State dependency is fundamental**: Can't fully parallelize FSM
+6. **Defer error-only work**: Track line numbers on-demand, not per-byte
+7. **Direct indexing beats Option**: `while pos < len { arr[pos] }` beats `while let Some(b) = peek()`
 
 ---
 
