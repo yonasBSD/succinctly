@@ -38,6 +38,16 @@ use super::expr::{
     ModuleMeta, ObjectEntry, ObjectKey, Pattern, PatternEntry, Program, StringPart,
 };
 
+/// Parser mode controls syntax differences between jq and yq.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParserMode {
+    /// Standard jq mode: `-` is subtraction, identifiers are alphanumeric + underscore
+    #[default]
+    Jq,
+    /// yq mode: `-` allowed in identifiers (e.g., `.my-key`), matches yq behavior
+    Yq,
+}
+
 /// Error that occurs during parsing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -68,11 +78,25 @@ impl core::fmt::Display for ParseError {
 struct Parser<'a> {
     input: &'a str,
     pos: usize,
+    mode: ParserMode,
 }
 
 impl<'a> Parser<'a> {
+    #[allow(dead_code)] // kept for tests and future use
     fn new(input: &'a str) -> Self {
-        Parser { input, pos: 0 }
+        Parser {
+            input,
+            pos: 0,
+            mode: ParserMode::Jq,
+        }
+    }
+
+    fn with_mode(input: &'a str, mode: ParserMode) -> Self {
+        Parser {
+            input,
+            pos: 0,
+            mode,
+        }
     }
 
     /// Peek at the current character without consuming it.
@@ -171,9 +195,23 @@ impl<'a> Parser<'a> {
         }
 
         // Subsequent characters can be alphanumeric or underscore
+        // In Yq mode, also allow hyphens (but not at the end)
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
                 self.next();
+            } else if self.mode == ParserMode::Yq && c == '-' {
+                // In Yq mode, allow hyphen if followed by valid ident char
+                // Peek ahead to check if there's a valid continuation
+                let remaining = &self.input[self.pos + 1..];
+                if let Some(next_c) = remaining.chars().next() {
+                    if next_c.is_alphanumeric() || next_c == '_' {
+                        self.next(); // consume the hyphen
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -3388,7 +3426,14 @@ impl<'a> Parser<'a> {
 /// let expr = parse("{name: .name, age: .age}").unwrap();
 /// ```
 pub fn parse(input: &str) -> Result<Expr, ParseError> {
-    let mut parser = Parser::new(input);
+    parse_with_mode(input, ParserMode::Jq)
+}
+
+/// Parse a jq expression with a specific parser mode.
+///
+/// Use `ParserMode::Yq` to allow kebab-case identifiers like `.my-key`.
+pub fn parse_with_mode(input: &str, mode: ParserMode) -> Result<Expr, ParseError> {
+    let mut parser = Parser::with_mode(input, mode);
     let expr = parser.parse_expr()?;
 
     // Ensure we consumed all input
@@ -3429,7 +3474,14 @@ pub fn parse(input: &str) -> Result<Expr, ParseError> {
 /// assert_eq!(prog.imports[0].alias, "u");
 /// ```
 pub fn parse_program(input: &str) -> Result<Program, ParseError> {
-    let mut parser = Parser::new(input);
+    parse_program_with_mode(input, ParserMode::Jq)
+}
+
+/// Parse a complete jq program with a specific parser mode.
+///
+/// Use `ParserMode::Yq` to allow kebab-case identifiers like `.my-key`.
+pub fn parse_program_with_mode(input: &str, mode: ParserMode) -> Result<Program, ParseError> {
+    let mut parser = Parser::with_mode(input, mode);
     let program = parser.parse_program()?;
 
     // Ensure we consumed all input
@@ -4125,5 +4177,72 @@ mod tests {
             parse(".[\"my-key\"]?").unwrap(),
             Expr::Optional(Box::new(Expr::Field("my-key".into())))
         );
+    }
+
+    #[test]
+    fn test_yq_mode_kebab_case() {
+        // In Yq mode, bare kebab-case identifiers are allowed
+        assert_eq!(
+            parse_with_mode(".my-key", ParserMode::Yq).unwrap(),
+            Expr::Field("my-key".into())
+        );
+        assert_eq!(
+            parse_with_mode(".foo-bar-baz", ParserMode::Yq).unwrap(),
+            Expr::Field("foo-bar-baz".into())
+        );
+
+        // Chained kebab-case
+        assert_eq!(
+            parse_with_mode(".my-key.other-key", ParserMode::Yq).unwrap(),
+            Expr::Pipe(vec![
+                Expr::Field("my-key".into()),
+                Expr::Field("other-key".into()),
+            ])
+        );
+
+        // Mix of kebab-case and regular identifiers
+        assert_eq!(
+            parse_with_mode(".foo.my-key.bar", ParserMode::Yq).unwrap(),
+            Expr::Pipe(vec![
+                Expr::Field("foo".into()),
+                Expr::Field("my-key".into()),
+                Expr::Field("bar".into()),
+            ])
+        );
+
+        // Kebab-case with array index
+        assert_eq!(
+            parse_with_mode(".my-key[0]", ParserMode::Yq).unwrap(),
+            Expr::Pipe(vec![Expr::Field("my-key".into()), Expr::Index(0),])
+        );
+
+        // Kebab-case with optional
+        assert_eq!(
+            parse_with_mode(".my-key?", ParserMode::Yq).unwrap(),
+            Expr::Optional(Box::new(Expr::Field("my-key".into())))
+        );
+    }
+
+    #[test]
+    fn test_jq_mode_kebab_case_is_subtraction() {
+        // In Jq mode (default), .foo-bar is parsed as .foo minus bar
+        let expr = parse(".foo-bar").unwrap();
+        match expr {
+            Expr::Arithmetic { left, op, right } => {
+                assert_eq!(*left, Expr::Field("foo".into()));
+                assert_eq!(op, ArithOp::Sub);
+                // 'bar' is parsed as a bare identifier - FuncCall or Var
+                match &*right {
+                    Expr::FuncCall { name, .. } => {
+                        assert_eq!(name, "bar");
+                    }
+                    Expr::Var(name) => {
+                        assert_eq!(name, "bar");
+                    }
+                    other => panic!("expected FuncCall or Var, got {:?}", other),
+                }
+            }
+            _ => panic!("expected subtraction, got {:?}", expr),
+        }
     }
 }
