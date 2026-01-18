@@ -34,3 +34,5 @@ data/bench/results/
 # Build artifacts
 *.rlib
 libtest_no_std.rlib
+
+.claude/settings.json
