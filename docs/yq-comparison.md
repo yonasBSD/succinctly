@@ -33,21 +33,21 @@ cargo bench --bench yq_comparison
 
 ## Summary Results
 
-### ARM (Apple M1 Max) - yq Identity Comparison (users pattern)
+### ARM (Apple M1 Max) - yq Identity Comparison (comprehensive pattern)
 
 | Size      | succinctly   | yq           | Speedup       |
 |-----------|--------------|--------------|---------------|
-| **10KB**  |   4.5 ms     |   7.5 ms     | **1.7x**      |
-| **100KB** |  10.6 ms     |  19.8 ms     | **1.9x**      |
-| **1MB**   |  72.9 ms     | 118.6 ms     | **1.6x**      |
+| **10KB**  |   4.0 ms     |   7.2 ms     | **1.8x**      |
+| **100KB** |   8.8 ms     |  19.9 ms     | **2.3x**      |
+| **1MB**   |  55.0 ms     | 117.1 ms     | **2.1x**      |
 
 #### Throughput Comparison (ARM)
 
 | Size      | succinctly      | yq             | Ratio         |
 |-----------|-----------------|----------------|---------------|
-| **10KB**  |   2.2 MiB/s     |   1.3 MiB/s    | **1.7x**      |
-| **100KB** |   8.6 MiB/s     |   4.6 MiB/s    | **1.9x**      |
-| **1MB**   |  12.7 MiB/s     |   7.8 MiB/s    | **1.6x**      |
+| **10KB**  |   2.5 MiB/s     |   1.3 MiB/s    | **1.9x**      |
+| **100KB** |  10.5 MiB/s     |   4.6 MiB/s    | **2.3x**      |
+| **1MB**   |  16.8 MiB/s     |   7.9 MiB/s    | **2.1x**      |
 
 ### x86_64 (AMD Ryzen 9 7950X) - yq Identity Comparison (P2 Optimized)
 
@@ -97,56 +97,56 @@ cargo bench --bench yq_comparison
 
 Mixed YAML content with various features.
 
-| Size      | succinctly           | yq                   | Speedup    |
-|-----------|----------------------|----------------------|------------|
-| **1KB**   |  4.15 ms (297 KiB/s) |  6.91 ms (178 KiB/s) | **1.7x**   |
-| **10KB**  |  4.91 ms (2.0 MiB/s) |  8.10 ms (1.2 MiB/s) | **1.6x**   |
-| **100KB** | 11.40 ms (8.1 MiB/s) | 19.95 ms (4.6 MiB/s) | **1.8x**   |
-| **1MB**   | 72.72 ms (12.7 MiB/s)| 119.4 ms (7.7 MiB/s) | **1.6x**   |
+| Size      | succinctly             | yq                     | Speedup    |
+|-----------|------------------------|------------------------|------------|
+| **1KB**   |   3.5 ms (350 KiB/s)   |   6.3 ms (197 KiB/s)   | **1.8x**   |
+| **10KB**  |   4.1 ms (2.4 MiB/s)   |   7.4 ms (1.3 MiB/s)   | **1.8x**   |
+| **100KB** |   8.9 ms (10.3 MiB/s)  |  20.0 ms (4.6 MiB/s)   | **2.2x**   |
+| **1MB**   |  53.9 ms (17.1 MiB/s)  | 116.0 ms (7.9 MiB/s)   | **2.2x**   |
 
 ### Pattern: users
 
 Realistic user record arrays (common in config files).
 
-| Size      | succinctly           | yq                   | Speedup    |
-|-----------|----------------------|----------------------|------------|
-| **1KB**   |  3.91 ms (274 KiB/s) |  6.99 ms (153 KiB/s) | **1.8x**   |
-| **10KB**  |  4.76 ms (2.1 MiB/s) |  8.20 ms (1.2 MiB/s) | **1.7x**   |
-| **100KB** | 12.29 ms (7.9 MiB/s) | 22.03 ms (4.4 MiB/s) | **1.8x**   |
-| **1MB**   | 92.11 ms (10.9 MiB/s)| 147.7 ms (6.8 MiB/s) | **1.6x**   |
+| Size      | succinctly             | yq                     | Speedup    |
+|-----------|------------------------|------------------------|------------|
+| **1KB**   |   3.5 ms (303 KiB/s)   |   6.6 ms (163 KiB/s)   | **1.9x**   |
+| **10KB**  |   4.2 ms (2.3 MiB/s)   |   7.5 ms (1.3 MiB/s)   | **1.8x**   |
+| **100KB** |   9.6 ms (10.2 MiB/s)  |  21.0 ms (4.6 MiB/s)   | **2.2x**   |
+| **1MB**   |  66.0 ms (15.2 MiB/s)  | 141.4 ms (7.1 MiB/s)   | **2.1x**   |
 
 ### Pattern: nested
 
 Deeply nested mapping structures.
 
-| Size      | succinctly           | yq                   | Speedup    |
-|-----------|----------------------|----------------------|------------|
-| **1KB**   |  3.89 ms (258 KiB/s) |  6.96 ms (144 KiB/s) | **1.8x**   |
-| **10KB**  |  4.55 ms (1.5 MiB/s) |  7.84 ms (915 KiB/s) | **1.7x**   |
-| **100KB** |  7.49 ms (6.7 MiB/s) | 15.25 ms (3.3 MiB/s) | **2.0x**   |
-| **1MB**   | 42.33 ms (14.9 MiB/s)| 94.40 ms (6.7 MiB/s) | **2.2x**   |
+| Size      | succinctly             | yq                     | Speedup    |
+|-----------|------------------------|------------------------|------------|
+| **1KB**   |   3.6 ms (282 KiB/s)   |   6.3 ms (160 KiB/s)   | **1.8x**   |
+| **10KB**  |   3.9 ms (1.8 MiB/s)   |   7.2 ms (1.0 MiB/s)   | **1.8x**   |
+| **100KB** |   6.0 ms (8.3 MiB/s)   |  14.4 ms (3.5 MiB/s)   | **2.4x**   |
+| **1MB**   |  28.8 ms (21.9 MiB/s)  |  92.1 ms (6.8 MiB/s)   | **3.2x**   |
 
 ### Pattern: sequences
 
 Sequence-heavy YAML content.
 
-| Size      | succinctly           | yq                   | Speedup    |
-|-----------|----------------------|----------------------|------------|
-| **1KB**   |  4.05 ms (250 KiB/s) |  6.89 ms (147 KiB/s) | **1.7x**   |
-| **10KB**  |  4.62 ms (2.1 MiB/s) |  8.15 ms (1.2 MiB/s) | **1.8x**   |
-| **100KB** | 10.26 ms (9.5 MiB/s) | 21.66 ms (4.5 MiB/s) | **2.1x**   |
-| **1MB**   | 64.43 ms (15.5 MiB/s)| 139.1 ms (7.2 MiB/s) | **2.2x**   |
+| Size      | succinctly             | yq                     | Speedup    |
+|-----------|------------------------|------------------------|------------|
+| **1KB**   |   3.6 ms (284 KiB/s)   |   6.3 ms (162 KiB/s)   | **1.8x**   |
+| **10KB**  |   4.2 ms (2.3 MiB/s)   |   7.5 ms (1.3 MiB/s)   | **1.8x**   |
+| **100KB** |   9.1 ms (10.7 MiB/s)  |  20.6 ms (4.7 MiB/s)   | **2.3x**   |
+| **1MB**   |  56.7 ms (17.6 MiB/s)  | 137.8 ms (7.3 MiB/s)   | **2.4x**   |
 
 ### Pattern: strings
 
 String-heavy YAML with quoted variants.
 
-| Size      | succinctly           | yq                   | Speedup    |
-|-----------|----------------------|----------------------|------------|
-| **1KB**   |  3.91 ms (259 KiB/s) |  6.84 ms (148 KiB/s) | **1.7x**   |
-| **10KB**  |  4.55 ms (2.2 MiB/s) |  7.54 ms (1.3 MiB/s) | **1.7x**   |
-| **100KB** | 10.14 ms (9.6 MiB/s) | 14.94 ms (6.5 MiB/s) | **1.5x**   |
-| **1MB**   | 64.84 ms (15.4 MiB/s)| 81.77 ms (12.2 MiB/s)| **1.3x**   |
+| Size      | succinctly             | yq                     | Speedup    |
+|-----------|------------------------|------------------------|------------|
+| **1KB**   |   3.5 ms (287 KiB/s)   |   6.2 ms (162 KiB/s)   | **1.8x**   |
+| **10KB**  |   4.1 ms (2.4 MiB/s)   |   6.6 ms (1.5 MiB/s)   | **1.6x**   |
+| **100KB** |   8.2 ms (11.9 MiB/s)  |  13.7 ms (7.1 MiB/s)   | **1.7x**   |
+| **1MB**   |  49.1 ms (20.4 MiB/s)  |  79.2 ms (12.6 MiB/s)  | **1.6x**   |
 
 ---
 
@@ -166,18 +166,19 @@ String-heavy YAML with quoted variants.
 
 ### Speed
 
-- **1.3-2.2x faster** across all patterns and sizes
-- **Best performance on nested/sequences**: 2.2x speedup on 1MB deeply nested or sequence-heavy files
+- **1.6-3.2x faster** across all patterns and sizes
+- **Best performance on nested structures**: 3.2x speedup on 1MB deeply nested files
 - **Nested structures**: Efficient BP tree navigation provides consistent speedups
 - **Larger files benefit more**: Speedup increases with file size (amortizes index construction)
 
 ### Why succinctly is faster
 
 1. **Semi-index architecture**: YAML structure is pre-indexed using balanced parentheses, enabling O(1) navigation
-2. **SIMD string scanning**: ARM NEON accelerates quoted string parsing (6-9% faster than scalar)
-3. **SIMD indentation counting**: Vectorized space counting for block-style parsing (10-24% faster on small files)
-4. **Streaming output**: For identity queries, outputs directly from source without building intermediate structures
-5. **Lazy evaluation**: Only materializes values that are actually accessed
+2. **Direct YAML→JSON transcoding**: Escape sequences are translated directly without intermediate string allocation
+3. **SIMD string scanning**: ARM NEON accelerates quoted string parsing (6-9% faster than scalar)
+4. **SIMD indentation counting**: Vectorized space counting for block-style parsing (10-24% faster on small files)
+5. **Streaming output**: For identity queries, outputs directly from source without building intermediate structures
+6. **Lazy evaluation**: Only materializes values that are actually accessed
 
 ### SIMD Optimizations
 

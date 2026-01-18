@@ -1,32 +1,12 @@
-//! Micro-benchmarks comparing old (as_str + JSON escape) vs new (direct transcode) paths
+//! Micro-benchmarks for YAML to JSON transcoding performance.
 //!
-//! The "old way" decodes YAML to a Rust String via as_str(), then JSON-escapes it.
-//! The "new way" transcodes YAML escapes directly to JSON escapes in one pass via to_json_document().
-#![allow(clippy::collapsible_match)]
+//! Measures the direct YAML→JSON transcoding path via `to_json_document()`.
+//! This benchmarks the optimized single-pass transcoding that converts YAML
+//! escape sequences directly to JSON escape sequences without intermediate
+//! string allocation.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use succinctly::yaml::YamlIndex;
-
-/// JSON-escape a string (the "old way" second step)
-fn json_escape_string(s: &str) -> String {
-    let mut output = String::with_capacity(s.len() + 2);
-    output.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            c if c < '\x20' => {
-                output.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => output.push(c),
-        }
-    }
-    output.push('"');
-    output
-}
 
 /// Helper to generate double-quoted YAML string with escapes
 fn make_double_quoted_with_escapes(count: usize) -> Vec<u8> {
@@ -98,8 +78,8 @@ fn make_8digit_unicode(count: usize) -> Vec<u8> {
     yaml
 }
 
-/// Compare old vs new path for double-quoted strings with escapes
-fn bench_double_quoted_comparison(c: &mut Criterion) {
+/// Benchmark double-quoted strings with various escape sequences
+fn bench_double_quoted(c: &mut Criterion) {
     let mut group = c.benchmark_group("transcode/double_quoted");
 
     for &count in &[10, 50, 100, 500] {
@@ -108,41 +88,12 @@ fn bench_double_quoted_comparison(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(yaml.len() as u64));
 
-        // Old way: Navigate to string, call as_str() to decode, then JSON-escape
         group.bench_with_input(
-            BenchmarkId::new("old_as_str", count),
+            BenchmarkId::from_parameter(count),
             &(&yaml, &index),
             |b, (yaml, index)| {
                 b.iter(|| {
-                    let cursor = index.root(yaml);
-                    // Root is a sequence containing one document
-                    // Document is a mapping with key "value"
-                    if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                        if let Some((doc, _)) = elements.uncons() {
-                            if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                                if let Some(value) = fields.find("value") {
-                                    if let succinctly::yaml::YamlValue::String(s) = value {
-                                        // Old path: decode to Rust string, then JSON-escape
-                                        let decoded = s.as_str().unwrap();
-                                        let json = json_escape_string(&decoded);
-                                        return black_box(json);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    black_box(String::new())
-                })
-            },
-        );
-
-        // New way: direct transcode via to_json_document
-        group.bench_with_input(
-            BenchmarkId::new("new_transcode", count),
-            &(&yaml, &index),
-            |b, (yaml, index)| {
-                b.iter(|| {
-                    let cursor = index.root(black_box(yaml));
+                    let cursor = index.root(black_box(*yaml));
                     let result = cursor.to_json_document();
                     black_box(result)
                 })
@@ -153,8 +104,8 @@ fn bench_double_quoted_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-/// Compare old vs new path for single-quoted strings
-fn bench_single_quoted_comparison(c: &mut Criterion) {
+/// Benchmark single-quoted strings
+fn bench_single_quoted(c: &mut Criterion) {
     let mut group = c.benchmark_group("transcode/single_quoted");
 
     for &count in &[10, 50, 100, 500] {
@@ -163,38 +114,12 @@ fn bench_single_quoted_comparison(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(yaml.len() as u64));
 
-        // Old way
         group.bench_with_input(
-            BenchmarkId::new("old_as_str", count),
+            BenchmarkId::from_parameter(count),
             &(&yaml, &index),
             |b, (yaml, index)| {
                 b.iter(|| {
-                    let cursor = index.root(yaml);
-                    if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                        if let Some((doc, _)) = elements.uncons() {
-                            if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                                if let Some(value) = fields.find("value") {
-                                    if let succinctly::yaml::YamlValue::String(s) = value {
-                                        let decoded = s.as_str().unwrap();
-                                        let json = json_escape_string(&decoded);
-                                        return black_box(json);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    black_box(String::new())
-                })
-            },
-        );
-
-        // New way
-        group.bench_with_input(
-            BenchmarkId::new("new_transcode", count),
-            &(&yaml, &index),
-            |b, (yaml, index)| {
-                b.iter(|| {
-                    let cursor = index.root(black_box(yaml));
+                    let cursor = index.root(black_box(*yaml));
                     let result = cursor.to_json_document();
                     black_box(result)
                 })
@@ -205,8 +130,8 @@ fn bench_single_quoted_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-/// Compare old vs new path for multiline strings (line folding)
-fn bench_multiline_comparison(c: &mut Criterion) {
+/// Benchmark multiline strings with line folding
+fn bench_multiline(c: &mut Criterion) {
     let mut group = c.benchmark_group("transcode/multiline");
 
     for &lines in &[5, 20, 50, 100] {
@@ -215,38 +140,12 @@ fn bench_multiline_comparison(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(yaml.len() as u64));
 
-        // Old way
         group.bench_with_input(
-            BenchmarkId::new("old_as_str", lines),
+            BenchmarkId::from_parameter(lines),
             &(&yaml, &index),
             |b, (yaml, index)| {
                 b.iter(|| {
-                    let cursor = index.root(yaml);
-                    if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                        if let Some((doc, _)) = elements.uncons() {
-                            if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                                if let Some(value) = fields.find("value") {
-                                    if let succinctly::yaml::YamlValue::String(s) = value {
-                                        let decoded = s.as_str().unwrap();
-                                        let json = json_escape_string(&decoded);
-                                        return black_box(json);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    black_box(String::new())
-                })
-            },
-        );
-
-        // New way
-        group.bench_with_input(
-            BenchmarkId::new("new_transcode", lines),
-            &(&yaml, &index),
-            |b, (yaml, index)| {
-                b.iter(|| {
-                    let cursor = index.root(black_box(yaml));
+                    let cursor = index.root(black_box(*yaml));
                     let result = cursor.to_json_document();
                     black_box(result)
                 })
@@ -257,8 +156,8 @@ fn bench_multiline_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-/// Compare old vs new path for 8-digit unicode (surrogate pairs)
-fn bench_unicode_comparison(c: &mut Criterion) {
+/// Benchmark 8-digit unicode escapes (surrogate pairs in JSON)
+fn bench_unicode_8digit(c: &mut Criterion) {
     let mut group = c.benchmark_group("transcode/unicode_8digit");
 
     for &count in &[10, 50, 100] {
@@ -267,38 +166,12 @@ fn bench_unicode_comparison(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(yaml.len() as u64));
 
-        // Old way
         group.bench_with_input(
-            BenchmarkId::new("old_as_str", count),
+            BenchmarkId::from_parameter(count),
             &(&yaml, &index),
             |b, (yaml, index)| {
                 b.iter(|| {
-                    let cursor = index.root(yaml);
-                    if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                        if let Some((doc, _)) = elements.uncons() {
-                            if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                                if let Some(value) = fields.find("value") {
-                                    if let succinctly::yaml::YamlValue::String(s) = value {
-                                        let decoded = s.as_str().unwrap();
-                                        let json = json_escape_string(&decoded);
-                                        return black_box(json);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    black_box(String::new())
-                })
-            },
-        );
-
-        // New way
-        group.bench_with_input(
-            BenchmarkId::new("new_transcode", count),
-            &(&yaml, &index),
-            |b, (yaml, index)| {
-                b.iter(|| {
-                    let cursor = index.root(black_box(yaml));
+                    let cursor = index.root(black_box(*yaml));
                     let result = cursor.to_json_document();
                     black_box(result)
                 })
@@ -336,51 +209,7 @@ features:
     let index = YamlIndex::build(config_yaml).unwrap();
     group.throughput(Throughput::Bytes(config_yaml.len() as u64));
 
-    // Old way - extract each string field individually and JSON-escape
-    group.bench_function("config_old_as_str", |b| {
-        b.iter(|| {
-            let mut result = String::new();
-            let cursor = index.root(config_yaml);
-            if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                if let Some((doc, _)) = elements.uncons() {
-                    if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                        // Extract database strings
-                        if let Some(db) = fields.find("database") {
-                            if let succinctly::yaml::YamlValue::Mapping(db_fields) = db {
-                                for key in &["host", "username", "password", "connection_string"] {
-                                    if let Some(value) = db_fields.find(key) {
-                                        if let succinctly::yaml::YamlValue::String(s) = value {
-                                            if let Ok(decoded) = s.as_str() {
-                                                result.push_str(&json_escape_string(&decoded));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Extract logging strings
-                        if let Some(log) = fields.find("logging") {
-                            if let succinctly::yaml::YamlValue::Mapping(log_fields) = log {
-                                for key in &["level", "format", "file"] {
-                                    if let Some(value) = log_fields.find(key) {
-                                        if let succinctly::yaml::YamlValue::String(s) = value {
-                                            if let Ok(decoded) = s.as_str() {
-                                                result.push_str(&json_escape_string(&decoded));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            black_box(result)
-        })
-    });
-
-    // New way - full document conversion
-    group.bench_function("config_new_transcode", |b| {
+    group.bench_function("config", |b| {
         b.iter(|| {
             let cursor = index.root(black_box(config_yaml));
             let result = cursor.to_json_document();
@@ -403,43 +232,7 @@ features:
     let escape_index = YamlIndex::build(escape_heavy).unwrap();
     group.throughput(Throughput::Bytes(escape_heavy.len() as u64));
 
-    group.bench_function("escape_heavy_old", |b| {
-        b.iter(|| {
-            let mut result = String::new();
-            let cursor = escape_index.root(escape_heavy);
-            if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                if let Some((doc, _)) = elements.uncons() {
-                    if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                        if let Some(escapes) = fields.find("escapes") {
-                            if let succinctly::yaml::YamlValue::Mapping(esc_fields) = escapes {
-                                for key in &[
-                                    "newlines",
-                                    "tabs",
-                                    "quotes",
-                                    "backslash",
-                                    "mixed",
-                                    "unicode",
-                                    "hex",
-                                    "all_escapes",
-                                ] {
-                                    if let Some(value) = esc_fields.find(key) {
-                                        if let succinctly::yaml::YamlValue::String(s) = value {
-                                            if let Ok(decoded) = s.as_str() {
-                                                result.push_str(&json_escape_string(&decoded));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            black_box(result)
-        })
-    });
-
-    group.bench_function("escape_heavy_new", |b| {
+    group.bench_function("escape_heavy", |b| {
         b.iter(|| {
             let cursor = escape_index.root(black_box(escape_heavy));
             let result = cursor.to_json_document();
@@ -470,60 +263,7 @@ fn bench_large_document(c: &mut Criterion) {
     let index = YamlIndex::build(&large_yaml).unwrap();
     group.throughput(Throughput::Bytes(large_yaml.len() as u64));
 
-    // Old way - extract strings from first 10 items
-    group.bench_function("500_items_old_sample", |b| {
-        b.iter(|| {
-            let mut result = String::new();
-            let cursor = index.root(&large_yaml);
-            if let succinctly::yaml::YamlValue::Sequence(elements) = cursor.value() {
-                if let Some((doc, _)) = elements.uncons() {
-                    if let succinctly::yaml::YamlValue::Mapping(fields) = doc {
-                        if let Some(items) = fields.find("items") {
-                            if let succinctly::yaml::YamlValue::Sequence(item_elements) = items {
-                                // Extract from first 10 items
-                                let mut remaining = item_elements;
-                                for _ in 0..10 {
-                                    if let Some((item, rest)) = remaining.uncons() {
-                                        if let succinctly::yaml::YamlValue::Mapping(item_fields) =
-                                            item
-                                        {
-                                            if let Some(name) = item_fields.find("name") {
-                                                if let succinctly::yaml::YamlValue::String(s) = name
-                                                {
-                                                    if let Ok(decoded) = s.as_str() {
-                                                        result.push_str(&json_escape_string(
-                                                            &decoded,
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                            if let Some(desc) = item_fields.find("desc") {
-                                                if let succinctly::yaml::YamlValue::String(s) = desc
-                                                {
-                                                    if let Ok(decoded) = s.as_str() {
-                                                        result.push_str(&json_escape_string(
-                                                            &decoded,
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        remaining = rest;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            black_box(result)
-        })
-    });
-
-    // New way - full document conversion
-    group.bench_function("500_items_new_full", |b| {
+    group.bench_function("500_items", |b| {
         b.iter(|| {
             let cursor = index.root(black_box(&large_yaml));
             let result = cursor.to_json_document();
@@ -536,10 +276,10 @@ fn bench_large_document(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_double_quoted_comparison,
-    bench_single_quoted_comparison,
-    bench_multiline_comparison,
-    bench_unicode_comparison,
+    bench_double_quoted,
+    bench_single_quoted,
+    bench_multiline,
+    bench_unicode_8digit,
     bench_realistic_document,
     bench_large_document,
 );

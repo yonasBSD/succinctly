@@ -176,9 +176,9 @@ To regenerate: `cargo bench --bench jq_comparison`
 
 | Size      | succinctly            | yq                    | Speedup    |
 |-----------|-----------------------|-----------------------|------------|
-| **10KB**  |  4.5 ms  (2.2 MiB/s)  |  7.5 ms  (1.3 MiB/s)  | **1.7x**   |
-| **100KB** | 10.6 ms  (8.6 MiB/s)  | 19.8 ms  (4.6 MiB/s)  | **1.9x**   |
-| **1MB**   | 72.9 ms (12.7 MiB/s)  |118.6 ms  (7.8 MiB/s)  | **1.6x**   |
+| **10KB**  |  4.0 ms  (2.5 MiB/s)  |  7.2 ms  (1.3 MiB/s)  | **1.8x**   |
+| **100KB** |  8.8 ms (10.5 MiB/s)  | 19.9 ms  (4.6 MiB/s)  | **2.3x**   |
+| **1MB**   | 55.0 ms (16.8 MiB/s)  |117.1 ms  (7.9 MiB/s)  | **2.1x**   |
 
 ### yq Query Performance (AMD Ryzen 9 7950X)
 
