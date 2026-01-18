@@ -4,6 +4,20 @@
 
 Welcome! This guide will get you up and running with succinctly.
 
+## Why Succinctly?
+
+Succinctly processes JSON, YAML, and CSV/TSV files using **18-46x less memory** than traditional parsers while being **1.2-6x faster** for most workloads. It achieves this through semi-indexing: building a lightweight structural index instead of a full DOM tree.
+
+**Best for**:
+- Querying large files where you only need a subset of data
+- Memory-constrained environments
+- High-throughput processing pipelines
+- Drop-in replacement for `jq` and `yq` with better performance
+
+See the [main README](../../README.md#performance) for detailed benchmarks.
+
+---
+
 ## Prerequisites
 
 - Rust 1.70 or later

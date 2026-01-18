@@ -110,6 +110,21 @@ Where n = document size, k = value size.
 3. **Cache-Friendly**: Sequential scan for index, random access for queries
 4. **SIMD-Accelerated**: Parallel character classification
 
+## Real-World Performance
+
+Semi-indexing delivers significant memory and speed improvements over traditional DOM parsers:
+
+| Comparison | Memory Savings | Speed |
+|------------|----------------|-------|
+| vs serde_json | **18x less** | 3x faster |
+| vs simd-json | **46x less** | 3x faster |
+| vs jq | **5-25x less** | 1.2-6.3x faster |
+| vs yq | similar | **45-687x faster** |
+
+The index overhead (3-6%) is dwarfed by the memory savings from not materializing the entire document.
+
+See [../benchmarks/](../benchmarks/) for detailed numbers across file sizes and patterns.
+
 ## Trade-offs
 
 1. **Memory**: Index overhead (3-6%)
