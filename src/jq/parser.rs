@@ -34,8 +34,8 @@ use alloc::collections::BTreeMap;
 use std::collections::BTreeMap;
 
 use super::expr::{
-    ArithOp, Builtin, CompareOp, Expr, FormatType, Import, Include, Literal, MetaValue, ModuleMeta,
-    ObjectEntry, ObjectKey, Pattern, PatternEntry, Program, StringPart,
+    ArithOp, AssignOp, Builtin, CompareOp, Expr, FormatType, Import, Include, Literal, MetaValue,
+    ModuleMeta, ObjectEntry, ObjectKey, Pattern, PatternEntry, Program, StringPart,
 };
 
 /// Error that occurs during parsing.
@@ -2160,6 +2160,17 @@ impl<'a> Parser<'a> {
             self.expect(')')?;
             return Ok(Some(Builtin::DelPaths(Box::new(paths))));
         }
+        // del(path) - delete value at path
+        if self.matches_keyword("del") {
+            self.consume_keyword("del");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let path = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Del(Box::new(path))));
+        }
 
         // Phase 10: Math Functions
         if self.matches_keyword("floor") {
@@ -2465,6 +2476,15 @@ impl<'a> Parser<'a> {
 
         loop {
             self.skip_ws();
+            // Check for compound assignment operators (*=, /=, %=) and don't consume them
+            let peek2 = self.peek_str(2);
+            if peek2 == "*=" || peek2 == "%=" {
+                break;
+            }
+            // /= needs special handling since // is alternative
+            if peek2.starts_with('/') && peek2 != "//" && peek2.ends_with('=') {
+                break;
+            }
             let op = match self.peek() {
                 Some('*') => ArithOp::Mul,
                 Some('/') => {
@@ -2496,6 +2516,11 @@ impl<'a> Parser<'a> {
 
         loop {
             self.skip_ws();
+            // Check for compound assignment operators (+= or -=) and don't consume them
+            let peek2 = self.peek_str(2);
+            if peek2 == "+=" || peek2 == "-=" {
+                break;
+            }
             let op = match self.peek() {
                 Some('+') => ArithOp::Add,
                 Some('-') => {
@@ -2595,6 +2620,11 @@ impl<'a> Parser<'a> {
 
         loop {
             self.skip_ws();
+            // Check for // but not //= (alternative assignment)
+            let peek3 = self.peek_str(3);
+            if peek3 == "//=" {
+                break;
+            }
             if self.peek_str(2) != "//" {
                 break;
             }
@@ -2608,10 +2638,85 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
+    /// Parse assignment expressions: `path = value`, `path |= filter`, `path += value`, etc.
+    /// Assignment has higher precedence than pipe, lower than alternative.
+    fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
+        let left = self.parse_alternative()?;
+        self.skip_ws();
+
+        // Check for assignment operators
+        let peek2 = self.peek_str(2);
+        let peek3 = self.peek_str(3);
+
+        // Check for |= (update)
+        if peek2 == "|=" {
+            self.next(); // |
+            self.next(); // =
+            self.skip_ws();
+            let filter = self.parse_alternative()?;
+            return Ok(Expr::Update {
+                path: Box::new(left),
+                filter: Box::new(filter),
+            });
+        }
+
+        // Check for //= (alternative assignment)
+        if peek3 == "//=" {
+            self.next(); // /
+            self.next(); // /
+            self.next(); // =
+            self.skip_ws();
+            let value = self.parse_alternative()?;
+            return Ok(Expr::AlternativeAssign {
+                path: Box::new(left),
+                value: Box::new(value),
+            });
+        }
+
+        // Check for compound assignments: +=, -=, *=, /=, %=
+        if peek2.len() == 2 && peek2.ends_with('=') {
+            let op_char = peek2.chars().next().unwrap();
+            let assign_op = match op_char {
+                '+' => Some(AssignOp::Add),
+                '-' => Some(AssignOp::Sub),
+                '*' => Some(AssignOp::Mul),
+                '/' => Some(AssignOp::Div),
+                '%' => Some(AssignOp::Mod),
+                _ => None,
+            };
+
+            if let Some(op) = assign_op {
+                self.next(); // op char
+                self.next(); // =
+                self.skip_ws();
+                let value = self.parse_alternative()?;
+                return Ok(Expr::CompoundAssign {
+                    op,
+                    path: Box::new(left),
+                    value: Box::new(value),
+                });
+            }
+        }
+
+        // Check for simple assignment: =
+        // But be careful not to match == (comparison)
+        if self.peek() == Some('=') && self.peek_str(2) != "==" {
+            self.next(); // =
+            self.skip_ws();
+            let value = self.parse_alternative()?;
+            return Ok(Expr::Assign {
+                path: Box::new(left),
+                value: Box::new(value),
+            });
+        }
+
+        Ok(left)
+    }
+
     /// Parse a pipe expression: `expr | expr | ...`
     /// Also handles `as` binding: `expr as $var | body` or `expr as {pattern} | body`
     fn parse_pipe_expr(&mut self) -> Result<Expr, ParseError> {
-        let first = self.parse_alternative()?;
+        let first = self.parse_assignment()?;
         self.skip_ws();
 
         // Check for `as` binding (Phase 8: simple var, Phase 9: patterns)
@@ -2633,7 +2738,7 @@ impl<'a> Parser<'a> {
         while self.peek() == Some('|') {
             self.next();
             self.skip_ws();
-            let next_expr = self.parse_alternative()?;
+            let next_expr = self.parse_assignment()?;
             self.skip_ws();
 
             // Check for `as` binding after pipe

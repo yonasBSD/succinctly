@@ -33,6 +33,11 @@
 //! | `if .a then .b else .c end` | Conditional |
 //! | `try .a catch .b` | Error handling |
 //! | `error("msg")` | Raise error |
+//! | `.a = value` | Simple assignment |
+//! | `.a \|= filter` | Update assignment |
+//! | `.a += value` | Compound assignment (+=, -=, *=, /=, %=) |
+//! | `.a //= value` | Alternative assignment (set if null/false) |
+//! | `del(.a)` | Delete field/element |
 //!
 //! # Example
 //!
@@ -72,8 +77,8 @@ mod value;
 
 pub use eval::{eval, eval_lenient, substitute_vars, EvalError, QueryResult};
 pub use expr::{
-    ArithOp, Builtin, CompareOp, Expr, FormatType, Import, Include, Literal, MetaValue, ModuleMeta,
-    ObjectEntry, ObjectKey, Pattern, PatternEntry, Program, StringPart,
+    ArithOp, AssignOp, Builtin, CompareOp, Expr, FormatType, Import, Include, Literal, MetaValue,
+    ModuleMeta, ObjectEntry, ObjectKey, Pattern, PatternEntry, Program, StringPart,
 };
 pub use lazy::JqValue;
 pub use parser::{parse, parse_program, ParseError};

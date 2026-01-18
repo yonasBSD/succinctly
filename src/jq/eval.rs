@@ -18,8 +18,8 @@ use indexmap::IndexMap;
 use crate::json::light::{JsonCursor, JsonElements, JsonFields, StandardJson};
 
 use super::expr::{
-    ArithOp, Builtin, CompareOp, Expr, FormatType, Literal, ObjectEntry, ObjectKey, Pattern,
-    StringPart,
+    ArithOp, AssignOp, Builtin, CompareOp, Expr, FormatType, Literal, ObjectEntry, ObjectKey,
+    Pattern, StringPart,
 };
 use super::value::OwnedValue;
 
@@ -313,6 +313,18 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>>(
                 "module '{}' not loaded (namespaced call {}::{})",
                 namespace, namespace, name
             )))
+        }
+
+        // Assignment operators
+        Expr::Assign { path, value: val } => eval_assign(path, val, value, optional),
+        Expr::Update { path, filter } => eval_update(path, filter, value, optional),
+        Expr::CompoundAssign {
+            op,
+            path,
+            value: val,
+        } => eval_compound_assign(*op, path, val, value, optional),
+        Expr::AlternativeAssign { path, value: val } => {
+            eval_alternative_assign(path, val, value, optional)
         }
     }
 }
@@ -1152,6 +1164,9 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
 
         // Phase 10: Object functions
         Builtin::ModuleMeta(name) => builtin_modulemeta(name, value, optional),
+
+        // Phase 11: Path manipulation
+        Builtin::Del(path) => builtin_del(path, value, optional),
     }
 }
 
@@ -3723,6 +3738,363 @@ pub fn eval_lenient<'a, W: Clone + AsRef<[u64]>>(
 }
 
 // =============================================================================
+// Assignment Operators Implementation
+// =============================================================================
+
+/// Evaluate simple assignment: `.path = value`
+/// Sets the value at path and returns the modified input.
+fn eval_assign<'a, W: Clone + AsRef<[u64]>>(
+    path_expr: &Expr,
+    value_expr: &Expr,
+    input: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // First evaluate the value expression
+    let new_value = match eval_single(value_expr, input.clone(), optional).materialize_cursor() {
+        QueryResult::One(v) => to_owned(&v),
+        QueryResult::Owned(v) => v,
+        QueryResult::None => OwnedValue::Null,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Many(vs) => {
+            // If value produces multiple results, use the first one
+            if let Some(v) = vs.first() {
+                to_owned(v)
+            } else {
+                OwnedValue::Null
+            }
+        }
+        QueryResult::ManyOwned(vs) => {
+            if let Some(v) = vs.into_iter().next() {
+                v
+            } else {
+                OwnedValue::Null
+            }
+        }
+        QueryResult::OneCursor(_) => unreachable!("materialize_cursor should have converted this"),
+    };
+
+    // Convert input to owned for modification
+    let mut result = to_owned(&input);
+
+    // Apply the assignment using path
+    if let Err(e) = set_path(&mut result, path_expr, new_value) {
+        return QueryResult::Error(e);
+    }
+
+    QueryResult::Owned(result)
+}
+
+/// Evaluate update assignment: `.path |= filter`
+/// Applies filter to the value at path and updates it.
+fn eval_update<'a, W: Clone + AsRef<[u64]>>(
+    path_expr: &Expr,
+    filter_expr: &Expr,
+    input: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Convert input to owned for modification
+    let mut result = to_owned(&input);
+
+    // Get current value at path, apply filter, and set back
+    if let Err(e) = update_path(&mut result, path_expr, filter_expr, optional) {
+        return QueryResult::Error(e);
+    }
+
+    QueryResult::Owned(result)
+}
+
+/// Evaluate compound assignment: `.path += value`, `.path -= value`, etc.
+fn eval_compound_assign<'a, W: Clone + AsRef<[u64]>>(
+    op: AssignOp,
+    path_expr: &Expr,
+    value_expr: &Expr,
+    input: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Convert to update: .path op= value  becomes  .path |= . op value
+    let arith_op = match op {
+        AssignOp::Add => ArithOp::Add,
+        AssignOp::Sub => ArithOp::Sub,
+        AssignOp::Mul => ArithOp::Mul,
+        AssignOp::Div => ArithOp::Div,
+        AssignOp::Mod => ArithOp::Mod,
+    };
+
+    let filter = Expr::Arithmetic {
+        op: arith_op,
+        left: Box::new(Expr::Identity),
+        right: value_expr.clone().into(),
+    };
+
+    eval_update(path_expr, &filter, input, optional)
+}
+
+/// Evaluate alternative assignment: `.path //= value`
+/// Sets path to value only if current value is null or false.
+fn eval_alternative_assign<'a, W: Clone + AsRef<[u64]>>(
+    path_expr: &Expr,
+    value_expr: &Expr,
+    input: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Convert to update: .path //= value  becomes  .path |= . // value
+    let filter = Expr::Alternative(Box::new(Expr::Identity), Box::new(value_expr.clone()));
+
+    eval_update(path_expr, &filter, input, optional)
+}
+
+/// Set a value at a path in an owned value.
+fn set_path(
+    root: &mut OwnedValue,
+    path_expr: &Expr,
+    new_value: OwnedValue,
+) -> Result<(), EvalError> {
+    match path_expr {
+        Expr::Identity => {
+            *root = new_value;
+            Ok(())
+        }
+        Expr::Field(name) => {
+            if let OwnedValue::Object(map) = root {
+                map.insert(name.clone(), new_value);
+                Ok(())
+            } else {
+                Err(EvalError::type_error("object", owned_type_name(root)))
+            }
+        }
+        Expr::Index(idx) => {
+            if let OwnedValue::Array(arr) = root {
+                let len = arr.len() as i64;
+                let actual_idx = if *idx < 0 { len + idx } else { *idx };
+                if actual_idx >= 0 && (actual_idx as usize) < arr.len() {
+                    arr[actual_idx as usize] = new_value;
+                    Ok(())
+                } else {
+                    Err(EvalError::index_out_of_bounds(*idx, arr.len()))
+                }
+            } else {
+                Err(EvalError::type_error("array", owned_type_name(root)))
+            }
+        }
+        Expr::Pipe(exprs) if !exprs.is_empty() => {
+            // For chained paths like .a.b.c, navigate to parent and set at last element
+            if exprs.len() == 1 {
+                set_path(root, &exprs[0], new_value)
+            } else {
+                // Navigate to parent
+                let parent_path = &exprs[..exprs.len() - 1];
+                let last_path = &exprs[exprs.len() - 1];
+
+                let parent = get_path_mut(root, parent_path)?;
+                set_path(parent, last_path, new_value)
+            }
+        }
+        Expr::Optional(inner) => {
+            // For optional assignment, try to set but don't error if path doesn't exist
+            match set_path(root, inner, new_value) {
+                Ok(()) => Ok(()),
+                Err(_) => Ok(()), // Silently succeed for optional
+            }
+        }
+        _ => Err(EvalError::new(
+            "cannot use expression as assignment target".to_string(),
+        )),
+    }
+}
+
+/// Get a mutable reference to a value at a path.
+fn get_path_mut<'a>(
+    root: &'a mut OwnedValue,
+    path_parts: &[Expr],
+) -> Result<&'a mut OwnedValue, EvalError> {
+    let mut current = root;
+
+    for part in path_parts {
+        current = match part {
+            Expr::Identity => current,
+            Expr::Field(name) => {
+                if let OwnedValue::Object(map) = current {
+                    map.entry(name.clone()).or_insert(OwnedValue::Null)
+                } else {
+                    return Err(EvalError::type_error("object", owned_type_name(current)));
+                }
+            }
+            Expr::Index(idx) => {
+                if let OwnedValue::Array(arr) = current {
+                    let len = arr.len() as i64;
+                    let actual_idx = if *idx < 0 { len + idx } else { *idx };
+                    if actual_idx >= 0 && (actual_idx as usize) < arr.len() {
+                        &mut arr[actual_idx as usize]
+                    } else {
+                        return Err(EvalError::index_out_of_bounds(*idx, arr.len()));
+                    }
+                } else {
+                    return Err(EvalError::type_error("array", owned_type_name(current)));
+                }
+            }
+            _ => return Err(EvalError::new("invalid path component")),
+        };
+    }
+
+    Ok(current)
+}
+
+/// Update a value at a path by applying a filter.
+fn update_path(
+    root: &mut OwnedValue,
+    path_expr: &Expr,
+    filter_expr: &Expr,
+    optional: bool,
+) -> Result<(), EvalError> {
+    match path_expr {
+        Expr::Identity => {
+            // Apply filter to root itself using eval_owned_expr
+            match eval_owned_expr(filter_expr, root, optional) {
+                Ok(v) => {
+                    *root = v;
+                    Ok(())
+                }
+                Err(_e) if optional => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        Expr::Field(name) => {
+            if let OwnedValue::Object(map) = root {
+                let current = map.entry(name.clone()).or_insert(OwnedValue::Null);
+                update_path(current, &Expr::Identity, filter_expr, optional)
+            } else if optional {
+                Ok(())
+            } else {
+                Err(EvalError::type_error("object", owned_type_name(root)))
+            }
+        }
+        Expr::Index(idx) => {
+            if let OwnedValue::Array(arr) = root {
+                let len = arr.len() as i64;
+                let actual_idx = if *idx < 0 { len + idx } else { *idx };
+                if actual_idx >= 0 && (actual_idx as usize) < arr.len() {
+                    update_path(
+                        &mut arr[actual_idx as usize],
+                        &Expr::Identity,
+                        filter_expr,
+                        optional,
+                    )
+                } else if optional {
+                    Ok(())
+                } else {
+                    Err(EvalError::index_out_of_bounds(*idx, arr.len()))
+                }
+            } else if optional {
+                Ok(())
+            } else {
+                Err(EvalError::type_error("array", owned_type_name(root)))
+            }
+        }
+        Expr::Iterate => {
+            // Update all elements
+            match root {
+                OwnedValue::Array(arr) => {
+                    for elem in arr.iter_mut() {
+                        update_path(elem, &Expr::Identity, filter_expr, optional)?;
+                    }
+                    Ok(())
+                }
+                OwnedValue::Object(map) => {
+                    for value in map.values_mut() {
+                        update_path(value, &Expr::Identity, filter_expr, optional)?;
+                    }
+                    Ok(())
+                }
+                _ if optional => Ok(()),
+                _ => Err(EvalError::type_error(
+                    "array or object",
+                    owned_type_name(root),
+                )),
+            }
+        }
+        Expr::Pipe(exprs) if !exprs.is_empty() => {
+            // Chain: navigate and update
+            if exprs.len() == 1 {
+                update_path(root, &exprs[0], filter_expr, optional)
+            } else {
+                // Navigate to the penultimate path, then update the last
+                let first = &exprs[0];
+                let rest = Expr::Pipe(exprs[1..].to_vec());
+
+                match first {
+                    Expr::Field(name) => {
+                        if let OwnedValue::Object(map) = root {
+                            let current = map.entry(name.clone()).or_insert(OwnedValue::Null);
+                            update_path(current, &rest, filter_expr, optional)
+                        } else if optional {
+                            Ok(())
+                        } else {
+                            Err(EvalError::type_error("object", owned_type_name(root)))
+                        }
+                    }
+                    Expr::Index(idx) => {
+                        if let OwnedValue::Array(arr) = root {
+                            let len = arr.len() as i64;
+                            let actual_idx = if *idx < 0 { len + idx } else { *idx };
+                            if actual_idx >= 0 && (actual_idx as usize) < arr.len() {
+                                update_path(
+                                    &mut arr[actual_idx as usize],
+                                    &rest,
+                                    filter_expr,
+                                    optional,
+                                )
+                            } else if optional {
+                                Ok(())
+                            } else {
+                                Err(EvalError::index_out_of_bounds(*idx, arr.len()))
+                            }
+                        } else if optional {
+                            Ok(())
+                        } else {
+                            Err(EvalError::type_error("array", owned_type_name(root)))
+                        }
+                    }
+                    Expr::Iterate => match root {
+                        OwnedValue::Array(arr) => {
+                            for elem in arr.iter_mut() {
+                                update_path(elem, &rest, filter_expr, optional)?;
+                            }
+                            Ok(())
+                        }
+                        OwnedValue::Object(map) => {
+                            for value in map.values_mut() {
+                                update_path(value, &rest, filter_expr, optional)?;
+                            }
+                            Ok(())
+                        }
+                        _ if optional => Ok(()),
+                        _ => Err(EvalError::type_error(
+                            "array or object",
+                            owned_type_name(root),
+                        )),
+                    },
+                    _ => update_path(root, first, filter_expr, optional),
+                }
+            }
+        }
+        Expr::Optional(inner) => update_path(root, inner, filter_expr, true),
+        _ => Err(EvalError::new("cannot use expression as update target")),
+    }
+}
+
+/// Get the type name for an owned value.
+fn owned_type_name(value: &OwnedValue) -> &'static str {
+    match value {
+        OwnedValue::Null => "null",
+        OwnedValue::Bool(_) => "boolean",
+        OwnedValue::Int(_) | OwnedValue::Float(_) => "number",
+        OwnedValue::String(_) => "string",
+        OwnedValue::Array(_) => "array",
+        OwnedValue::Object(_) => "object",
+    }
+}
+
+// =============================================================================
 // Phase 8: Variables and Advanced Control Flow Implementation
 // =============================================================================
 
@@ -4007,6 +4379,24 @@ fn substitute_var(expr: &Expr, var_name: &str, replacement: &OwnedValue) -> Expr
                 .map(|a| substitute_var(a, var_name, replacement))
                 .collect(),
         },
+        // Assignment operators
+        Expr::Assign { path, value } => Expr::Assign {
+            path: Box::new(substitute_var(path, var_name, replacement)),
+            value: Box::new(substitute_var(value, var_name, replacement)),
+        },
+        Expr::Update { path, filter } => Expr::Update {
+            path: Box::new(substitute_var(path, var_name, replacement)),
+            filter: Box::new(substitute_var(filter, var_name, replacement)),
+        },
+        Expr::CompoundAssign { op, path, value } => Expr::CompoundAssign {
+            op: *op,
+            path: Box::new(substitute_var(path, var_name, replacement)),
+            value: Box::new(substitute_var(value, var_name, replacement)),
+        },
+        Expr::AlternativeAssign { path, value } => Expr::AlternativeAssign {
+            path: Box::new(substitute_var(path, var_name, replacement)),
+            value: Box::new(substitute_var(value, var_name, replacement)),
+        },
     }
 }
 
@@ -4208,6 +4598,7 @@ fn substitute_var_in_builtin(
         Builtin::ModuleMeta(e) => {
             Builtin::ModuleMeta(Box::new(substitute_var(e, var_name, replacement)))
         }
+        Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
     }
 }
 
@@ -5280,6 +5671,149 @@ fn delete_path(value: OwnedValue, path: &[OwnedValue]) -> OwnedValue {
     }
 }
 
+/// Builtin: del(path) - delete a single path
+fn builtin_del<'a, W: Clone + AsRef<[u64]>>(
+    path_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Convert to owned and delete the path
+    let mut result = to_owned(&value);
+
+    if let Err(e) = delete_at_path(&mut result, path_expr, optional) {
+        return QueryResult::Error(e);
+    }
+
+    QueryResult::Owned(result)
+}
+
+/// Delete a value at a path expression.
+fn delete_at_path(
+    root: &mut OwnedValue,
+    path_expr: &Expr,
+    optional: bool,
+) -> Result<(), EvalError> {
+    match path_expr {
+        Expr::Identity => {
+            // del(.) replaces with null
+            *root = OwnedValue::Null;
+            Ok(())
+        }
+        Expr::Field(name) => {
+            if let OwnedValue::Object(map) = root {
+                map.shift_remove(name);
+                Ok(())
+            } else if optional {
+                Ok(())
+            } else {
+                Err(EvalError::type_error("object", owned_type_name(root)))
+            }
+        }
+        Expr::Index(idx) => {
+            if let OwnedValue::Array(arr) = root {
+                let len = arr.len() as i64;
+                let actual_idx = if *idx < 0 { len + idx } else { *idx };
+                if actual_idx >= 0 && (actual_idx as usize) < arr.len() {
+                    arr.remove(actual_idx as usize);
+                    Ok(())
+                } else if optional {
+                    Ok(())
+                } else {
+                    Err(EvalError::index_out_of_bounds(*idx, arr.len()))
+                }
+            } else if optional {
+                Ok(())
+            } else {
+                Err(EvalError::type_error("array", owned_type_name(root)))
+            }
+        }
+        Expr::Iterate => {
+            // del(.[]) removes all elements
+            match root {
+                OwnedValue::Array(arr) => {
+                    arr.clear();
+                    Ok(())
+                }
+                OwnedValue::Object(map) => {
+                    map.clear();
+                    Ok(())
+                }
+                _ if optional => Ok(()),
+                _ => Err(EvalError::type_error(
+                    "array or object",
+                    owned_type_name(root),
+                )),
+            }
+        }
+        Expr::Pipe(exprs) if !exprs.is_empty() => {
+            // Chain: navigate and delete at the last path
+            if exprs.len() == 1 {
+                delete_at_path(root, &exprs[0], optional)
+            } else {
+                let first = &exprs[0];
+                let rest = Expr::Pipe(exprs[1..].to_vec());
+
+                match first {
+                    Expr::Field(name) => {
+                        if let OwnedValue::Object(map) = root {
+                            if let Some(current) = map.get_mut(name) {
+                                delete_at_path(current, &rest, optional)
+                            } else if optional {
+                                Ok(())
+                            } else {
+                                Err(EvalError::field_not_found(name))
+                            }
+                        } else if optional {
+                            Ok(())
+                        } else {
+                            Err(EvalError::type_error("object", owned_type_name(root)))
+                        }
+                    }
+                    Expr::Index(idx) => {
+                        if let OwnedValue::Array(arr) = root {
+                            let len = arr.len() as i64;
+                            let actual_idx = if *idx < 0 { len + idx } else { *idx };
+                            if actual_idx >= 0 && (actual_idx as usize) < arr.len() {
+                                delete_at_path(&mut arr[actual_idx as usize], &rest, optional)
+                            } else if optional {
+                                Ok(())
+                            } else {
+                                Err(EvalError::index_out_of_bounds(*idx, arr.len()))
+                            }
+                        } else if optional {
+                            Ok(())
+                        } else {
+                            Err(EvalError::type_error("array", owned_type_name(root)))
+                        }
+                    }
+                    Expr::Iterate => match root {
+                        OwnedValue::Array(arr) => {
+                            for elem in arr.iter_mut() {
+                                delete_at_path(elem, &rest, optional)?;
+                            }
+                            Ok(())
+                        }
+                        OwnedValue::Object(map) => {
+                            for value in map.values_mut() {
+                                delete_at_path(value, &rest, optional)?;
+                            }
+                            Ok(())
+                        }
+                        _ if optional => Ok(()),
+                        _ => Err(EvalError::type_error(
+                            "array or object",
+                            owned_type_name(root),
+                        )),
+                    },
+                    _ => delete_at_path(root, first, optional),
+                }
+            }
+        }
+        Expr::Optional(inner) => delete_at_path(root, inner, true),
+        _ => Err(EvalError::new("cannot use expression as delete target")),
+    }
+}
+
 /// Builtin: delpaths(paths) - delete multiple paths
 fn builtin_delpaths<'a, W: Clone + AsRef<[u64]>>(
     paths_expr: &Expr,
@@ -6102,18 +6636,6 @@ fn extract_pattern_bindings(
     }
 }
 
-/// Get a type name for an OwnedValue.
-fn owned_type_name(value: &OwnedValue) -> &'static str {
-    match value {
-        OwnedValue::Null => "null",
-        OwnedValue::Bool(_) => "boolean",
-        OwnedValue::Int(_) | OwnedValue::Float(_) => "number",
-        OwnedValue::String(_) => "string",
-        OwnedValue::Array(_) => "array",
-        OwnedValue::Object(_) => "object",
-    }
-}
-
 /// Evaluate function definition: `def name(params): body; then`.
 ///
 /// In jq, function definitions are scoped - the function is available in `then`.
@@ -6375,6 +6897,23 @@ fn expand_func_calls(expr: &Expr, func_name: &str, params: &[String], body: &Exp
                 .map(|a| expand_func_calls(a, func_name, params, body))
                 .collect(),
         },
+        Expr::Assign { path, value } => Expr::Assign {
+            path: Box::new(expand_func_calls(path, func_name, params, body)),
+            value: Box::new(expand_func_calls(value, func_name, params, body)),
+        },
+        Expr::Update { path, filter } => Expr::Update {
+            path: Box::new(expand_func_calls(path, func_name, params, body)),
+            filter: Box::new(expand_func_calls(filter, func_name, params, body)),
+        },
+        Expr::CompoundAssign { op, path, value } => Expr::CompoundAssign {
+            op: *op,
+            path: Box::new(expand_func_calls(path, func_name, params, body)),
+            value: Box::new(expand_func_calls(value, func_name, params, body)),
+        },
+        Expr::AlternativeAssign { path, value } => Expr::AlternativeAssign {
+            path: Box::new(expand_func_calls(path, func_name, params, body)),
+            value: Box::new(expand_func_calls(value, func_name, params, body)),
+        },
     }
 }
 
@@ -6632,6 +7171,23 @@ fn substitute_func_param(expr: &Expr, param: &str, arg: &Expr) -> Expr {
                 .map(|a| substitute_func_param(a, param, arg))
                 .collect(),
         },
+        Expr::Assign { path, value } => Expr::Assign {
+            path: Box::new(substitute_func_param(path, param, arg)),
+            value: Box::new(substitute_func_param(value, param, arg)),
+        },
+        Expr::Update { path, filter } => Expr::Update {
+            path: Box::new(substitute_func_param(path, param, arg)),
+            filter: Box::new(substitute_func_param(filter, param, arg)),
+        },
+        Expr::CompoundAssign { op, path, value } => Expr::CompoundAssign {
+            op: *op,
+            path: Box::new(substitute_func_param(path, param, arg)),
+            value: Box::new(substitute_func_param(value, param, arg)),
+        },
+        Expr::AlternativeAssign { path, value } => Expr::AlternativeAssign {
+            path: Box::new(substitute_func_param(path, param, arg)),
+            value: Box::new(substitute_func_param(value, param, arg)),
+        },
     }
 }
 
@@ -6854,6 +7410,7 @@ fn expand_func_calls_in_builtin(
         Builtin::ModuleMeta(e) => {
             Builtin::ModuleMeta(Box::new(expand_func_calls(e, func_name, params, body)))
         }
+        Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
     }
 }
 
@@ -7021,6 +7578,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::ModuleMeta(e) => {
             Builtin::ModuleMeta(Box::new(substitute_func_param(e, param, arg)))
         }
+        Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
     }
 }
 
@@ -9388,5 +9946,207 @@ mod tests {
         query!(b"42", r#"debug("test message")"#, QueryResult::Owned(OwnedValue::Int(n)) => {
             assert_eq!(n, 42);
         });
+    }
+
+    // =============================================
+    // Assignment operator tests
+    // =============================================
+
+    #[test]
+    fn test_simple_assign() {
+        // Simple assignment: .a = value
+        query!(br#"{"a": 1, "b": 2}"#, r#".a = 42"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(42));
+                let b = obj.get("b").unwrap();
+                assert_eq!(*b, OwnedValue::Int(2));
+            }
+        );
+    }
+
+    #[test]
+    fn test_nested_assign() {
+        // Nested assignment: .a.b = value
+        query!(br#"{"a": {"b": 1}}"#, r#".a.b = 99"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                if let OwnedValue::Object(inner) = a {
+                    let b = inner.get("b").unwrap();
+                    assert_eq!(*b, OwnedValue::Int(99));
+                } else {
+                    panic!("Expected nested object");
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_array_index_assign() {
+        // Array index assignment: .[0] = value
+        query!(br#"[1, 2, 3]"#, r#".[1] = 99"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr[0], OwnedValue::Int(1));
+                assert_eq!(arr[1], OwnedValue::Int(99));
+                assert_eq!(arr[2], OwnedValue::Int(3));
+            }
+        );
+    }
+
+    #[test]
+    fn test_update_assign() {
+        // Update assignment: .a |= . + 1
+        query!(br#"{"a": 5}"#, r#".a |= . + 1"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(6));
+            }
+        );
+    }
+
+    #[test]
+    fn test_update_assign_array() {
+        // Update assignment on array elements: .[] |= . * 2
+        query!(br#"[1, 2, 3]"#, r#".[] |= . * 2"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr[0], OwnedValue::Int(2));
+                assert_eq!(arr[1], OwnedValue::Int(4));
+                assert_eq!(arr[2], OwnedValue::Int(6));
+            }
+        );
+    }
+
+    #[test]
+    fn test_compound_assign_add() {
+        // Compound assignment: .a += 10
+        query!(br#"{"a": 5}"#, r#".a += 10"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(15));
+            }
+        );
+    }
+
+    #[test]
+    fn test_compound_assign_sub() {
+        // Compound subtraction: .a -= 3
+        query!(br#"{"a": 10}"#, r#".a -= 3"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(7));
+            }
+        );
+    }
+
+    #[test]
+    fn test_compound_assign_mul() {
+        // Compound multiplication: .a *= 4
+        query!(br#"{"a": 5}"#, r#".a *= 4"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(20));
+            }
+        );
+    }
+
+    #[test]
+    fn test_compound_assign_div() {
+        // Compound division: .a /= 2
+        // Division returns float even for integer inputs
+        query!(br#"{"a": 10}"#, r#".a /= 2"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                match a {
+                    OwnedValue::Float(f) => assert!((f - 5.0).abs() < 0.001),
+                    OwnedValue::Int(i) => assert_eq!(*i, 5),
+                    _ => panic!("Expected number, got {:?}", a),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_compound_assign_mod() {
+        // Compound modulo: .a %= 3
+        query!(br#"{"a": 10}"#, r#".a %= 3"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(1));
+            }
+        );
+    }
+
+    #[test]
+    fn test_alternative_assign() {
+        // Alternative assignment: .a //= "default" (when .a is null)
+        query!(br#"{"a": null}"#, r#".a //= "default""#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::String("default".to_string()));
+            }
+        );
+    }
+
+    #[test]
+    fn test_alternative_assign_existing() {
+        // Alternative assignment should not change non-null values
+        query!(br#"{"a": "existing"}"#, r#".a //= "default""#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::String("existing".to_string()));
+            }
+        );
+    }
+
+    #[test]
+    fn test_del_field() {
+        // del(.a) removes a field
+        query!(br#"{"a": 1, "b": 2}"#, r#"del(.a)"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert!(!obj.contains_key("a"));
+                assert!(obj.contains_key("b"));
+            }
+        );
+    }
+
+    #[test]
+    fn test_del_array_element() {
+        // del(.[1]) removes an array element
+        query!(br#"[1, 2, 3]"#, r#"del(.[1])"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], OwnedValue::Int(1));
+                assert_eq!(arr[1], OwnedValue::Int(3));
+            }
+        );
+    }
+
+    #[test]
+    fn test_del_nested() {
+        // del(.a.b) removes nested field
+        query!(br#"{"a": {"b": 1, "c": 2}}"#, r#"del(.a.b)"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                if let OwnedValue::Object(inner) = a {
+                    assert!(!inner.contains_key("b"));
+                    assert!(inner.contains_key("c"));
+                } else {
+                    panic!("Expected nested object");
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_chained_assign() {
+        // Chained: .a = 1 | .b = 2
+        query!(br#"{"a": 0, "b": 0}"#, r#".a = 1 | .b = 2"#,
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                let a = obj.get("a").unwrap();
+                assert_eq!(*a, OwnedValue::Int(1));
+                let b = obj.get("b").unwrap();
+                assert_eq!(*b, OwnedValue::Int(2));
+            }
+        );
     }
 }
