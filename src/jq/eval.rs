@@ -50,6 +50,10 @@ pub enum QueryResult<'a, W = Vec<u64>> {
 
     /// Multiple owned values.
     ManyOwned(Vec<OwnedValue>),
+
+    /// Break from a labeled scope.
+    /// Contains the label name to match against enclosing Label expressions.
+    Break(String),
 }
 
 impl<'a, W: Clone + AsRef<[u64]>> QueryResult<'a, W> {
@@ -365,6 +369,10 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>>(
         Expr::AlternativeAssign { path, value: val } => {
             eval_alternative_assign(path, val, value, optional)
         }
+
+        // Label-break for non-local control flow
+        Expr::Label { name, body } => eval_label(name, body, value, optional),
+        Expr::Break(name) => QueryResult::Break(name.clone()),
     }
 }
 
@@ -410,6 +418,7 @@ fn eval_comma<'a, W: Clone + AsRef<[u64]>>(
             }
             QueryResult::None => {}
             QueryResult::Error(e) => return QueryResult::Error(e),
+            QueryResult::Break(label) => return QueryResult::Break(label),
         }
     }
 
@@ -446,6 +455,7 @@ fn eval_array_construction<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs,
         QueryResult::None => vec![],
         QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Break(label) => return QueryResult::Break(label),
     };
 
     QueryResult::Owned(OwnedValue::Array(items))
@@ -475,6 +485,7 @@ fn eval_object_construction<'a, W: Clone + AsRef<[u64]>>(
                     }
                     QueryResult::Owned(OwnedValue::String(s)) => s,
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                     _ => {
                         return QueryResult::Error(EvalError::new("key must be a string"));
                     }
@@ -505,6 +516,7 @@ fn eval_object_construction<'a, W: Clone + AsRef<[u64]>>(
             }
             QueryResult::None => OwnedValue::Null,
             QueryResult::Error(e) => return QueryResult::Error(e),
+            QueryResult::Break(label) => return QueryResult::Break(label),
         };
 
         map.insert(key_str, owned_val);
@@ -568,6 +580,7 @@ fn result_to_owned<W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => Err(EvalError::new("no value")),
         QueryResult::Error(e) => Err(e),
+        QueryResult::Break(label) => Err(EvalError::new(format!("break ${} not in label", label))),
     }
 }
 
@@ -926,6 +939,7 @@ fn eval_alternative<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs.first().map(|v| v.is_truthy()).unwrap_or(false),
         QueryResult::None => false,
         QueryResult::Error(_) => false,
+        QueryResult::Break(label) => return QueryResult::Break(label.clone()),
     };
 
     if is_truthy {
@@ -955,6 +969,7 @@ fn eval_if<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs.first().map(|v| v.is_truthy()).unwrap_or(false),
         QueryResult::None => false,
         QueryResult::Error(e) => return QueryResult::Error(e.clone()),
+        QueryResult::Break(label) => return QueryResult::Break(label.clone()),
     };
 
     if is_truthy {
@@ -981,6 +996,23 @@ fn eval_try<'a, W: Clone + AsRef<[u64]>>(
             None => QueryResult::None,
         },
         // Non-error results pass through
+        other => other,
+    }
+}
+
+/// Evaluate label expression.
+/// `label $name | expr` establishes a scope that can be exited with `break $name`.
+fn eval_label<'a, W: Clone + AsRef<[u64]>>(
+    name: &str,
+    body: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let result = eval_single(body, value, optional);
+    match result {
+        // If we get a Break with matching label, convert to empty output
+        QueryResult::Break(label) if label == name => QueryResult::None,
+        // Non-matching breaks propagate up
         other => other,
     }
 }
@@ -1613,6 +1645,7 @@ fn builtin_select<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs.first().map(|v| v.is_truthy()).unwrap_or(false),
         QueryResult::None => false,
         QueryResult::Error(e) => return QueryResult::Error(e.clone()),
+        QueryResult::Break(label) => return QueryResult::Break(label.clone()),
     };
 
     if is_truthy {
@@ -1641,6 +1674,7 @@ fn builtin_map<'a, W: Clone + AsRef<[u64]>>(
                     QueryResult::ManyOwned(vs) => results.extend(vs),
                     QueryResult::None => {}
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                 }
             }
             QueryResult::Owned(OwnedValue::Array(results))
@@ -1693,6 +1727,7 @@ fn builtin_map_values<'a, W: Clone + AsRef<[u64]>>(
                     }
                     QueryResult::None => {}
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                 }
             }
             QueryResult::Owned(OwnedValue::Object(result_map))
@@ -1717,6 +1752,7 @@ fn builtin_map_values<'a, W: Clone + AsRef<[u64]>>(
                     }
                     QueryResult::None => {}
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                 }
             }
             QueryResult::Owned(OwnedValue::Array(results))
@@ -2625,6 +2661,7 @@ fn builtin_with_entries<'a, W: Clone + AsRef<[u64]>>(
                     QueryResult::ManyOwned(vs) => transformed.extend(vs),
                     QueryResult::None => {}
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                 }
             }
 
@@ -2698,6 +2735,7 @@ fn eval_string_interpolation<'a, W: Clone + AsRef<[u64]>>(
                     }
                     QueryResult::None => String::new(),
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                 };
                 result.push_str(&s);
             }
@@ -3178,6 +3216,7 @@ fn builtin_skip<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -4831,6 +4870,7 @@ fn eval_pipe<'a, W: Clone + AsRef<[u64]>>(
                     QueryResult::Many(rs) => all_results.extend(rs),
                     QueryResult::None => {}
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                     QueryResult::Owned(_) | QueryResult::ManyOwned(_) => {
                         // TODO: Handle owned values in pipe properly
                         // For now, skip (this would need refactoring)
@@ -4841,6 +4881,7 @@ fn eval_pipe<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
         QueryResult::Owned(v) => {
             // Continue piping with owned value using eval_owned_pipe
             eval_owned_pipe::<W>(rest, v, optional)
@@ -4857,6 +4898,7 @@ fn eval_pipe<'a, W: Clone + AsRef<[u64]>>(
                     QueryResult::Many(rs) => all_results.extend(rs.iter().map(to_owned)),
                     QueryResult::None => {}
                     QueryResult::Error(e) => return QueryResult::Error(e),
+                    QueryResult::Break(label) => return QueryResult::Break(label),
                 }
             }
             if all_results.is_empty() {
@@ -5006,6 +5048,7 @@ pub fn eval_lenient<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::Error(_) => Vec::new(),
         QueryResult::Owned(_) => Vec::new(), // Owned values not returned as StandardJson
         QueryResult::ManyOwned(_) => Vec::new(),
+        QueryResult::Break(_) => Vec::new(), // Break without matching label
     }
 }
 
@@ -5043,6 +5086,7 @@ fn eval_assign<'a, W: Clone + AsRef<[u64]>>(
             }
         }
         QueryResult::OneCursor(_) => unreachable!("materialize_cursor should have converted this"),
+        QueryResult::Break(label) => return QueryResult::Break(label),
     };
 
     // Convert input to owned for modification
@@ -5671,6 +5715,20 @@ fn substitute_var(expr: &Expr, var_name: &str, replacement: &OwnedValue) -> Expr
             path: Box::new(substitute_var(path, var_name, replacement)),
             value: Box::new(substitute_var(value, var_name, replacement)),
         },
+
+        // Label-break
+        Expr::Label { name, body } => {
+            // Don't substitute if the label shadows our variable
+            if name == var_name {
+                expr.clone()
+            } else {
+                Expr::Label {
+                    name: name.clone(),
+                    body: Box::new(substitute_var(body, var_name, replacement)),
+                }
+            }
+        }
+        Expr::Break(name) => Expr::Break(name.clone()),
     }
 }
 
@@ -6038,6 +6096,7 @@ fn eval_as<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs,
         QueryResult::None => return QueryResult::None,
         QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Break(label) => return QueryResult::Break(label),
     };
 
     // For each bound value, substitute and evaluate the body
@@ -6053,6 +6112,7 @@ fn eval_as<'a, W: Clone + AsRef<[u64]>>(
             QueryResult::ManyOwned(vs) => all_results.extend(vs),
             QueryResult::None => {}
             QueryResult::Error(e) => return QueryResult::Error(e),
+            QueryResult::Break(label) => return QueryResult::Break(label),
         }
     }
 
@@ -6084,6 +6144,7 @@ fn eval_reduce<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs,
         QueryResult::None => Vec::new(),
         QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Break(label) => return QueryResult::Break(label),
     };
 
     // Evaluate initial accumulator
@@ -6145,6 +6206,7 @@ fn eval_owned_expr(
         }
         QueryResult::None => Ok(OwnedValue::Null),
         QueryResult::Error(e) => Err(e),
+        QueryResult::Break(label) => Err(EvalError::new(format!("break ${} not in label", label))),
     }
 }
 
@@ -6229,6 +6291,7 @@ fn eval_foreach<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs,
         QueryResult::None => Vec::new(),
         QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Break(label) => return QueryResult::Break(label),
     };
 
     // Evaluate initial state
@@ -6350,6 +6413,7 @@ fn eval_first_expr<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -6380,6 +6444,7 @@ fn eval_last_expr<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -6423,6 +6488,7 @@ fn eval_nth_expr<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -9295,6 +9361,7 @@ fn builtin_limit<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -9325,6 +9392,7 @@ fn builtin_first_stream<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -9355,6 +9423,7 @@ fn builtin_last_stream<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::None => QueryResult::None,
         QueryResult::Error(e) => QueryResult::Error(e),
+        QueryResult::Break(label) => QueryResult::Break(label),
     }
 }
 
@@ -10451,6 +10520,7 @@ fn builtin_pick<'a, W: Clone + AsRef<[u64]>>(
             return QueryResult::Error(EvalError::new("pick: keys expression produced no output"))
         }
         QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Break(label) => return QueryResult::Break(label),
         QueryResult::None if optional => return QueryResult::None,
         QueryResult::None => {
             return QueryResult::Error(EvalError::new("pick: keys expression produced no output"))
@@ -10599,6 +10669,7 @@ fn eval_as_pattern<'a, W: Clone + AsRef<[u64]>>(
         QueryResult::ManyOwned(vs) => vs,
         QueryResult::None => return QueryResult::None,
         QueryResult::Error(e) => return QueryResult::Error(e),
+        QueryResult::Break(label) => return QueryResult::Break(label),
     };
 
     let mut all_results: Vec<OwnedValue> = Vec::new();
@@ -10624,6 +10695,7 @@ fn eval_as_pattern<'a, W: Clone + AsRef<[u64]>>(
             QueryResult::ManyOwned(vs) => all_results.extend(vs),
             QueryResult::None => {}
             QueryResult::Error(e) => return QueryResult::Error(e),
+            QueryResult::Break(label) => return QueryResult::Break(label),
         }
     }
 
@@ -10952,6 +11024,13 @@ fn expand_func_calls(expr: &Expr, func_name: &str, params: &[String], body: &Exp
             path: Box::new(expand_func_calls(path, func_name, params, body)),
             value: Box::new(expand_func_calls(value, func_name, params, body)),
         },
+
+        // Label-break
+        Expr::Label { name, body: lbody } => Expr::Label {
+            name: name.clone(),
+            body: Box::new(expand_func_calls(lbody, func_name, params, body)),
+        },
+        Expr::Break(name) => Expr::Break(name.clone()),
     }
 }
 
@@ -11228,6 +11307,13 @@ fn substitute_func_param(expr: &Expr, param: &str, arg: &Expr) -> Expr {
             path: Box::new(substitute_func_param(path, param, arg)),
             value: Box::new(substitute_func_param(value, param, arg)),
         },
+
+        // Label-break
+        Expr::Label { name, body } => Expr::Label {
+            name: name.clone(),
+            body: Box::new(substitute_func_param(body, param, arg)),
+        },
+        Expr::Break(name) => Expr::Break(name.clone()),
     }
 }
 

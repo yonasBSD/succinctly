@@ -15,7 +15,7 @@ The implementation is already production-ready for ~90% of jq use cases.
 | Array operations    | Fully implemented   | 95%      |
 | Object operations   | Fully implemented   | 100%     |
 | String functions    | Fully implemented   | 95%      |
-| Control flow        | Fully implemented   | 90%      |
+| Control flow        | Fully implemented   | 100%     |
 | Math functions      | Fully implemented   | 100%     |
 | Path operations     | Fully implemented   | 90%      |
 | Format strings      | Fully implemented   | 90%      |
@@ -142,6 +142,7 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `repeat(expr)`
 - [x] `range(n)` / `range(a;b)` / `range(a;b;step)`
 - [x] `combinations` / `combinations(n)` - Cartesian product of arrays
+- [x] `label $name | expr` / `break $name` - non-local control flow
 
 ### Path Operations
 - [x] `path(expr)`
@@ -217,8 +218,9 @@ Currently parsed but not evaluated:
 
 ### Priority 2: Advanced Features
 
-- [ ] Label-break: `label $name | ... | break $name`
-- [ ] Array slicing with steps: `.[::2]` (every other element)
+No remaining advanced features - label-break has been implemented!
+
+**Note:** Array slicing with steps (`.[::2]`) was removed - it's Python syntax, not jq. Use `[range(0; length; 2) as $i | .[$i]]` instead.
 
 ### Priority 3: CLI Enhancements
 
@@ -303,3 +305,5 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-19 | Added `skip(n; expr)` iteration control - skip first n outputs (✅ complete)|
 | 2026-01-19 | Moved `input`/`inputs`/`input_line_number` to "Won't implement" - conflicts with succinct data structure architecture|
 | 2026-01-19 | Verified `$__loc__` already implemented - returns `{file, line}` at source location (✅ complete)|
+| 2026-01-19 | Removed `.[::2]` step slicing from TODO - it's Python syntax, not jq|
+| 2026-01-20 | Added `label $name | expr` / `break $name` for non-local control flow (✅ complete)|

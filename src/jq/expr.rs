@@ -202,6 +202,19 @@ pub enum Expr {
         step: Option<Box<Expr>>,
     },
 
+    /// Label for non-local control flow: `label $name | expr`
+    /// Establishes a scope that can be exited early with `break $name`
+    Label {
+        /// Label name (without the $)
+        name: String,
+        /// Body expression
+        body: Box<Expr>,
+    },
+
+    /// Break from a labeled scope: `break $name`
+    /// Exits the nearest enclosing `label $name` scope
+    Break(String),
+
     // Phase 9: Variables & Definitions
     /// Destructuring variable binding: `. as {name: $n, age: $a} | ...`
     /// or `. as [$first, $second] | ...`

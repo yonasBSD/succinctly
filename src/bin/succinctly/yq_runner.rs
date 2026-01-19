@@ -316,6 +316,10 @@ fn evaluate_input(
         }
         QueryResult::Owned(v) => Ok(vec![v]),
         QueryResult::ManyOwned(vs) => Ok(vs),
+        QueryResult::Break(label) => {
+            eprintln!("yq: error: break ${} not in label", label);
+            Ok(vec![])
+        }
     }
 }
 

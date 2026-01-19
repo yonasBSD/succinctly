@@ -926,6 +926,10 @@ impl<'a> Parser<'a> {
                 } else if self.matches_keyword("def") {
                     // Phase 9: Function definition
                     self.parse_def_expr()
+                } else if self.matches_keyword("label") {
+                    self.parse_label_expr()
+                } else if self.matches_keyword("break") {
+                    self.parse_break_expr()
                 } else if let Some(builtin) = self.try_parse_builtin()? {
                     // Allow postfix operations after builtins (e.g., env.PATH, keys[0])
                     self.parse_postfix(Expr::Builtin(builtin))
@@ -1438,6 +1442,52 @@ impl<'a> Parser<'a> {
                 self.pos,
             )),
         }
+    }
+
+    /// Parse a label expression.
+    /// Syntax: label $name | expr
+    fn parse_label_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("label");
+        self.skip_ws();
+
+        // Expect $name
+        if self.peek() != Some('$') {
+            return Err(ParseError::new("expected '$' after 'label'", self.pos));
+        }
+        self.next();
+        let name = self.parse_ident()?;
+        self.skip_ws();
+
+        // Expect '|'
+        if self.peek() != Some('|') {
+            return Err(ParseError::new("expected '|' after label name", self.pos));
+        }
+        self.next();
+        self.skip_ws();
+
+        // Parse body expression
+        let body = self.parse_pipe_expr()?;
+
+        Ok(Expr::Label {
+            name,
+            body: Box::new(body),
+        })
+    }
+
+    /// Parse a break expression.
+    /// Syntax: break $name
+    fn parse_break_expr(&mut self) -> Result<Expr, ParseError> {
+        self.consume_keyword("break");
+        self.skip_ws();
+
+        // Expect $name
+        if self.peek() != Some('$') {
+            return Err(ParseError::new("expected '$' after 'break'", self.pos));
+        }
+        self.next();
+        let name = self.parse_ident()?;
+
+        Ok(Expr::Break(name))
     }
 
     /// Parse a function definition.

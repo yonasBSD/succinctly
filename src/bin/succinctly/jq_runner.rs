@@ -433,6 +433,12 @@ fn rewrite_namespaced_calls(expr: Expr) -> Expr {
             path: Box::new(rewrite_namespaced_calls(*path)),
             value: Box::new(rewrite_namespaced_calls(*value)),
         },
+        // Label-break
+        Expr::Label { name, body } => Expr::Label {
+            name,
+            body: Box::new(rewrite_namespaced_calls(*body)),
+        },
+        Expr::Break(name) => Expr::Break(name),
         // Expressions that don't contain sub-expressions - return as-is
         Expr::Identity
         | Expr::Field(_)
@@ -1295,6 +1301,10 @@ fn evaluate_input(
         }
         QueryResult::Owned(v) => Ok(vec![v]),
         QueryResult::ManyOwned(vs) => Ok(vs),
+        QueryResult::Break(label) => {
+            eprintln!("jq: error: break ${} not in label", label);
+            Ok(vec![])
+        }
     }
 }
 
@@ -1370,6 +1380,10 @@ fn query_result_to_jq_values<'a, W: Clone + AsRef<[u64]>>(
         }
         QueryResult::Owned(v) => vec![JqValue::from_owned(v)],
         QueryResult::ManyOwned(vs) => vs.into_iter().map(JqValue::from_owned).collect(),
+        QueryResult::Break(label) => {
+            eprintln!("jq: error: break ${} not in label", label);
+            vec![]
+        }
     }
 }
 
