@@ -774,6 +774,27 @@ pub enum Builtin {
     Normals,
     /// `finites` - select only finite numbers (not infinite or NaN)
     Finites,
+
+    // Phase 13: Iteration control
+    /// `limit(n; expr)` - output at most n values from expr
+    Limit(Box<Expr>, Box<Expr>),
+    /// `first(expr)` - output only the first value from expr (sugar for limit(1; expr))
+    /// Note: no-arg `first` uses `Builtin::First` from Phase 5
+    FirstStream(Box<Expr>),
+    /// `last(expr)` - output only the last value from expr
+    /// Note: no-arg `last` uses `Builtin::Last` from Phase 5
+    LastStream(Box<Expr>),
+    /// `nth(n; expr)` - output only the nth value from expr (0-indexed)
+    /// Note: no-arg `nth(n)` uses `Builtin::Nth` from Phase 5
+    NthStream(Box<Expr>, Box<Expr>),
+    /// `range(n)` - generate integers from 0 to n-1
+    Range(Box<Expr>),
+    /// `range(from; upto)` - generate integers from `from` to `upto-1`
+    RangeFromTo(Box<Expr>, Box<Expr>),
+    /// `range(from; upto; by)` - generate integers from `from` to `upto-1` stepping by `by`
+    RangeFromToBy(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `isempty(expr)` - returns true if expr produces no outputs
+    IsEmpty(Box<Expr>),
 }
 
 /// Arithmetic operators.

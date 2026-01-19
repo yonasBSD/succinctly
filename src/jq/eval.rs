@@ -1326,6 +1326,18 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Builtins => builtin_builtins(),
         Builtin::Normals => builtin_normals(value),
         Builtin::Finites => builtin_finites(value),
+
+        // Phase 13: Iteration control
+        Builtin::Limit(n_expr, expr) => builtin_limit(n_expr, expr, value, optional),
+        Builtin::FirstStream(expr) => builtin_first_stream(expr, value, optional),
+        Builtin::LastStream(expr) => builtin_last_stream(expr, value, optional),
+        Builtin::NthStream(n_expr, expr) => builtin_nth_stream(n_expr, expr, value, optional),
+        Builtin::Range(n) => builtin_range(n, value, optional),
+        Builtin::RangeFromTo(from, to) => builtin_range_from_to(from, to, value, optional),
+        Builtin::RangeFromToBy(from, to, by) => {
+            builtin_range_from_to_by(from, to, by, value, optional)
+        }
+        Builtin::IsEmpty(expr) => builtin_isempty(expr, value, optional),
     }
 }
 
@@ -5225,6 +5237,32 @@ fn substitute_var_in_builtin(
         Builtin::Builtins => Builtin::Builtins,
         Builtin::Normals => Builtin::Normals,
         Builtin::Finites => Builtin::Finites,
+        // Phase 13: Iteration control
+        Builtin::Limit(n, e) => Builtin::Limit(
+            Box::new(substitute_var(n, var_name, replacement)),
+            Box::new(substitute_var(e, var_name, replacement)),
+        ),
+        Builtin::FirstStream(e) => {
+            Builtin::FirstStream(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::LastStream(e) => {
+            Builtin::LastStream(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::NthStream(n, e) => Builtin::NthStream(
+            Box::new(substitute_var(n, var_name, replacement)),
+            Box::new(substitute_var(e, var_name, replacement)),
+        ),
+        Builtin::Range(n) => Builtin::Range(Box::new(substitute_var(n, var_name, replacement))),
+        Builtin::RangeFromTo(from, to) => Builtin::RangeFromTo(
+            Box::new(substitute_var(from, var_name, replacement)),
+            Box::new(substitute_var(to, var_name, replacement)),
+        ),
+        Builtin::RangeFromToBy(from, to, by) => Builtin::RangeFromToBy(
+            Box::new(substitute_var(from, var_name, replacement)),
+            Box::new(substitute_var(to, var_name, replacement)),
+            Box::new(substitute_var(by, var_name, replacement)),
+        ),
+        Builtin::IsEmpty(e) => Builtin::IsEmpty(Box::new(substitute_var(e, var_name, replacement))),
     }
 }
 
@@ -7313,6 +7351,359 @@ fn builtin_finites<'a, W: Clone + AsRef<[u64]>>(value: StandardJson<'a, W>) -> Q
     QueryResult::None
 }
 
+// Phase 13: Iteration control
+
+/// Builtin: limit(n; expr) - output at most n values from expr
+fn builtin_limit<'a, W: Clone + AsRef<[u64]>>(
+    n_expr: &Expr,
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate n
+    let n_result = eval_single(n_expr, value.clone(), optional);
+    let n = match n_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0) as usize
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i as usize,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as usize,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    if n == 0 {
+        return QueryResult::None;
+    }
+
+    // Evaluate expr and take at most n results
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) => QueryResult::Owned(to_owned(&v)),
+        QueryResult::OneCursor(c) => QueryResult::Owned(to_owned(&c.value())),
+        QueryResult::Owned(v) => QueryResult::Owned(v),
+        QueryResult::Many(results) => {
+            let limited: Vec<OwnedValue> =
+                results.into_iter().take(n).map(|v| to_owned(&v)).collect();
+            if limited.is_empty() {
+                QueryResult::None
+            } else if limited.len() == 1 {
+                QueryResult::Owned(limited.into_iter().next().unwrap())
+            } else {
+                QueryResult::ManyOwned(limited)
+            }
+        }
+        QueryResult::ManyOwned(results) => {
+            let limited: Vec<OwnedValue> = results.into_iter().take(n).collect();
+            if limited.is_empty() {
+                QueryResult::None
+            } else if limited.len() == 1 {
+                QueryResult::Owned(limited.into_iter().next().unwrap())
+            } else {
+                QueryResult::ManyOwned(limited)
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Builtin: first(expr) - output only the first value from expr (stream version)
+fn builtin_first_stream<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) => QueryResult::Owned(to_owned(&v)),
+        QueryResult::OneCursor(c) => QueryResult::Owned(to_owned(&c.value())),
+        QueryResult::Owned(v) => QueryResult::Owned(v),
+        QueryResult::Many(results) => {
+            if let Some(first) = results.into_iter().next() {
+                QueryResult::Owned(to_owned(&first))
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::ManyOwned(results) => {
+            if let Some(first) = results.into_iter().next() {
+                QueryResult::Owned(first)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Builtin: last(expr) - output only the last value from expr (stream version)
+fn builtin_last_stream<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) => QueryResult::Owned(to_owned(&v)),
+        QueryResult::OneCursor(c) => QueryResult::Owned(to_owned(&c.value())),
+        QueryResult::Owned(v) => QueryResult::Owned(v),
+        QueryResult::Many(results) => {
+            if let Some(last) = results.into_iter().last() {
+                QueryResult::Owned(to_owned(&last))
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::ManyOwned(results) => {
+            if let Some(last) = results.into_iter().last() {
+                QueryResult::Owned(last)
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::None => QueryResult::None,
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Builtin: nth(n; expr) - output only the nth value from expr (0-indexed, stream version)
+fn builtin_nth_stream<'a, W: Clone + AsRef<[u64]>>(
+    n_expr: &Expr,
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate n
+    let n_result = eval_single(n_expr, value.clone(), optional);
+    let n = match n_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0) as usize
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i as usize,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as usize,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    // Evaluate expr and get the nth result
+    let result = eval_single(expr, value, optional);
+    match result {
+        QueryResult::One(v) if n == 0 => QueryResult::Owned(to_owned(&v)),
+        QueryResult::OneCursor(c) if n == 0 => QueryResult::Owned(to_owned(&c.value())),
+        QueryResult::Owned(v) if n == 0 => QueryResult::Owned(v),
+        QueryResult::Many(results) => {
+            if let Some(nth) = results.into_iter().nth(n) {
+                QueryResult::Owned(to_owned(&nth))
+            } else {
+                QueryResult::None
+            }
+        }
+        QueryResult::ManyOwned(results) => {
+            if let Some(nth) = results.into_iter().nth(n) {
+                QueryResult::Owned(nth)
+            } else {
+                QueryResult::None
+            }
+        }
+        _ => QueryResult::None,
+    }
+}
+
+/// Builtin: range(n) - generate integers from 0 to n-1
+fn builtin_range<'a, W: Clone + AsRef<[u64]>>(
+    n_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate n
+    let n_result = eval_single(n_expr, value, optional);
+    let n = match n_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0)
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    if n <= 0 {
+        return QueryResult::None;
+    }
+
+    let results: Vec<OwnedValue> = (0..n).map(OwnedValue::Int).collect();
+    if results.len() == 1 {
+        QueryResult::Owned(results.into_iter().next().unwrap())
+    } else {
+        QueryResult::ManyOwned(results)
+    }
+}
+
+/// Builtin: range(from; upto) - generate integers from `from` to `upto-1`
+fn builtin_range_from_to<'a, W: Clone + AsRef<[u64]>>(
+    from_expr: &Expr,
+    to_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate from
+    let from_result = eval_single(from_expr, value.clone(), optional);
+    let from = match from_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0)
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    // Evaluate to
+    let to_result = eval_single(to_expr, value, optional);
+    let to = match to_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0)
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    if from >= to {
+        return QueryResult::None;
+    }
+
+    let results: Vec<OwnedValue> = (from..to).map(OwnedValue::Int).collect();
+    if results.len() == 1 {
+        QueryResult::Owned(results.into_iter().next().unwrap())
+    } else {
+        QueryResult::ManyOwned(results)
+    }
+}
+
+/// Builtin: range(from; upto; by) - generate integers from `from` to `upto-1` stepping by `by`
+fn builtin_range_from_to_by<'a, W: Clone + AsRef<[u64]>>(
+    from_expr: &Expr,
+    to_expr: &Expr,
+    by_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // Evaluate from
+    let from_result = eval_single(from_expr, value.clone(), optional);
+    let from = match from_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0)
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    // Evaluate to
+    let to_result = eval_single(to_expr, value.clone(), optional);
+    let to = match to_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(0)
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    // Evaluate by
+    let by_result = eval_single(by_expr, value, optional);
+    let by = match by_result {
+        QueryResult::One(v) => {
+            if let StandardJson::Number(num) = v {
+                num.as_i64().unwrap_or(1)
+            } else {
+                return QueryResult::Error(EvalError::type_error("number", type_name(&v)));
+            }
+        }
+        QueryResult::Owned(OwnedValue::Int(i)) => i,
+        QueryResult::Owned(OwnedValue::Float(f)) => f as i64,
+        QueryResult::Error(e) => return QueryResult::Error(e),
+        _ => return QueryResult::Error(EvalError::type_error("number", "null")),
+    };
+
+    if by == 0 {
+        return QueryResult::Error(EvalError::new("range step cannot be zero"));
+    }
+
+    let mut results = Vec::new();
+    let mut i = from;
+    if by > 0 {
+        while i < to {
+            results.push(OwnedValue::Int(i));
+            i += by;
+        }
+    } else {
+        while i > to {
+            results.push(OwnedValue::Int(i));
+            i += by;
+        }
+    }
+
+    if results.is_empty() {
+        QueryResult::None
+    } else if results.len() == 1 {
+        QueryResult::Owned(results.into_iter().next().unwrap())
+    } else {
+        QueryResult::ManyOwned(results)
+    }
+}
+
+/// Builtin: isempty(expr) - returns true if expr produces no outputs
+fn builtin_isempty<'a, W: Clone + AsRef<[u64]>>(
+    expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let result = eval_single(expr, value, optional);
+    let is_empty = match result {
+        QueryResult::None => true,
+        QueryResult::Many(ref v) if v.is_empty() => true,
+        QueryResult::ManyOwned(ref v) if v.is_empty() => true,
+        QueryResult::Error(_) => true, // Errors count as empty
+        _ => false,
+    };
+    QueryResult::Owned(OwnedValue::Bool(is_empty))
+}
+
 /// Builtin: delpaths(paths) - delete multiple paths
 fn builtin_delpaths<'a, W: Clone + AsRef<[u64]>>(
     paths_expr: &Expr,
@@ -9193,6 +9584,36 @@ fn expand_func_calls_in_builtin(
         Builtin::Builtins => Builtin::Builtins,
         Builtin::Normals => Builtin::Normals,
         Builtin::Finites => Builtin::Finites,
+        // Phase 13: Iteration control
+        Builtin::Limit(n, e) => Builtin::Limit(
+            Box::new(expand_func_calls(n, func_name, params, body)),
+            Box::new(expand_func_calls(e, func_name, params, body)),
+        ),
+        Builtin::FirstStream(e) => {
+            Builtin::FirstStream(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::LastStream(e) => {
+            Builtin::LastStream(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::NthStream(n, e) => Builtin::NthStream(
+            Box::new(expand_func_calls(n, func_name, params, body)),
+            Box::new(expand_func_calls(e, func_name, params, body)),
+        ),
+        Builtin::Range(n) => {
+            Builtin::Range(Box::new(expand_func_calls(n, func_name, params, body)))
+        }
+        Builtin::RangeFromTo(from, to) => Builtin::RangeFromTo(
+            Box::new(expand_func_calls(from, func_name, params, body)),
+            Box::new(expand_func_calls(to, func_name, params, body)),
+        ),
+        Builtin::RangeFromToBy(from, to, by) => Builtin::RangeFromToBy(
+            Box::new(expand_func_calls(from, func_name, params, body)),
+            Box::new(expand_func_calls(to, func_name, params, body)),
+            Box::new(expand_func_calls(by, func_name, params, body)),
+        ),
+        Builtin::IsEmpty(e) => {
+            Builtin::IsEmpty(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
     }
 }
 
@@ -9389,6 +9810,32 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Builtins => Builtin::Builtins,
         Builtin::Normals => Builtin::Normals,
         Builtin::Finites => Builtin::Finites,
+        // Phase 13: Iteration control
+        Builtin::Limit(n, e) => Builtin::Limit(
+            Box::new(substitute_func_param(n, param, arg)),
+            Box::new(substitute_func_param(e, param, arg)),
+        ),
+        Builtin::FirstStream(e) => {
+            Builtin::FirstStream(Box::new(substitute_func_param(e, param, arg)))
+        }
+        Builtin::LastStream(e) => {
+            Builtin::LastStream(Box::new(substitute_func_param(e, param, arg)))
+        }
+        Builtin::NthStream(n, e) => Builtin::NthStream(
+            Box::new(substitute_func_param(n, param, arg)),
+            Box::new(substitute_func_param(e, param, arg)),
+        ),
+        Builtin::Range(n) => Builtin::Range(Box::new(substitute_func_param(n, param, arg))),
+        Builtin::RangeFromTo(from, to) => Builtin::RangeFromTo(
+            Box::new(substitute_func_param(from, param, arg)),
+            Box::new(substitute_func_param(to, param, arg)),
+        ),
+        Builtin::RangeFromToBy(from, to, by) => Builtin::RangeFromToBy(
+            Box::new(substitute_func_param(from, param, arg)),
+            Box::new(substitute_func_param(to, param, arg)),
+            Box::new(substitute_func_param(by, param, arg)),
+        ),
+        Builtin::IsEmpty(e) => Builtin::IsEmpty(Box::new(substitute_func_param(e, param, arg))),
     }
 }
 
@@ -12522,5 +12969,188 @@ mod tests {
             }
             other => panic!("expected Int, got {:?}", other),
         }
+    }
+
+    // ============================================================================
+    // Phase 13: Iteration control tests
+    // ============================================================================
+
+    #[test]
+    fn test_limit_stream() {
+        // limit(2; .[]) - take first 2 elements
+        // Use [limit(2; .[])] to collect into array
+        query!(b"[1, 2, 3, 4, 5]", "[limit(2; .[])]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], OwnedValue::Int(1));
+                assert_eq!(arr[1], OwnedValue::Int(2));
+            }
+        );
+    }
+
+    #[test]
+    fn test_limit_zero() {
+        // limit(0; .[]) - take no elements
+        query!(b"[1, 2, 3]", "[limit(0; .[])]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 0);
+            }
+        );
+    }
+
+    #[test]
+    fn test_limit_exceeds() {
+        // limit(10; .[]) - limit exceeds array length
+        query!(b"[1, 2]", "[limit(10; .[])]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], OwnedValue::Int(1));
+                assert_eq!(arr[1], OwnedValue::Int(2));
+            }
+        );
+    }
+
+    #[test]
+    fn test_first_stream() {
+        // first(.[]) - get first element
+        query!(b"[1, 2, 3]", "first(.[])",
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 1);
+            }
+        );
+    }
+
+    #[test]
+    fn test_first_no_arg() {
+        // first (no arg) - get first element of array
+        query!(b"[1, 2, 3]", "first",
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 1);
+            }
+        );
+    }
+
+    #[test]
+    fn test_last_stream() {
+        // last(.[]) - get last element
+        query!(b"[1, 2, 3]", "last(.[])",
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 3);
+            }
+        );
+    }
+
+    #[test]
+    fn test_last_no_arg() {
+        // last (no arg) - get last element of array
+        // Note: last collects all elements to find the last, so returns Owned
+        query!(b"[1, 2, 3]", "last",
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 3);
+            }
+        );
+    }
+
+    #[test]
+    fn test_nth_stream() {
+        // nth(1; .[]) - get second element (0-indexed)
+        query!(b"[10, 20, 30]", "nth(1; .[])",
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 20);
+            }
+        );
+    }
+
+    #[test]
+    fn test_nth_no_arg() {
+        // nth(1) (no second arg) - get second element of array
+        query!(b"[10, 20, 30]", "nth(1)",
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 20);
+            }
+        );
+    }
+
+    #[test]
+    fn test_range_simple() {
+        // range(3) - generate 0, 1, 2
+        query!(b"null", "[range(3)]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], OwnedValue::Int(0));
+                assert_eq!(arr[1], OwnedValue::Int(1));
+                assert_eq!(arr[2], OwnedValue::Int(2));
+            }
+        );
+    }
+
+    #[test]
+    fn test_range_from_to() {
+        // range(2; 5) - generate 2, 3, 4
+        query!(b"null", "[range(2; 5)]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], OwnedValue::Int(2));
+                assert_eq!(arr[1], OwnedValue::Int(3));
+                assert_eq!(arr[2], OwnedValue::Int(4));
+            }
+        );
+    }
+
+    #[test]
+    fn test_range_from_to_by() {
+        // range(0; 10; 3) - generate 0, 3, 6, 9
+        query!(b"null", "[range(0; 10; 3)]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 4);
+                assert_eq!(arr[0], OwnedValue::Int(0));
+                assert_eq!(arr[1], OwnedValue::Int(3));
+                assert_eq!(arr[2], OwnedValue::Int(6));
+                assert_eq!(arr[3], OwnedValue::Int(9));
+            }
+        );
+    }
+
+    #[test]
+    fn test_range_negative_step() {
+        // range(5; 0; -2) - generate 5, 3, 1
+        query!(b"null", "[range(5; 0; -2)]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], OwnedValue::Int(5));
+                assert_eq!(arr[1], OwnedValue::Int(3));
+                assert_eq!(arr[2], OwnedValue::Int(1));
+            }
+        );
+    }
+
+    #[test]
+    fn test_isempty_false() {
+        // isempty(.[]) on non-empty array
+        query!(b"[1, 2, 3]", "isempty(.[])",
+            QueryResult::Owned(OwnedValue::Bool(b)) => {
+                assert!(!b);
+            }
+        );
+    }
+
+    #[test]
+    fn test_isempty_true() {
+        // isempty(.[]) on empty array
+        query!(b"[]", "isempty(.[])",
+            QueryResult::Owned(OwnedValue::Bool(b)) => {
+                assert!(b);
+            }
+        );
+    }
+
+    #[test]
+    fn test_first_with_select() {
+        // first(.[] | select(. > 2)) - get first element > 2
+        query!(b"[1, 2, 3, 4, 5]", "first(.[] | select(. > 2))",
+            QueryResult::One(StandardJson::Number(n)) => {
+                assert_eq!(n.as_i64().unwrap(), 3);
+            }
+        );
     }
 }

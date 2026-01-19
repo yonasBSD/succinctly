@@ -1924,16 +1924,7 @@ impl<'a> Parser<'a> {
         // Phase 5: Array Functions
         // Note: first, last are handled in parse_primary before try_parse_builtin
         // to support both first/last (no args) and first(expr)/last(expr)
-        if self.matches_keyword("nth") {
-            self.consume_keyword("nth");
-            self.skip_ws();
-            self.expect('(')?;
-            self.skip_ws();
-            let n = self.parse_pipe_expr()?;
-            self.skip_ws();
-            self.expect(')')?;
-            return Ok(Some(Builtin::Nth(Box::new(n))));
-        }
+        // Note: nth is handled in Phase 13 section to support both nth(n) and nth(n; expr)
         if self.matches_keyword("reverse") {
             self.consume_keyword("reverse");
             return Ok(Some(Builtin::Reverse));
@@ -2630,6 +2621,127 @@ impl<'a> Parser<'a> {
         if self.matches_keyword("builtins") {
             self.consume_keyword("builtins");
             return Ok(Some(Builtin::Builtins));
+        }
+
+        // Phase 13: Iteration control
+        // limit(n; expr) - output at most n values from expr
+        if self.matches_keyword("limit") {
+            self.consume_keyword("limit");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let n = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(';')?;
+            self.skip_ws();
+            let expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Limit(Box::new(n), Box::new(expr))));
+        }
+
+        // first(expr) or first - output only the first value
+        // first without args is already handled by Phase 5 Builtin::First
+        // first(expr) uses stream version
+        if self.matches_keyword("first") {
+            self.consume_keyword("first");
+            self.skip_ws();
+            if self.peek() == Some('(') {
+                self.next();
+                self.skip_ws();
+                let expr = self.parse_pipe_expr()?;
+                self.skip_ws();
+                self.expect(')')?;
+                return Ok(Some(Builtin::FirstStream(Box::new(expr))));
+            }
+            // No-arg first is already handled by Phase 5 Builtin::First
+            return Ok(Some(Builtin::First));
+        }
+
+        // last(expr) or last - output only the last value
+        // last without args is already handled by Phase 5 Builtin::Last
+        if self.matches_keyword("last") {
+            self.consume_keyword("last");
+            self.skip_ws();
+            if self.peek() == Some('(') {
+                self.next();
+                self.skip_ws();
+                let expr = self.parse_pipe_expr()?;
+                self.skip_ws();
+                self.expect(')')?;
+                return Ok(Some(Builtin::LastStream(Box::new(expr))));
+            }
+            // No-arg last is already handled by Phase 5 Builtin::Last
+            return Ok(Some(Builtin::Last));
+        }
+
+        // nth(n; expr) or nth(n) - output only the nth value (0-indexed)
+        // nth(n) without second arg is already handled by Phase 5 Builtin::Nth
+        if self.matches_keyword("nth") {
+            self.consume_keyword("nth");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let n = self.parse_pipe_expr()?;
+            self.skip_ws();
+            if self.peek() == Some(';') {
+                self.next();
+                self.skip_ws();
+                let expr = self.parse_pipe_expr()?;
+                self.skip_ws();
+                self.expect(')')?;
+                return Ok(Some(Builtin::NthStream(Box::new(n), Box::new(expr))));
+            }
+            self.expect(')')?;
+            // No-arg nth(n) is already handled by Phase 5 Builtin::Nth
+            return Ok(Some(Builtin::Nth(Box::new(n))));
+        }
+
+        // range(n), range(from; upto), range(from; upto; by)
+        if self.matches_keyword("range") {
+            self.consume_keyword("range");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let first = self.parse_pipe_expr()?;
+            self.skip_ws();
+            if self.peek() == Some(';') {
+                self.next();
+                self.skip_ws();
+                let second = self.parse_pipe_expr()?;
+                self.skip_ws();
+                if self.peek() == Some(';') {
+                    self.next();
+                    self.skip_ws();
+                    let third = self.parse_pipe_expr()?;
+                    self.skip_ws();
+                    self.expect(')')?;
+                    return Ok(Some(Builtin::RangeFromToBy(
+                        Box::new(first),
+                        Box::new(second),
+                        Box::new(third),
+                    )));
+                }
+                self.expect(')')?;
+                return Ok(Some(Builtin::RangeFromTo(
+                    Box::new(first),
+                    Box::new(second),
+                )));
+            }
+            self.expect(')')?;
+            return Ok(Some(Builtin::Range(Box::new(first))));
+        }
+
+        // isempty(expr) - returns true if expr produces no outputs
+        if self.matches_keyword("isempty") {
+            self.consume_keyword("isempty");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::IsEmpty(Box::new(expr))));
         }
 
         Ok(None)
