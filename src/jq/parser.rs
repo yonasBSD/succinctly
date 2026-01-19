@@ -2752,6 +2752,56 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::RecurseDown));
         }
 
+        // Phase 15: Date/Time functions
+        if self.matches_keyword("gmtime") {
+            self.consume_keyword("gmtime");
+            return Ok(Some(Builtin::Gmtime));
+        }
+        if self.matches_keyword("localtime") {
+            self.consume_keyword("localtime");
+            return Ok(Some(Builtin::Localtime));
+        }
+        if self.matches_keyword("mktime") {
+            self.consume_keyword("mktime");
+            return Ok(Some(Builtin::Mktime));
+        }
+        if self.matches_keyword("strftime") {
+            self.consume_keyword("strftime");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let fmt = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Strftime(Box::new(fmt))));
+        }
+        if self.matches_keyword("strptime") {
+            self.consume_keyword("strptime");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let fmt = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::Strptime(Box::new(fmt))));
+        }
+        if self.matches_keyword("todateiso8601") {
+            self.consume_keyword("todateiso8601");
+            return Ok(Some(Builtin::Todateiso8601));
+        }
+        if self.matches_keyword("fromdateiso8601") {
+            self.consume_keyword("fromdateiso8601");
+            return Ok(Some(Builtin::Fromdateiso8601));
+        }
+        if self.matches_keyword("todate") {
+            self.consume_keyword("todate");
+            return Ok(Some(Builtin::Todate));
+        }
+        if self.matches_keyword("fromdate") {
+            self.consume_keyword("fromdate");
+            return Ok(Some(Builtin::Fromdate));
+        }
+
         Ok(None)
     }
 

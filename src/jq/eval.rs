@@ -1341,6 +1341,17 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
 
         // Phase 14: Recursive traversal (extends Phase 8)
         Builtin::RecurseDown => builtin_recurse(value, optional), // alias for recurse
+
+        // Phase 15: Date/Time functions
+        Builtin::Gmtime => builtin_gmtime(value, optional),
+        Builtin::Localtime => builtin_localtime(value, optional),
+        Builtin::Mktime => builtin_mktime(value, optional),
+        Builtin::Strftime(fmt) => builtin_strftime(fmt, value, optional),
+        Builtin::Strptime(fmt) => builtin_strptime(fmt, value, optional),
+        Builtin::Todate => builtin_todate(value, optional),
+        Builtin::Fromdate => builtin_fromdate(value, optional),
+        Builtin::Todateiso8601 => builtin_todate(value, optional), // alias for todate
+        Builtin::Fromdateiso8601 => builtin_fromdate(value, optional), // alias for fromdate
     }
 }
 
@@ -5279,6 +5290,20 @@ fn substitute_var_in_builtin(
         Builtin::IsEmpty(e) => Builtin::IsEmpty(Box::new(substitute_var(e, var_name, replacement))),
         // Phase 14: Recursive traversal (extends Phase 8)
         Builtin::RecurseDown => Builtin::RecurseDown,
+        // Phase 15: Date/Time functions
+        Builtin::Gmtime => Builtin::Gmtime,
+        Builtin::Localtime => Builtin::Localtime,
+        Builtin::Mktime => Builtin::Mktime,
+        Builtin::Strftime(e) => {
+            Builtin::Strftime(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Strptime(e) => {
+            Builtin::Strptime(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::Todate => Builtin::Todate,
+        Builtin::Fromdate => Builtin::Fromdate,
+        Builtin::Todateiso8601 => Builtin::Todateiso8601,
+        Builtin::Fromdateiso8601 => Builtin::Fromdateiso8601,
     }
 }
 
@@ -7182,6 +7207,1000 @@ fn builtin_now<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
     }
 }
 
+/// Builtin: gmtime - convert Unix timestamp to broken-down UTC time
+/// Returns [year, month(0-11), day(1-31), hour, minute, second, weekday(0-6, Sunday=0), yearday(0-365)]
+fn builtin_gmtime<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let timestamp = match get_float_value(&value, optional) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+
+    // Convert Unix timestamp to broken-down time (UTC)
+    let secs = timestamp.trunc() as i64;
+
+    // Days since Unix epoch (Jan 1, 1970)
+    let days = if secs >= 0 {
+        secs / 86400
+    } else {
+        (secs - 86399) / 86400
+    };
+    let time_of_day = ((secs % 86400) + 86400) % 86400;
+    let hour = (time_of_day / 3600) as i64;
+    let minute = ((time_of_day % 3600) / 60) as i64;
+    let second = (time_of_day % 60) as i64;
+
+    // Calculate year, month, day from days since epoch
+    // Using algorithm from Howard Hinnant's date library
+    let z = days + 719468; // days since Mar 1, 0000
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month [0, 11] starting from March
+    let day = (doy - (153 * mp + 2) / 5 + 1) as i64;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+
+    // Calculate weekday (0 = Sunday, 6 = Saturday)
+    // Jan 1, 1970 was a Thursday (4)
+    let weekday = ((days % 7 + 4 + 7) % 7) as i64;
+
+    // Calculate day of year (0-365, 0 = Jan 1)
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let month_days: [i64; 12] = if is_leap {
+        [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+    } else {
+        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    };
+    let yearday = month_days[(month - 1) as usize] + day - 1;
+
+    let result = vec![
+        OwnedValue::Int(year),
+        OwnedValue::Int((month - 1) as i64), // 0-indexed month
+        OwnedValue::Int(day),
+        OwnedValue::Int(hour),
+        OwnedValue::Int(minute),
+        OwnedValue::Int(second),
+        OwnedValue::Int(weekday),
+        OwnedValue::Int(yearday),
+    ];
+
+    QueryResult::Owned(OwnedValue::Array(result))
+}
+
+/// Builtin: localtime - convert Unix timestamp to broken-down local time
+/// Returns [year, month(0-11), day(1-31), hour, minute, second, weekday(0-6, Sunday=0), yearday(0-365)]
+fn builtin_localtime<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    #[cfg(feature = "std")]
+    {
+        let timestamp = match get_float_value(&value, optional) {
+            Ok(f) => f,
+            Err(r) => return r,
+        };
+
+        // Get local timezone offset using chrono if available, otherwise fall back to gmtime
+        // For now, we'll compute it manually using the libc-style approach
+        // This is a simplified implementation that uses a heuristic for timezone offset
+
+        // Get the current local time offset by comparing system time with UTC
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_utc = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // We need to compute the local offset. A simple approach is to use environment TZ,
+        // but that's complex. For simplicity, we'll compute gmtime and apply a local offset.
+        // This implementation uses the system's local time approximation.
+
+        // For a proper implementation, we'd need platform-specific code or a crate like chrono.
+        // For now, we'll approximate by using a simple offset calculation.
+
+        // Actually, let's just use gmtime logic with an offset.
+        // Try to get the timezone offset from the system.
+
+        // Simplified: compute based on the offset from UTC
+        // In practice, this should use libc::localtime_r or similar
+        // For now, we'll attempt to detect offset using the current time
+
+        // Get offset: (local_now - utc_now) rounded to nearest minute
+        // This is a hack - proper implementation needs platform time APIs
+
+        // Fallback: Use UTC for now (same as gmtime)
+        // A proper implementation would use platform-specific APIs or chrono crate
+        let secs = timestamp.trunc() as i64;
+
+        // Try to estimate local offset by looking at current system time
+        // This gives us the offset at the current moment (may differ from timestamp's offset due to DST)
+        let local_offset = estimate_local_offset(now_utc);
+        let local_secs = secs + local_offset;
+
+        // Days since Unix epoch
+        let days = if local_secs >= 0 {
+            local_secs / 86400
+        } else {
+            (local_secs - 86399) / 86400
+        };
+        let time_of_day = ((local_secs % 86400) + 86400) % 86400;
+        let hour = (time_of_day / 3600) as i64;
+        let minute = ((time_of_day % 3600) / 60) as i64;
+        let second = (time_of_day % 60) as i64;
+
+        // Calculate year, month, day from days since epoch
+        let z = days + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = (z - era * 146097) as u32;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = (doy - (153 * mp + 2) / 5 + 1) as i64;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = y + if month <= 2 { 1 } else { 0 };
+
+        let weekday = ((days % 7 + 4 + 7) % 7) as i64;
+
+        let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let month_days: [i64; 12] = if is_leap {
+            [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+        } else {
+            [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+        };
+        let yearday = month_days[(month - 1) as usize] + day - 1;
+
+        let result = vec![
+            OwnedValue::Int(year),
+            OwnedValue::Int((month - 1) as i64),
+            OwnedValue::Int(day),
+            OwnedValue::Int(hour),
+            OwnedValue::Int(minute),
+            OwnedValue::Int(second),
+            OwnedValue::Int(weekday),
+            OwnedValue::Int(yearday),
+        ];
+
+        QueryResult::Owned(OwnedValue::Array(result))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        // In no_std, fall back to gmtime (UTC)
+        builtin_gmtime(value, optional)
+    }
+}
+
+/// Estimate local timezone offset in seconds from UTC
+#[cfg(feature = "std")]
+fn estimate_local_offset(utc_secs: i64) -> i64 {
+    // This is a simplified estimation that works for most common cases
+    // A proper implementation would use platform-specific APIs
+
+    // Try to get TZ from environment
+    if let Ok(tz) = std::env::var("TZ") {
+        // Parse simple TZ formats like "EST5EDT" or "PST8PDT"
+        // Format: STDoffset[DST[offset][,rule]]
+        if let Some(offset) = parse_simple_tz_offset(&tz) {
+            return offset;
+        }
+    }
+
+    // Fallback: try to detect from system
+    // On many systems, we can compute the offset by comparing local and UTC representations
+    // For a portable solution without external crates, we'll return 0 (UTC)
+    // Users needing accurate local time should ensure TZ is set correctly
+    let _ = utc_secs; // silence unused warning
+    0
+}
+
+/// Parse a simple TZ offset like "EST5" or "PST8" and return offset in seconds
+#[cfg(feature = "std")]
+fn parse_simple_tz_offset(tz: &str) -> Option<i64> {
+    // Skip the timezone name (letters)
+    let offset_start = tz.find(|c: char| c.is_ascii_digit() || c == '-' || c == '+')?;
+    let offset_part = &tz[offset_start..];
+
+    // Find where the offset ends (at DST name or end of string)
+    let offset_end = offset_part
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(offset_part.len());
+    let offset_str = &offset_part[..offset_end];
+
+    // Parse the offset (hours, optionally minutes)
+    let negative = offset_str.starts_with('-');
+    let offset_str = offset_str.trim_start_matches(['+', '-']);
+
+    let parts: Vec<&str> = offset_str.split(':').collect();
+    let hours: i64 = parts.first()?.parse().ok()?;
+    let minutes: i64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    // TZ offset is positive for west of UTC, but we want seconds to add
+    let offset_secs = (hours * 3600 + minutes * 60) * if negative { 1 } else { -1 };
+    Some(offset_secs)
+}
+
+/// Builtin: mktime - convert broken-down time to Unix timestamp
+fn builtin_mktime<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let arr = match to_owned(&value) {
+        OwnedValue::Array(a) => a,
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("array", "mktime")),
+    };
+
+    // Need at least 6 elements: [year, month, day, hour, minute, second]
+    if arr.len() < 6 {
+        if optional {
+            return QueryResult::None;
+        }
+        return QueryResult::Error(EvalError::new(
+            "mktime requires array with at least 6 elements",
+        ));
+    }
+
+    let get_int = |idx: usize| -> Result<i64, EvalError> {
+        match arr.get(idx) {
+            Some(OwnedValue::Int(n)) => Ok(*n),
+            Some(OwnedValue::Float(f)) => Ok(*f as i64),
+            _ => Err(EvalError::new(format!(
+                "mktime: element {} must be a number",
+                idx
+            ))),
+        }
+    };
+
+    let year = match get_int(0) {
+        Ok(y) => y,
+        Err(_) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+    let month = match get_int(1) {
+        Ok(m) => m + 1, // jq uses 0-indexed months
+        Err(_) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+    let day = match get_int(2) {
+        Ok(d) => d,
+        Err(_) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+    let hour = match get_int(3) {
+        Ok(h) => h,
+        Err(_) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+    let minute = match get_int(4) {
+        Ok(m) => m,
+        Err(_) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+    let second = match get_int(5) {
+        Ok(s) => s,
+        Err(_) if optional => return QueryResult::None,
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Convert to Unix timestamp using inverse of the gmtime algorithm
+    // Algorithm from Howard Hinnant's date library (civil_from_days inverse)
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32; // year of era [0, 399]
+    let m = month as u32;
+    let d = day as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // day of year [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // day of era [0, 146096]
+    let days = era * 146097 + doe as i64 - 719468; // days since Unix epoch
+
+    let timestamp = days * 86400 + hour * 3600 + minute * 60 + second;
+
+    QueryResult::Owned(OwnedValue::Float(timestamp as f64))
+}
+
+/// Builtin: strftime(fmt) - format broken-down time as string
+fn builtin_strftime<'a, W: Clone + AsRef<[u64]>>(
+    fmt_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // First get the format string
+    let fmt = match result_to_owned(eval_single(fmt_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "strftime format")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Value should be a broken-down time array
+    let arr = match to_owned(&value) {
+        OwnedValue::Array(a) => a,
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("array", "strftime")),
+    };
+
+    if arr.len() < 6 {
+        if optional {
+            return QueryResult::None;
+        }
+        return QueryResult::Error(EvalError::new(
+            "strftime requires array with at least 6 elements",
+        ));
+    }
+
+    let get_int = |idx: usize| -> i64 {
+        match arr.get(idx) {
+            Some(OwnedValue::Int(n)) => *n,
+            Some(OwnedValue::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+
+    let year = get_int(0);
+    let month = get_int(1) + 1; // jq uses 0-indexed
+    let day = get_int(2);
+    let hour = get_int(3);
+    let minute = get_int(4);
+    let second = get_int(5);
+    let weekday = if arr.len() > 6 { get_int(6) } else { 0 };
+    let yearday = if arr.len() > 7 { get_int(7) } else { 0 };
+
+    let result = format_strftime(
+        &fmt, year, month, day, hour, minute, second, weekday, yearday,
+    );
+    QueryResult::Owned(OwnedValue::String(result))
+}
+
+/// Format a time according to strftime format specifiers
+#[allow(clippy::too_many_arguments)]
+fn format_strftime(
+    fmt: &str,
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    weekday: i64,
+    yearday: i64,
+) -> String {
+    let mut result = String::new();
+    let mut chars = fmt.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('%') => result.push('%'),
+                Some('Y') => result.push_str(&format!("{:04}", year)),
+                Some('y') => result.push_str(&format!("{:02}", year % 100)),
+                Some('m') => result.push_str(&format!("{:02}", month)),
+                Some('d') => result.push_str(&format!("{:02}", day)),
+                Some('e') => result.push_str(&format!("{:2}", day)),
+                Some('H') => result.push_str(&format!("{:02}", hour)),
+                Some('I') => result.push_str(&format!(
+                    "{:02}",
+                    if hour == 0 {
+                        12
+                    } else if hour > 12 {
+                        hour - 12
+                    } else {
+                        hour
+                    }
+                )),
+                Some('M') => result.push_str(&format!("{:02}", minute)),
+                Some('S') => result.push_str(&format!("{:02}", second)),
+                Some('p') => result.push_str(if hour < 12 { "AM" } else { "PM" }),
+                Some('P') => result.push_str(if hour < 12 { "am" } else { "pm" }),
+                Some('j') => result.push_str(&format!("{:03}", yearday + 1)), // 1-indexed
+                Some('w') => result.push_str(&format!("{}", weekday)),
+                Some('u') => {
+                    result.push_str(&format!("{}", if weekday == 0 { 7 } else { weekday }))
+                } // Monday=1
+                Some('a') => {
+                    let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                    result.push_str(names[weekday as usize % 7]);
+                }
+                Some('A') => {
+                    let names = [
+                        "Sunday",
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                    ];
+                    result.push_str(names[weekday as usize % 7]);
+                }
+                Some('b') | Some('h') => {
+                    let names = [
+                        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+                        "Nov", "Dec",
+                    ];
+                    result.push_str(names[(month - 1) as usize % 12]);
+                }
+                Some('B') => {
+                    let names = [
+                        "January",
+                        "February",
+                        "March",
+                        "April",
+                        "May",
+                        "June",
+                        "July",
+                        "August",
+                        "September",
+                        "October",
+                        "November",
+                        "December",
+                    ];
+                    result.push_str(names[(month - 1) as usize % 12]);
+                }
+                Some('C') => result.push_str(&format!("{:02}", year / 100)),
+                Some('D') => result.push_str(&format!("{:02}/{:02}/{:02}", month, day, year % 100)),
+                Some('F') => result.push_str(&format!("{:04}-{:02}-{:02}", year, month, day)),
+                Some('R') => result.push_str(&format!("{:02}:{:02}", hour, minute)),
+                Some('T') => result.push_str(&format!("{:02}:{:02}:{:02}", hour, minute, second)),
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('z') => result.push_str("+0000"), // UTC offset (we're always UTC for gmtime)
+                Some('Z') => result.push_str("UTC"),
+                Some(other) => {
+                    result.push('%');
+                    result.push(other);
+                }
+                None => result.push('%'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Builtin: strptime(fmt) - parse string to broken-down time
+fn builtin_strptime<'a, W: Clone + AsRef<[u64]>>(
+    fmt_expr: &Expr,
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    // First get the format string
+    let fmt = match result_to_owned(eval_single(fmt_expr, value.clone(), optional)) {
+        Ok(OwnedValue::String(s)) => s,
+        Ok(_) if optional => return QueryResult::None,
+        Ok(_) => return QueryResult::Error(EvalError::type_error("string", "strptime format")),
+        Err(e) => return QueryResult::Error(e),
+    };
+
+    // Value should be a string
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", "strptime")),
+    };
+
+    match parse_strptime(&input, &fmt) {
+        Ok(t) => {
+            let result = vec![
+                OwnedValue::Int(t.year),
+                OwnedValue::Int(t.month - 1), // 0-indexed
+                OwnedValue::Int(t.day),
+                OwnedValue::Int(t.hour),
+                OwnedValue::Int(t.minute),
+                OwnedValue::Int(t.second),
+                OwnedValue::Int(t.weekday),
+                OwnedValue::Int(t.yearday),
+            ];
+            QueryResult::Owned(OwnedValue::Array(result))
+        }
+        Err(_) if optional => QueryResult::None,
+        Err(e) => QueryResult::Error(EvalError::new(e)),
+    }
+}
+
+/// Broken-down time representation (matches jq's format)
+struct BrokenDownTime {
+    year: i64,
+    month: i64, // 1-indexed (1-12)
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    weekday: i64, // 0=Sunday
+    yearday: i64, // 0-indexed (0-365)
+}
+
+/// Parse a time string according to strptime format specifiers
+#[allow(clippy::type_complexity)]
+fn parse_strptime(input: &str, fmt: &str) -> Result<BrokenDownTime, String> {
+    let mut year: i64 = 1970;
+    let mut month: i64 = 1;
+    let mut day: i64 = 1;
+    let mut hour: i64 = 0;
+    let mut minute: i64 = 0;
+    let mut second: i64 = 0;
+    // weekday and yearday are parsed from format specifiers like %w, %j, %u,
+    // but then recalculated at the end for consistency with the parsed date.
+    // This matches jq's behavior where weekday/yearday in output are always
+    // computed from the date, not taken from the parsed input.
+    #[allow(unused_variables, unused_assignments)]
+    let mut weekday: i64 = 4; // Thursday (Jan 1, 1970)
+    #[allow(unused_variables, unused_assignments)]
+    let mut yearday: i64 = 0;
+
+    let mut input_iter = input.chars().peekable();
+    let mut fmt_iter = fmt.chars().peekable();
+
+    while let Some(fc) = fmt_iter.next() {
+        if fc == '%' {
+            match fmt_iter.next() {
+                Some('%') => {
+                    if input_iter.next() != Some('%') {
+                        return Err("expected '%'".to_string());
+                    }
+                }
+                Some('Y') => {
+                    year = parse_digits(&mut input_iter, 4)?;
+                }
+                Some('y') => {
+                    let y = parse_digits(&mut input_iter, 2)?;
+                    year = if y >= 69 { 1900 + y } else { 2000 + y };
+                }
+                Some('m') => {
+                    month = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('d') => {
+                    day = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('e') => {
+                    // Skip leading space if present
+                    if input_iter.peek() == Some(&' ') {
+                        input_iter.next();
+                    }
+                    day = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('H') => {
+                    hour = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('I') => {
+                    hour = parse_digits(&mut input_iter, 2)?;
+                    // Will be adjusted by %p if present
+                }
+                Some('M') => {
+                    minute = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('S') => {
+                    second = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('p') | Some('P') => {
+                    let mut ampm = String::new();
+                    while let Some(&c) = input_iter.peek() {
+                        if c.is_ascii_alphabetic() {
+                            ampm.push(c);
+                            input_iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let ampm_lower = ampm.to_lowercase();
+                    if ampm_lower == "pm" && hour < 12 {
+                        hour += 12;
+                    } else if ampm_lower == "am" && hour == 12 {
+                        hour = 0;
+                    }
+                }
+                #[allow(unused_assignments)]
+                Some('j') => {
+                    // Parse day-of-year, but we recalculate it from the date for consistency
+                    yearday = parse_digits(&mut input_iter, 3)? - 1; // Convert to 0-indexed
+                }
+                #[allow(unused_assignments)]
+                Some('w') => {
+                    // Parse weekday, but we recalculate it from the date for consistency
+                    weekday = parse_digits(&mut input_iter, 1)?;
+                }
+                #[allow(unused_assignments)]
+                Some('u') => {
+                    // Parse ISO weekday (1=Monday, 7=Sunday), convert to 0=Sunday
+                    let w = parse_digits(&mut input_iter, 1)?;
+                    weekday = if w == 7 { 0 } else { w };
+                }
+                Some('a') | Some('A') => {
+                    // Skip day name
+                    while let Some(&c) = input_iter.peek() {
+                        if c.is_ascii_alphabetic() {
+                            input_iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Some('b') | Some('B') | Some('h') => {
+                    let mut name = String::new();
+                    while let Some(&c) = input_iter.peek() {
+                        if c.is_ascii_alphabetic() {
+                            name.push(c);
+                            input_iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let name_lower = name.to_lowercase();
+                    let months = [
+                        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+                        "nov", "dec",
+                    ];
+                    for (i, m) in months.iter().enumerate() {
+                        if name_lower.starts_with(m) {
+                            month = (i + 1) as i64;
+                            break;
+                        }
+                    }
+                }
+                Some('C') => {
+                    let century = parse_digits(&mut input_iter, 2)?;
+                    year = century * 100 + (year % 100);
+                }
+                Some('D') => {
+                    // mm/dd/yy
+                    month = parse_digits(&mut input_iter, 2)?;
+                    if input_iter.next() != Some('/') {
+                        return Err("expected '/'".to_string());
+                    }
+                    day = parse_digits(&mut input_iter, 2)?;
+                    if input_iter.next() != Some('/') {
+                        return Err("expected '/'".to_string());
+                    }
+                    let y = parse_digits(&mut input_iter, 2)?;
+                    year = if y >= 69 { 1900 + y } else { 2000 + y };
+                }
+                Some('F') => {
+                    // yyyy-mm-dd
+                    year = parse_digits(&mut input_iter, 4)?;
+                    if input_iter.next() != Some('-') {
+                        return Err("expected '-'".to_string());
+                    }
+                    month = parse_digits(&mut input_iter, 2)?;
+                    if input_iter.next() != Some('-') {
+                        return Err("expected '-'".to_string());
+                    }
+                    day = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('R') => {
+                    // HH:MM
+                    hour = parse_digits(&mut input_iter, 2)?;
+                    if input_iter.next() != Some(':') {
+                        return Err("expected ':'".to_string());
+                    }
+                    minute = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('T') => {
+                    // HH:MM:SS
+                    hour = parse_digits(&mut input_iter, 2)?;
+                    if input_iter.next() != Some(':') {
+                        return Err("expected ':'".to_string());
+                    }
+                    minute = parse_digits(&mut input_iter, 2)?;
+                    if input_iter.next() != Some(':') {
+                        return Err("expected ':'".to_string());
+                    }
+                    second = parse_digits(&mut input_iter, 2)?;
+                }
+                Some('n') | Some('t') => {
+                    // Skip whitespace
+                    while let Some(&c) = input_iter.peek() {
+                        if c.is_whitespace() {
+                            input_iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Some('z') => {
+                    // Skip timezone offset like +0000 or -0500
+                    if let Some(&c) = input_iter.peek() {
+                        if c == '+' || c == '-' {
+                            input_iter.next();
+                            for _ in 0..4 {
+                                if input_iter
+                                    .peek()
+                                    .map(|c| c.is_ascii_digit())
+                                    .unwrap_or(false)
+                                {
+                                    input_iter.next();
+                                }
+                            }
+                        }
+                    }
+                }
+                Some('Z') => {
+                    // Skip timezone name
+                    while let Some(&c) = input_iter.peek() {
+                        if c.is_ascii_alphabetic() {
+                            input_iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Some(other) => {
+                    // Unknown specifier - skip % and match literal
+                    if input_iter.next() != Some(other) {
+                        return Err(format!("expected '{}'", other));
+                    }
+                }
+                None => {
+                    // Trailing % - match literal
+                    if input_iter.next() != Some('%') {
+                        return Err("expected '%'".to_string());
+                    }
+                }
+            }
+        } else if fc.is_whitespace() {
+            // Skip any whitespace in input
+            while let Some(&c) = input_iter.peek() {
+                if c.is_whitespace() {
+                    input_iter.next();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // Match literal character
+            match input_iter.next() {
+                Some(c) if c == fc => {}
+                Some(c) => return Err(format!("expected '{}', got '{}'", fc, c)),
+                None => return Err(format!("expected '{}', got end of input", fc)),
+            }
+        }
+    }
+
+    // Calculate weekday if not explicitly set
+    // Using Zeller's congruence or similar
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let m = month as u32;
+    let d = day as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+
+    // Calculate weekday from days
+    weekday = (days % 7 + 4 + 7) % 7;
+
+    // Calculate yearday
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let month_days: [i64; 12] = if is_leap {
+        [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+    } else {
+        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    };
+    let yearday = month_days[(month - 1) as usize] + day - 1;
+
+    Ok(BrokenDownTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        weekday,
+        yearday,
+    })
+}
+
+/// Parse up to n digits from input
+fn parse_digits(
+    input: &mut std::iter::Peekable<std::str::Chars>,
+    max_digits: usize,
+) -> Result<i64, String> {
+    let mut s = String::new();
+    for _ in 0..max_digits {
+        if let Some(&c) = input.peek() {
+            if c.is_ascii_digit() {
+                s.push(c);
+                input.next();
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if s.is_empty() {
+        return Err("expected digits".to_string());
+    }
+    s.parse().map_err(|_| "invalid number".to_string())
+}
+
+/// Builtin: todate - convert Unix timestamp to ISO 8601 date string
+fn builtin_todate<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let timestamp = match get_float_value(&value, optional) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+
+    // Convert to broken-down time first
+    let secs = timestamp.trunc() as i64;
+    let days = if secs >= 0 {
+        secs / 86400
+    } else {
+        (secs - 86399) / 86400
+    };
+    let time_of_day = ((secs % 86400) + 86400) % 86400;
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+
+    let result = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, minute, second
+    );
+
+    QueryResult::Owned(OwnedValue::String(result))
+}
+
+/// Builtin: fromdate - parse ISO 8601 date string to Unix timestamp
+fn builtin_fromdate<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    let input = match &value {
+        StandardJson::String(s) => match s.as_str() {
+            Ok(cow) => cow.into_owned(),
+            Err(_) if optional => return QueryResult::None,
+            Err(_) => return QueryResult::Error(EvalError::new("invalid string")),
+        },
+        _ if optional => return QueryResult::None,
+        _ => return QueryResult::Error(EvalError::type_error("string", "fromdate")),
+    };
+
+    // Parse ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS+HH:MM
+    match parse_iso8601(&input) {
+        Ok(timestamp) => QueryResult::Owned(OwnedValue::Float(timestamp)),
+        Err(_) if optional => QueryResult::None,
+        Err(e) => QueryResult::Error(EvalError::new(e)),
+    }
+}
+
+/// Parse ISO 8601 date string to Unix timestamp
+fn parse_iso8601(input: &str) -> Result<f64, String> {
+    // Handle common ISO 8601 formats:
+    // YYYY-MM-DDTHH:MM:SSZ
+    // YYYY-MM-DDTHH:MM:SS.sssZ
+    // YYYY-MM-DDTHH:MM:SS+HH:MM
+    // YYYY-MM-DD
+
+    let input = input.trim();
+
+    // Try to parse with strptime-like logic
+    let mut chars = input.chars().peekable();
+
+    // Year
+    let year: i64 = parse_digits(&mut chars, 4)?;
+
+    if chars.next() != Some('-') {
+        return Err("expected '-' after year".to_string());
+    }
+
+    // Month
+    let month: i64 = parse_digits(&mut chars, 2)?;
+
+    if chars.next() != Some('-') {
+        return Err("expected '-' after month".to_string());
+    }
+
+    // Day
+    let day: i64 = parse_digits(&mut chars, 2)?;
+
+    // Check for time component
+    let (hour, minute, second, tz_offset) =
+        if chars.peek() == Some(&'T') || chars.peek() == Some(&'t') || chars.peek() == Some(&' ') {
+            chars.next(); // Skip T or space
+
+            let hour: i64 = parse_digits(&mut chars, 2)?;
+
+            if chars.next() != Some(':') {
+                return Err("expected ':' after hour".to_string());
+            }
+
+            let minute: i64 = parse_digits(&mut chars, 2)?;
+
+            let second = if chars.peek() == Some(&':') {
+                chars.next();
+                let s = parse_digits(&mut chars, 2)?;
+                // Skip fractional seconds
+                if chars.peek() == Some(&'.') {
+                    chars.next();
+                    while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        chars.next();
+                    }
+                }
+                s
+            } else {
+                0
+            };
+
+            // Parse timezone
+            let tz_offset = match chars.peek() {
+                Some('Z') | Some('z') => {
+                    chars.next();
+                    0
+                }
+                Some('+') => {
+                    chars.next();
+                    let h = parse_digits(&mut chars, 2)?;
+                    let m = if chars.peek() == Some(&':') {
+                        chars.next();
+                        parse_digits(&mut chars, 2)?
+                    } else if chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        parse_digits(&mut chars, 2)?
+                    } else {
+                        0
+                    };
+                    -(h * 3600 + m * 60) // Positive offset means behind UTC
+                }
+                Some('-') => {
+                    chars.next();
+                    let h = parse_digits(&mut chars, 2)?;
+                    let m = if chars.peek() == Some(&':') {
+                        chars.next();
+                        parse_digits(&mut chars, 2)?
+                    } else if chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        parse_digits(&mut chars, 2)?
+                    } else {
+                        0
+                    };
+                    h * 3600 + m * 60 // Negative offset means ahead of UTC
+                }
+                _ => 0, // Assume UTC if no timezone
+            };
+
+            (hour, minute, second, tz_offset)
+        } else {
+            (0, 0, 0, 0)
+        };
+
+    // Convert to Unix timestamp
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let m = month as u32;
+    let d = day as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+
+    let timestamp = days * 86400 + hour * 3600 + minute * 60 + second + tz_offset;
+
+    Ok(timestamp as f64)
+}
+
 /// Builtin: builtins - list all builtin function names
 fn builtin_builtins<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
     // Return a sorted array of all builtin function names with their arity
@@ -7344,8 +8363,17 @@ fn builtin_builtins<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
         "env/0",
         "env/1",
         "strenv/1",
-        // Time (arity 0)
+        // Time (arity 0-1)
         "now/0",
+        "gmtime/0",
+        "localtime/0",
+        "mktime/0",
+        "strftime/1",
+        "strptime/1",
+        "todate/0",
+        "fromdate/0",
+        "todateiso8601/0",
+        "fromdateiso8601/0",
         // Meta (arity 0-1)
         "builtins/0",
         "modulemeta/1",
@@ -9659,6 +10687,20 @@ fn expand_func_calls_in_builtin(
         }
         // Phase 14: Recursive traversal (extends Phase 8)
         Builtin::RecurseDown => Builtin::RecurseDown,
+        // Phase 15: Date/Time functions
+        Builtin::Gmtime => Builtin::Gmtime,
+        Builtin::Localtime => Builtin::Localtime,
+        Builtin::Mktime => Builtin::Mktime,
+        Builtin::Strftime(e) => {
+            Builtin::Strftime(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::Strptime(e) => {
+            Builtin::Strptime(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::Todate => Builtin::Todate,
+        Builtin::Fromdate => Builtin::Fromdate,
+        Builtin::Todateiso8601 => Builtin::Todateiso8601,
+        Builtin::Fromdateiso8601 => Builtin::Fromdateiso8601,
     }
 }
 
@@ -9883,6 +10925,16 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::IsEmpty(e) => Builtin::IsEmpty(Box::new(substitute_func_param(e, param, arg))),
         // Phase 14: Recursive traversal (extends Phase 8)
         Builtin::RecurseDown => Builtin::RecurseDown,
+        // Phase 15: Date/Time functions
+        Builtin::Gmtime => Builtin::Gmtime,
+        Builtin::Localtime => Builtin::Localtime,
+        Builtin::Mktime => Builtin::Mktime,
+        Builtin::Strftime(e) => Builtin::Strftime(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::Strptime(e) => Builtin::Strptime(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::Todate => Builtin::Todate,
+        Builtin::Fromdate => Builtin::Fromdate,
+        Builtin::Todateiso8601 => Builtin::Todateiso8601,
+        Builtin::Fromdateiso8601 => Builtin::Fromdateiso8601,
     }
 }
 
@@ -12527,6 +13579,118 @@ mod tests {
         query!(b"42", r#"debug("test message")"#, QueryResult::Owned(OwnedValue::Int(n)) => {
             assert_eq!(n, 42);
         });
+    }
+
+    // =============================================
+    // Date/Time function tests (Phase 15)
+    // =============================================
+
+    #[test]
+    fn test_gmtime() {
+        // Unix epoch (Jan 1, 1970 00:00:00 UTC)
+        query!(b"0", r#"gmtime"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 8);
+                assert_eq!(arr[0], OwnedValue::Int(1970)); // year
+                assert_eq!(arr[1], OwnedValue::Int(0));    // month (0-indexed)
+                assert_eq!(arr[2], OwnedValue::Int(1));    // day
+                assert_eq!(arr[3], OwnedValue::Int(0));    // hour
+                assert_eq!(arr[4], OwnedValue::Int(0));    // minute
+                assert_eq!(arr[5], OwnedValue::Int(0));    // second
+                assert_eq!(arr[6], OwnedValue::Int(4));    // weekday (Thursday)
+                assert_eq!(arr[7], OwnedValue::Int(0));    // yearday
+            }
+        );
+    }
+
+    #[test]
+    fn test_mktime() {
+        // Round-trip: gmtime | mktime should return original timestamp
+        query!(b"[1970,0,1,0,0,0,4,0]", r#"mktime"#,
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                assert_eq!(n, 0.0);
+            }
+        );
+
+        // Jan 15, 2024 10:30:00 UTC
+        query!(b"[2024,0,15,10,30,0,1,14]", r#"mktime"#,
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                assert_eq!(n, 1705314600.0);
+            }
+        );
+    }
+
+    #[test]
+    fn test_strftime() {
+        query!(b"[2024,0,15,10,30,0,1,14]", r#"strftime("%Y-%m-%d")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "2024-01-15");
+            }
+        );
+
+        query!(b"[2024,0,15,10,30,0,1,14]", r#"strftime("%Y-%m-%dT%H:%M:%SZ")"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "2024-01-15T10:30:00Z");
+            }
+        );
+    }
+
+    #[test]
+    fn test_strptime() {
+        query!(br#""2024-01-15T10:30:00Z""#, r#"strptime("%Y-%m-%dT%H:%M:%SZ")"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 8);
+                assert_eq!(arr[0], OwnedValue::Int(2024)); // year
+                assert_eq!(arr[1], OwnedValue::Int(0));    // month (0-indexed)
+                assert_eq!(arr[2], OwnedValue::Int(15));   // day
+                assert_eq!(arr[3], OwnedValue::Int(10));   // hour
+                assert_eq!(arr[4], OwnedValue::Int(30));   // minute
+                assert_eq!(arr[5], OwnedValue::Int(0));    // second
+            }
+        );
+    }
+
+    #[test]
+    fn test_todate() {
+        // todate converts timestamp to ISO 8601 string
+        query!(b"0", r#"todate"#,
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "1970-01-01T00:00:00Z");
+            }
+        );
+    }
+
+    #[test]
+    fn test_fromdate() {
+        // fromdate parses ISO 8601 string to timestamp
+        query!(br#""1970-01-01T00:00:00Z""#, r#"fromdate"#,
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                assert_eq!(n, 0.0);
+            }
+        );
+
+        query!(br#""2024-01-15T10:30:00Z""#, r#"fromdate"#,
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                assert_eq!(n, 1705314600.0);
+            }
+        );
+    }
+
+    #[test]
+    fn test_date_roundtrip() {
+        // gmtime | mktime should return original value
+        query!(b"1705314600", r#"gmtime | mktime"#,
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                assert_eq!(n, 1705314600.0);
+            }
+        );
+
+        // todate | fromdate should return original value
+        query!(b"1705314600", r#"todate | fromdate"#,
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                assert_eq!(n, 1705314600.0);
+            }
+        );
     }
 
     // =============================================

@@ -799,6 +799,28 @@ pub enum Builtin {
     // Phase 14: Recursive traversal (extends Phase 8)
     /// `recurse_down` - recurse downward (alias for recurse)
     RecurseDown,
+
+    // Phase 15: Date/Time functions
+    /// `gmtime` - convert Unix timestamp to broken-down UTC time
+    /// Returns [year, month(0-11), day(1-31), hour, minute, second, weekday(0-6), yearday(0-365)]
+    Gmtime,
+    /// `localtime` - convert Unix timestamp to broken-down local time
+    /// Returns [year, month(0-11), day(1-31), hour, minute, second, weekday(0-6), yearday(0-365)]
+    Localtime,
+    /// `mktime` - convert broken-down time to Unix timestamp
+    Mktime,
+    /// `strftime(fmt)` - format broken-down time as string
+    Strftime(Box<Expr>),
+    /// `strptime(fmt)` - parse string to broken-down time
+    Strptime(Box<Expr>),
+    /// `todate` - convert Unix timestamp to ISO 8601 date string (alias for todateiso8601)
+    Todate,
+    /// `fromdate` - parse ISO 8601 date string to Unix timestamp (alias for fromdateiso8601)
+    Fromdate,
+    /// `todateiso8601` - convert Unix timestamp to ISO 8601 date string
+    Todateiso8601,
+    /// `fromdateiso8601` - parse ISO 8601 date string to Unix timestamp
+    Fromdateiso8601,
 }
 
 /// Arithmetic operators.
