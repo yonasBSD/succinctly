@@ -1307,6 +1307,13 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
 
         // Phase 11: Path manipulation
         Builtin::Del(path) => builtin_del(path, value, optional),
+
+        // Phase 12: Additional builtins
+        Builtin::Now => builtin_now(),
+        Builtin::Abs => builtin_fabs(value, optional), // abs is an alias for fabs
+        Builtin::Builtins => builtin_builtins(),
+        Builtin::Normals => builtin_normals(value),
+        Builtin::Finites => builtin_finites(value),
     }
 }
 
@@ -2645,6 +2652,7 @@ fn eval_format<'a, W: Clone + AsRef<[u64]>>(
         FormatType::Base64d => format_base64d(&owned, optional),
         FormatType::Html => format_html(&owned, optional),
         FormatType::Sh => format_sh(&owned, optional),
+        FormatType::Urid => format_urid(&owned, optional),
     };
 
     match result {
@@ -2676,6 +2684,37 @@ fn format_uri(value: &OwnedValue, optional: bool) -> Result<String, EvalError> {
                         result.push_str(&format!("%{:02X}", b));
                     }
                 }
+            }
+            Ok(result)
+        }
+        _ if optional => Ok(String::new()),
+        _ => Err(EvalError::type_error("string", value.type_name())),
+    }
+}
+
+/// @urid - URI/percent decode
+fn format_urid(value: &OwnedValue, optional: bool) -> Result<String, EvalError> {
+    match value {
+        OwnedValue::String(s) => {
+            let mut result = String::new();
+            let bytes = s.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' && i + 2 < bytes.len() {
+                    // Try to parse the next two characters as hex
+                    if let (Some(h1), Some(h2)) = (
+                        (bytes[i + 1] as char).to_digit(16),
+                        (bytes[i + 2] as char).to_digit(16),
+                    ) {
+                        let decoded = (h1 * 16 + h2) as u8;
+                        result.push(decoded as char);
+                        i += 3;
+                        continue;
+                    }
+                }
+                // Not a valid percent-encoded sequence, just copy the character
+                result.push(bytes[i] as char);
+                i += 1;
             }
             Ok(result)
         }
@@ -5166,6 +5205,12 @@ fn substitute_var_in_builtin(
         Builtin::Kind => Builtin::Kind,
         Builtin::Key => Builtin::Key,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
+        // Phase 12 builtins (no args to substitute)
+        Builtin::Now => Builtin::Now,
+        Builtin::Abs => Builtin::Abs,
+        Builtin::Builtins => Builtin::Builtins,
+        Builtin::Normals => Builtin::Normals,
+        Builtin::Finites => Builtin::Finites,
     }
 }
 
@@ -7023,6 +7068,237 @@ fn delete_at_path(
     }
 }
 
+// Phase 12: Additional builtins
+
+/// Builtin: now - current Unix timestamp
+fn builtin_now<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
+    #[cfg(feature = "std")]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => QueryResult::Owned(OwnedValue::Float(duration.as_secs_f64())),
+            Err(_) => QueryResult::Error(EvalError::new("failed to get current time")),
+        }
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        // no_std environment - return 0.0 as a fallback
+        QueryResult::Owned(OwnedValue::Float(0.0))
+    }
+}
+
+/// Builtin: builtins - list all builtin function names
+fn builtin_builtins<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
+    // Return a sorted array of all builtin function names with their arity
+    let builtins = vec![
+        // Type functions (arity 0)
+        "type/0",
+        "isnull/0",
+        "isboolean/0",
+        "isnumber/0",
+        "isstring/0",
+        "isarray/0",
+        "isobject/0",
+        // Type filters (arity 0)
+        "values/0",
+        "nulls/0",
+        "booleans/0",
+        "numbers/0",
+        "strings/0",
+        "arrays/0",
+        "objects/0",
+        "iterables/0",
+        "scalars/0",
+        "normals/0",
+        "finites/0",
+        // Length & keys (arity 0)
+        "length/0",
+        "utf8bytelength/0",
+        "keys/0",
+        "keys_unsorted/0",
+        // has/in (arity 1)
+        "has/1",
+        "in/1",
+        // Selection (arity 0-1)
+        "select/1",
+        "empty/0",
+        // Map/Iteration (arity 1)
+        "map/1",
+        "map_values/1",
+        // Reduction (arity 0-1)
+        "add/0",
+        "any/0",
+        "all/0",
+        "min/0",
+        "max/0",
+        "min_by/1",
+        "max_by/1",
+        // String functions (arity 0-1)
+        "ascii_downcase/0",
+        "ascii_upcase/0",
+        "ltrimstr/1",
+        "rtrimstr/1",
+        "startswith/1",
+        "endswith/1",
+        "split/1",
+        "join/1",
+        "contains/1",
+        "inside/1",
+        "trim/0",
+        "ltrim/0",
+        "rtrim/0",
+        // Array functions (arity 0-1)
+        "first/0",
+        "last/0",
+        "nth/1",
+        "reverse/0",
+        "flatten/0",
+        "flatten/1",
+        "group_by/1",
+        "unique/0",
+        "unique_by/1",
+        "sort/0",
+        "sort_by/1",
+        "transpose/0",
+        "bsearch/1",
+        // Object functions (arity 0-1)
+        "to_entries/0",
+        "from_entries/0",
+        "with_entries/1",
+        "pick/1",
+        // Type conversions (arity 0)
+        "tostring/0",
+        "tonumber/0",
+        "tojson/0",
+        "fromjson/0",
+        // String functions (arity 0-1)
+        "explode/0",
+        "implode/0",
+        "test/1",
+        "indices/1",
+        "index/1",
+        "rindex/1",
+        "tojsonstream/0",
+        "fromjsonstream/0",
+        // Path operations (arity 0-2)
+        "path/1",
+        "paths/0",
+        "paths/1",
+        "leaf_paths/0",
+        "getpath/1",
+        "setpath/2",
+        "delpaths/1",
+        "del/1",
+        // Math functions (arity 0-2)
+        "floor/0",
+        "ceil/0",
+        "round/0",
+        "sqrt/0",
+        "fabs/0",
+        "abs/0",
+        "log/0",
+        "log10/0",
+        "log2/0",
+        "exp/0",
+        "exp10/0",
+        "exp2/0",
+        "pow/2",
+        "sin/0",
+        "cos/0",
+        "tan/0",
+        "asin/0",
+        "acos/0",
+        "atan/0",
+        "atan2/2",
+        "sinh/0",
+        "cosh/0",
+        "tanh/0",
+        "asinh/0",
+        "acosh/0",
+        "atanh/0",
+        // Number classification (arity 0)
+        "infinite/0",
+        "nan/0",
+        "isinfinite/0",
+        "isnan/0",
+        "isnormal/0",
+        "isfinite/0",
+        // Control flow (arity 1-2)
+        "recurse/0",
+        "recurse/1",
+        "recurse/2",
+        "walk/1",
+        "isvalid/1",
+        "limit/2",
+        "first/1",
+        "last/1",
+        "nth/2",
+        "until/2",
+        "while/2",
+        "repeat/1",
+        "range/1",
+        "range/2",
+        "range/3",
+        "reduce/3",
+        "foreach/3",
+        "foreach/4",
+        // Debug (arity 0-1)
+        "debug/0",
+        "debug/1",
+        // Environment (arity 0-1)
+        "env/0",
+        "env/1",
+        "strenv/1",
+        // Time (arity 0)
+        "now/0",
+        // Meta (arity 0-1)
+        "builtins/0",
+        "modulemeta/1",
+        // Error handling (arity 0-1)
+        "error/0",
+        "error/1",
+        // YAML metadata (yq, arity 0)
+        "tag/0",
+        "anchor/0",
+        "style/0",
+        "kind/0",
+        "key/0",
+        "parent/0",
+        "parent/1",
+    ];
+
+    let arr: Vec<OwnedValue> = builtins
+        .iter()
+        .map(|s| OwnedValue::String((*s).to_string()))
+        .collect();
+
+    QueryResult::Owned(OwnedValue::Array(arr))
+}
+
+/// Builtin: normals - select only normal numbers (not zero, infinite, NaN, or subnormal)
+fn builtin_normals<'a, W: Clone + AsRef<[u64]>>(value: StandardJson<'a, W>) -> QueryResult<'a, W> {
+    if let StandardJson::Number(n) = &value {
+        if let Ok(f) = n.as_f64() {
+            if f.is_normal() {
+                return QueryResult::One(value);
+            }
+        }
+    }
+    QueryResult::None
+}
+
+/// Builtin: finites - select only finite numbers (not infinite or NaN)
+fn builtin_finites<'a, W: Clone + AsRef<[u64]>>(value: StandardJson<'a, W>) -> QueryResult<'a, W> {
+    if let StandardJson::Number(n) = &value {
+        if let Ok(f) = n.as_f64() {
+            if f.is_finite() {
+                return QueryResult::One(value);
+            }
+        }
+    }
+    QueryResult::None
+}
+
 /// Builtin: delpaths(paths) - delete multiple paths
 fn builtin_delpaths<'a, W: Clone + AsRef<[u64]>>(
     paths_expr: &Expr,
@@ -8877,6 +9153,12 @@ fn expand_func_calls_in_builtin(
         Builtin::Kind => Builtin::Kind,
         Builtin::Key => Builtin::Key,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
+        // Phase 12 builtins (no args to expand)
+        Builtin::Now => Builtin::Now,
+        Builtin::Abs => Builtin::Abs,
+        Builtin::Builtins => Builtin::Builtins,
+        Builtin::Normals => Builtin::Normals,
+        Builtin::Finites => Builtin::Finites,
     }
 }
 
@@ -9067,6 +9349,12 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Kind => Builtin::Kind,
         Builtin::Key => Builtin::Key,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
+        // Phase 12 builtins (no args to substitute)
+        Builtin::Now => Builtin::Now,
+        Builtin::Abs => Builtin::Abs,
+        Builtin::Builtins => Builtin::Builtins,
+        Builtin::Normals => Builtin::Normals,
+        Builtin::Finites => Builtin::Finites,
     }
 }
 
@@ -11985,6 +12273,99 @@ mod tests {
         query!(br#"{"outer": {"inner": 42}}"#, ".outer | .[] | key",
             QueryResult::Owned(OwnedValue::String(s)) => {
                 assert_eq!(s, "inner");
+            }
+        );
+    }
+
+    // Phase 12 tests: Additional builtins
+
+    #[test]
+    fn test_now() {
+        // now returns current Unix timestamp as a float
+        query!(b"null", "now",
+            QueryResult::Owned(OwnedValue::Float(n)) => {
+                // Should be a reasonable Unix timestamp (after year 2020)
+                assert!(n > 1577836800.0, "timestamp should be after 2020");
+                // Should be before year 2100
+                assert!(n < 4102444800.0, "timestamp should be before 2100");
+            }
+        );
+    }
+
+    #[test]
+    fn test_abs() {
+        // abs is an alias for fabs
+        query!(b"-5", "abs", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 5.0).abs() < f64::EPSILON);
+        });
+        query!(b"5", "abs", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 5.0).abs() < f64::EPSILON);
+        });
+        query!(b"-7.25", "abs", QueryResult::Owned(OwnedValue::Float(n)) => {
+            assert!((n - 7.25).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_builtins() {
+        // builtins returns an array of builtin function names
+        query!(b"null", "builtins | length",
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                // Should have many builtins (at least 100)
+                assert!(n > 100, "should have many builtins, got {}", n);
+            }
+        );
+        // Check some known builtins exist
+        query!(b"null", r#"builtins | map(select(startswith("now"))) | length"#,
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert!(n >= 1, "should have now builtin");
+            }
+        );
+    }
+
+    #[test]
+    fn test_normals() {
+        // normals selects only normal numbers (not 0, inf, nan, subnormal)
+        query!(b"5", "normals", QueryResult::One(_) => {});
+        query!(b"-3.14", "normals", QueryResult::One(_) => {});
+        query!(b"0", "normals", QueryResult::None => {}); // 0 is not normal
+        query!(b"null", "normals", QueryResult::None => {}); // null is not a number
+        query!(br#""string""#, "normals", QueryResult::None => {}); // string is not a number
+    }
+
+    #[test]
+    fn test_finites() {
+        // finites selects only finite numbers (not inf or nan)
+        query!(b"5", "finites", QueryResult::One(_) => {});
+        query!(b"-3.14", "finites", QueryResult::One(_) => {});
+        query!(b"0", "finites", QueryResult::One(_) => {}); // 0 is finite
+        query!(b"null", "finites", QueryResult::None => {}); // null is not a number
+        query!(br#""string""#, "finites", QueryResult::None => {}); // string is not a number
+    }
+
+    #[test]
+    fn test_format_urid() {
+        // @urid decodes URI/percent encoding
+        query!(br#""hello%20world""#, "@urid",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "hello world");
+            }
+        );
+        query!(br#""foo%2Fbar""#, "@urid",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "foo/bar");
+            }
+        );
+        // Test roundtrip with @uri
+        query!(br#""hello world""#, "@uri | @urid",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "hello world");
+            }
+        );
+        // Invalid percent encoding should pass through
+        query!(br#""hello%GGworld""#, "@urid",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "hello%GGworld");
             }
         );
     }

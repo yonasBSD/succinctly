@@ -64,6 +64,8 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `objects` - Select only object values
 - [x] `iterables` - Select arrays and objects
 - [x] `scalars` - Select non-iterables (null, bool, number, string)
+- [x] `normals` - Select only normal numbers (not 0, infinite, NaN, or subnormal)
+- [x] `finites` - Select only finite numbers (not infinite or NaN)
 
 ### Selection & Filtering
 - [x] `select(cond)` - Filter by condition
@@ -120,7 +122,7 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `@csv` / `@tsv` - Delimited formats
 - [x] `@dsv(delimiter)` - Custom delimiter with smart quoting
 - [x] `@base64` / `@base64d`
-- [x] `@uri` - Percent encoding
+- [x] `@uri` / `@urid` - Percent encoding / decoding
 - [x] `@html` - HTML entity escaping
 - [x] `@sh` - Shell quoting
 
@@ -147,8 +149,8 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `parent` (yq) - returns parent node of current position
 - [x] `parent(n)` (yq) - returns nth parent node
 
-### Math Functions (32 total)
-- [x] Basic: `floor`, `ceil`, `round`, `sqrt`, `fabs`
+### Math Functions (33 total)
+- [x] Basic: `floor`, `ceil`, `round`, `sqrt`, `fabs`, `abs`
 - [x] Exponential: `log`, `log10`, `log2`, `exp`, `exp10`, `exp2`
 - [x] Trigonometric: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`
 - [x] 2-arg: `pow(x; y)`, `atan2(y; x)`
@@ -158,6 +160,8 @@ The implementation is already production-ready for ~90% of jq use cases.
 ### I/O & Debug
 - [x] `debug` / `debug(msg)`
 - [x] `env`, `$ENV.VAR`, `env(VAR)`, `strenv(VAR)`
+- [x] `now` - Current Unix timestamp
+- [x] `builtins` - List all builtin function names
 
 ### Assignment Operators
 - [x] `.a = value` - Simple assignment
@@ -230,7 +234,6 @@ Currently parsed but not evaluated:
 - [ ] Label-break: `label $name | ... | break $name`
 - [ ] Array slicing with steps: `.[::2]` (every other element)
 - [ ] `ascii` - ASCII character code (e.g., `"A" | ascii` → 65)
-- [ ] `now` - Current Unix timestamp
 
 ### Priority 5: CLI Enhancements
 
@@ -304,3 +307,8 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-19 | Added key function for yq - returns current key when iterating (✅ complete)|
 | 2026-01-19 | Added quoted field access `."key"` and bracket notation `.["key"]` (✅ complete)|
 | 2026-01-19 | Added `#` comments in jq expressions (✅ complete)|
+| 2026-01-19 | Added `now` builtin for current Unix timestamp (✅ complete)|
+| 2026-01-19 | Added `abs` builtin as alias for fabs (✅ complete)|
+| 2026-01-19 | Added `builtins` builtin to list all builtin function names (✅ complete)|
+| 2026-01-19 | Added `normals` and `finites` type filters for numeric selection (✅ complete)|
+| 2026-01-19 | Added `@urid` format for URI/percent decoding (✅ complete)|

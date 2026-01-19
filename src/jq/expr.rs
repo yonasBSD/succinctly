@@ -403,6 +403,8 @@ pub enum FormatType {
     Html,
     /// @sh - shell quote
     Sh,
+    /// @urid - URI decode (percent decoding)
+    Urid,
 }
 
 /// Builtin functions supported by jq.
@@ -748,6 +750,18 @@ pub enum Builtin {
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path
     Del(Box<Expr>),
+
+    // Phase 12: Additional builtins
+    /// `now` - current Unix timestamp
+    Now,
+    /// `abs` - absolute value (alias for fabs)
+    Abs,
+    /// `builtins` - list all builtin function names
+    Builtins,
+    /// `normals` - select only normal numbers (not zero, infinite, NaN, or subnormal)
+    Normals,
+    /// `finites` - select only finite numbers (not infinite or NaN)
+    Finites,
 }
 
 /// Arithmetic operators.

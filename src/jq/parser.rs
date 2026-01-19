@@ -1595,6 +1595,7 @@ impl<'a> Parser<'a> {
             "base64d" => FormatType::Base64d,
             "html" => FormatType::Html,
             "sh" => FormatType::Sh,
+            "urid" => FormatType::Urid,
             _ => {
                 return Err(ParseError::new(
                     format!("unknown format '@{}'", format_name),
@@ -1676,6 +1677,15 @@ impl<'a> Parser<'a> {
         if self.matches_keyword("scalars") {
             self.consume_keyword("scalars");
             return Ok(Some(Builtin::Scalars));
+        }
+        // Additional numeric type filters
+        if self.matches_keyword("normals") {
+            self.consume_keyword("normals");
+            return Ok(Some(Builtin::Normals));
+        }
+        if self.matches_keyword("finites") {
+            self.consume_keyword("finites");
+            return Ok(Some(Builtin::Finites));
         }
 
         // Length & keys (no arguments)
@@ -2590,6 +2600,20 @@ impl<'a> Parser<'a> {
         if self.matches_keyword("key") {
             self.consume_keyword("key");
             return Ok(Some(Builtin::Key));
+        }
+
+        // Phase 12: Additional builtins
+        if self.matches_keyword("now") {
+            self.consume_keyword("now");
+            return Ok(Some(Builtin::Now));
+        }
+        if self.matches_keyword("abs") {
+            self.consume_keyword("abs");
+            return Ok(Some(Builtin::Abs));
+        }
+        if self.matches_keyword("builtins") {
+            self.consume_keyword("builtins");
+            return Ok(Some(Builtin::Builtins));
         }
 
         Ok(None)
