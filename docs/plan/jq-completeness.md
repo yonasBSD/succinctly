@@ -53,6 +53,7 @@ The implementation is already production-ready for ~90% of jq use cases.
 ### Type Functions
 - [x] `type` - Returns type name
 - [x] `isnull`, `isboolean`, `isnumber`, `isstring`, `isarray`, `isobject`
+- [x] `toboolean` - Convert to boolean (accepts true, false, "true", "false")
 
 ### Type Filters
 - [x] `values` - Select non-null values
@@ -134,11 +135,13 @@ The implementation is already production-ready for ~90% of jq use cases.
 
 ### Advanced Control Flow
 - [x] `limit(n; expr)`
+- [x] `skip(n; expr)` - skip first n outputs from expr
 - [x] `first` / `first(expr)` / `last` / `last(expr)`
 - [x] `nth(n; expr)`
 - [x] `until(cond; update)` / `while(cond; update)`
 - [x] `repeat(expr)`
 - [x] `range(n)` / `range(a;b)` / `range(a;b;step)`
+- [x] `combinations` / `combinations(n)` - Cartesian product of arrays
 
 ### Path Operations
 - [x] `path(expr)`
@@ -149,8 +152,8 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `parent` (yq) - returns parent node of current position
 - [x] `parent(n)` (yq) - returns nth parent node
 
-### Math Functions (33 total)
-- [x] Basic: `floor`, `ceil`, `round`, `sqrt`, `fabs`, `abs`
+### Math Functions (34 total)
+- [x] Basic: `floor`, `ceil`, `round`, `trunc`, `sqrt`, `fabs`, `abs`
 - [x] Exponential: `log`, `log10`, `log2`, `exp`, `exp10`, `exp2`
 - [x] Trigonometric: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`
 - [x] 2-arg: `pow(x; y)`, `atan2(y; x)`
@@ -233,7 +236,6 @@ Currently parsed but not evaluated:
 
 - [ ] Label-break: `label $name | ... | break $name`
 - [ ] Array slicing with steps: `.[::2]` (every other element)
-- [ ] `ascii` - ASCII character code (e.g., `"A" | ascii` → 65)
 
 ### Priority 5: CLI Enhancements
 
@@ -312,3 +314,7 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-19 | Added `builtins` builtin to list all builtin function names (✅ complete)|
 | 2026-01-19 | Added `normals` and `finites` type filters for numeric selection (✅ complete)|
 | 2026-01-19 | Added `@urid` format for URI/percent decoding (✅ complete)|
+| 2026-01-19 | Added `combinations` / `combinations(n)` for Cartesian product (✅ complete)|
+| 2026-01-19 | Added `trunc` math function - truncate toward zero (✅ complete)|
+| 2026-01-19 | Added `toboolean` type conversion function (✅ complete)|
+| 2026-01-19 | Added `skip(n; expr)` iteration control - skip first n outputs (✅ complete)|
