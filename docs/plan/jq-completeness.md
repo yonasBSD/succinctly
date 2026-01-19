@@ -220,11 +220,10 @@ Currently parsed but not evaluated:
 ### Priority 3: Location & Debugging
 
 - [ ] `$__loc__` - Current source location `{file, line}`
-- [ ] Comments in jq expressions (`#` to end of line)
+- [x] Comments in jq expressions (`#` to end of line) ✅
 
 **Implementation notes:**
 - `$__loc__` requires tracking source positions through parsing
-- Comment support needs lexer changes
 
 ### Priority 4: Advanced Features
 
@@ -304,3 +303,4 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-19 | Added kind function for yq - returns node kind: scalar, seq, map (✅ complete)|
 | 2026-01-19 | Added key function for yq - returns current key when iterating (✅ complete)|
 | 2026-01-19 | Added quoted field access `."key"` and bracket notation `.["key"]` (✅ complete)|
+| 2026-01-19 | Added `#` comments in jq expressions (✅ complete)|

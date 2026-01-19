@@ -117,13 +117,25 @@ impl<'a> Parser<'a> {
         Some(c)
     }
 
-    /// Skip whitespace.
+    /// Skip whitespace and comments.
+    /// Comments start with `#` and run to the end of the line.
     fn skip_ws(&mut self) {
-        while let Some(c) = self.peek() {
-            if c.is_whitespace() {
-                self.next();
-            } else {
-                break;
+        loop {
+            match self.peek() {
+                Some(c) if c.is_whitespace() => {
+                    self.next();
+                }
+                Some('#') => {
+                    // Skip comment until end of line
+                    self.next(); // consume '#'
+                    while let Some(c) = self.peek() {
+                        self.next();
+                        if c == '\n' {
+                            break;
+                        }
+                    }
+                }
+                _ => break,
             }
         }
     }
@@ -4244,5 +4256,47 @@ mod tests {
             }
             _ => panic!("expected subtraction, got {:?}", expr),
         }
+    }
+
+    #[test]
+    fn test_comments() {
+        // Inline comment at end
+        assert_eq!(parse(".foo # comment").unwrap(), Expr::Field("foo".into()));
+
+        // Comment on its own line
+        assert_eq!(parse("# comment\n.foo").unwrap(), Expr::Field("foo".into()));
+
+        // Multiple comments
+        assert_eq!(
+            parse("# first\n.foo # second").unwrap(),
+            Expr::Field("foo".into())
+        );
+
+        // Comment between expressions
+        assert_eq!(
+            parse(".foo # get foo\n| .bar # then bar").unwrap(),
+            Expr::Pipe(vec![Expr::Field("foo".into()), Expr::Field("bar".into()),])
+        );
+
+        // Comment with special characters
+        assert_eq!(
+            parse(".foo # comment with $pecial ch@rs!").unwrap(),
+            Expr::Field("foo".into())
+        );
+
+        // Empty comment
+        assert_eq!(
+            parse(".foo #\n| .bar").unwrap(),
+            Expr::Pipe(vec![Expr::Field("foo".into()), Expr::Field("bar".into()),])
+        );
+
+        // Comment-only input should fail (no expression)
+        assert!(parse("# just a comment").is_err());
+
+        // Hash in string is not a comment
+        assert_eq!(
+            parse("\"hello # world\"").unwrap(),
+            Expr::Literal(Literal::String("hello # world".into()))
+        );
     }
 }
