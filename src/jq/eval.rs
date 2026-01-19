@@ -12182,6 +12182,32 @@ mod tests {
     }
 
     #[test]
+    fn test_env_field_access() {
+        // env.VAR should return the environment variable value (like $ENV.VAR)
+        query!(b"null", "env.PATH", QueryResult::Owned(OwnedValue::String(s)) => {
+            #[cfg(feature = "std")]
+            assert!(!s.is_empty(), "PATH should be non-empty");
+        });
+    }
+
+    #[test]
+    fn test_env_bracket_access() {
+        // env["PATH"] should also work (like $ENV["PATH"])
+        query!(b"null", r#"env["PATH"]"#, QueryResult::Owned(OwnedValue::String(s)) => {
+            #[cfg(feature = "std")]
+            assert!(!s.is_empty(), "PATH should be non-empty");
+        });
+    }
+
+    #[test]
+    fn test_env_missing_var() {
+        // env.NONEXISTENT_VAR_12345? returns null with optional syntax
+        query!(b"null", "env.NONEXISTENT_VAR_12345?",
+            QueryResult::Owned(OwnedValue::Null) => {}
+        );
+    }
+
+    #[test]
     fn test_null_literal() {
         query!(b"42", "null", QueryResult::Owned(OwnedValue::Null) => {});
     }

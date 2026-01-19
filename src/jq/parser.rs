@@ -927,7 +927,8 @@ impl<'a> Parser<'a> {
                     // Phase 9: Function definition
                     self.parse_def_expr()
                 } else if let Some(builtin) = self.try_parse_builtin()? {
-                    Ok(Expr::Builtin(builtin))
+                    // Allow postfix operations after builtins (e.g., env.PATH, keys[0])
+                    self.parse_postfix(Expr::Builtin(builtin))
                 } else {
                     // Phase 9: Try to parse as function call
                     self.parse_func_call_or_error()
