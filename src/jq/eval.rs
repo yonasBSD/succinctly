@@ -1395,6 +1395,9 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
 
         // Phase 18: Additional math functions
         Builtin::Trunc => builtin_trunc(value, optional),
+
+        // Phase 19: Type conversion
+        Builtin::ToBoolean => builtin_toboolean(value, optional),
     }
 }
 
@@ -3066,6 +3069,39 @@ fn builtin_tonumber<'a, W: Clone + AsRef<[u64]>>(
         }
         _ if optional => QueryResult::None,
         _ => QueryResult::Error(EvalError::type_error("string or number", type_name(&value))),
+    }
+}
+
+/// Builtin: toboolean - convert to boolean
+/// Accepts: true, false, "true", "false"
+fn builtin_toboolean<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match &value {
+        StandardJson::Bool(b) => QueryResult::Owned(OwnedValue::Bool(*b)),
+        StandardJson::String(s) => {
+            if let Ok(cow) = s.as_str() {
+                match cow.as_ref() {
+                    "true" => QueryResult::Owned(OwnedValue::Bool(true)),
+                    "false" => QueryResult::Owned(OwnedValue::Bool(false)),
+                    _ if optional => QueryResult::None,
+                    other => QueryResult::Error(EvalError::new(format!(
+                        "string ({:?}) cannot be parsed as a boolean",
+                        other
+                    ))),
+                }
+            } else if optional {
+                QueryResult::None
+            } else {
+                QueryResult::Error(EvalError::new("invalid string"))
+            }
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::new(format!(
+            "{} cannot be parsed as a boolean",
+            type_name(&value)
+        ))),
     }
 }
 
@@ -5863,6 +5899,9 @@ fn substitute_var_in_builtin(
 
         // Phase 18: Additional math functions
         Builtin::Trunc => Builtin::Trunc,
+
+        // Phase 19: Type conversion
+        Builtin::ToBoolean => Builtin::ToBoolean,
     }
 }
 
@@ -9065,6 +9104,8 @@ fn builtin_builtins<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
         "combinations/1",
         // Additional math (arity 0)
         "trunc/0",
+        // Type conversion (arity 0)
+        "toboolean/0",
         // Meta (arity 0-1)
         "builtins/0",
         "modulemeta/1",
@@ -11437,6 +11478,9 @@ fn expand_func_calls_in_builtin(
 
         // Phase 18: Additional math functions
         Builtin::Trunc => Builtin::Trunc,
+
+        // Phase 19: Type conversion
+        Builtin::ToBoolean => Builtin::ToBoolean,
     }
 }
 
@@ -11701,6 +11745,9 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
 
         // Phase 18: Additional math functions
         Builtin::Trunc => Builtin::Trunc,
+
+        // Phase 19: Type conversion
+        Builtin::ToBoolean => Builtin::ToBoolean,
     }
 }
 

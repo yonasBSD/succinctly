@@ -842,6 +842,12 @@ pub enum Builtin {
     /// `trunc` - truncate toward zero (remove fractional part)
     /// 2.7 -> 2, -2.7 -> -2
     Trunc,
+
+    // Phase 19: Type conversion
+    /// `toboolean` - convert to boolean
+    /// Accepts: true, false, "true", "false"
+    /// Errors on other types
+    ToBoolean,
 }
 
 /// Arithmetic operators.

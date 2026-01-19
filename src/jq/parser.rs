@@ -2877,6 +2877,12 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Trunc));
         }
 
+        // Phase 19: Type conversion
+        if self.matches_keyword("toboolean") {
+            self.consume_keyword("toboolean");
+            return Ok(Some(Builtin::ToBoolean));
+        }
+
         Ok(None)
     }
 
