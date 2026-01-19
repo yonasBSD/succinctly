@@ -6730,6 +6730,7 @@ fn collect_paths(value: &OwnedValue, current_path: &[OwnedValue], paths: &mut Ve
 }
 
 /// Builtin: paths - all paths to values (excluding empty paths)
+/// Returns each path as a separate output (streaming), matching jq behavior
 fn builtin_paths<'a, W: Clone + AsRef<[u64]>>(
     value: StandardJson<'a, W>,
     _optional: bool,
@@ -6737,10 +6738,18 @@ fn builtin_paths<'a, W: Clone + AsRef<[u64]>>(
     let owned = to_owned(&value);
     let mut paths = Vec::new();
     collect_paths(&owned, &[], &mut paths);
-    QueryResult::Owned(OwnedValue::Array(paths))
+    // Stream individual paths instead of wrapping in array
+    if paths.is_empty() {
+        QueryResult::None
+    } else if paths.len() == 1 {
+        QueryResult::Owned(paths.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(paths)
+    }
 }
 
 /// Builtin: paths(filter) - paths to values matching filter
+/// Returns each path as a separate output (streaming), matching jq behavior
 fn builtin_paths_filter<'a, W: Clone + AsRef<[u64]>>(
     filter: &Expr,
     value: StandardJson<'a, W>,
@@ -6763,7 +6772,14 @@ fn builtin_paths_filter<'a, W: Clone + AsRef<[u64]>>(
             }
         }
     }
-    QueryResult::Owned(OwnedValue::Array(filtered_paths))
+    // Stream individual paths instead of wrapping in array
+    if filtered_paths.is_empty() {
+        QueryResult::None
+    } else if filtered_paths.len() == 1 {
+        QueryResult::Owned(filtered_paths.pop().unwrap())
+    } else {
+        QueryResult::ManyOwned(filtered_paths)
+    }
 }
 
 /// Helper to get value at a path (alias for convenience)
@@ -12050,10 +12066,37 @@ mod tests {
 
     #[test]
     fn test_paths() {
+        // paths streams individual paths (matching jq behavior)
         query!(br#"{"a": 1, "b": {"c": 2}}"#, "paths",
-            QueryResult::Owned(OwnedValue::Array(paths)) => {
+            QueryResult::ManyOwned(paths) => {
                 // Should have paths: ["a"], ["b"], ["b", "c"]
                 assert_eq!(paths.len(), 3);
+                assert_eq!(paths[0], OwnedValue::Array(vec![OwnedValue::String("a".into())]));
+                assert_eq!(paths[1], OwnedValue::Array(vec![OwnedValue::String("b".into())]));
+                assert_eq!(paths[2], OwnedValue::Array(vec![
+                    OwnedValue::String("b".into()),
+                    OwnedValue::String("c".into())
+                ]));
+            }
+        );
+    }
+
+    #[test]
+    fn test_paths_single() {
+        // Single path returns single Owned result
+        query!(br#"{"a": 1}"#, "paths",
+            QueryResult::Owned(OwnedValue::Array(path)) => {
+                assert_eq!(path, vec![OwnedValue::String("a".into())]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_paths_collected() {
+        // Collected with [...] matches jq's [paths]
+        query!(br#"{"a": 1, "b": 2}"#, "[paths]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
             }
         );
     }
@@ -12364,11 +12407,41 @@ mod tests {
 
     #[test]
     fn test_paths_filter() {
-        // paths(filter) returns paths where values match filter
+        // paths(filter) streams paths where values match filter
         query!(br#"{"a": 1, "b": "hello", "c": 2}"#, "paths(type == \"number\")",
-            QueryResult::Owned(OwnedValue::Array(paths)) => {
+            QueryResult::ManyOwned(paths) => {
                 // Should have paths to "a" and "c" (both numbers)
                 assert_eq!(paths.len(), 2);
+                assert_eq!(paths[0], OwnedValue::Array(vec![OwnedValue::String("a".into())]));
+                assert_eq!(paths[1], OwnedValue::Array(vec![OwnedValue::String("c".into())]));
+            }
+        );
+    }
+
+    #[test]
+    fn test_paths_filter_single() {
+        // Single match returns single Owned result
+        query!(br#"{"a": 1, "b": "hello"}"#, "paths(type == \"number\")",
+            QueryResult::Owned(OwnedValue::Array(path)) => {
+                assert_eq!(path, vec![OwnedValue::String("a".into())]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_paths_filter_none() {
+        // No matches returns None
+        query!(br#"{"a": "x", "b": "y"}"#, "paths(type == \"number\")",
+            QueryResult::None => {}
+        );
+    }
+
+    #[test]
+    fn test_paths_filter_collected() {
+        // Collected with [...] matches jq
+        query!(br#"{"a": 1, "b": "hello", "c": 2}"#, "[paths(type == \"number\")]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
             }
         );
     }
