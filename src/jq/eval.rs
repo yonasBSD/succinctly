@@ -5793,21 +5793,24 @@ fn eval_while<'a, W: Clone + AsRef<[u64]>>(
     }
 }
 
-/// Evaluate `repeat(expr)` - repeatedly apply expr.
-/// Note: This produces an infinite stream, so we limit it.
+/// Evaluate `repeat(expr)` - repeatedly evaluate expr with the original input.
+/// In jq, `repeat(expr)` evaluates `expr` with the original input each time,
+/// producing an infinite stream of outputs. This is different from feeding
+/// the output back as input.
+/// Note: This produces an infinite stream, so it should be used with `limit`.
 fn eval_repeat<'a, W: Clone + AsRef<[u64]>>(
     expr: &Expr,
     value: StandardJson<'a, W>,
     optional: bool,
 ) -> QueryResult<'a, W> {
-    let mut current = to_owned(&value);
+    let owned = to_owned(&value);
     let mut outputs: Vec<OwnedValue> = Vec::new();
     const MAX_ITERATIONS: usize = 1000; // Limit to prevent infinite loops
 
     for _ in 0..MAX_ITERATIONS {
-        outputs.push(current.clone());
-        match eval_owned_expr(expr, &current, optional) {
-            Ok(new_val) => current = new_val,
+        // Evaluate expr with the original input each time
+        match eval_owned_expr(expr, &owned, optional) {
+            Ok(new_val) => outputs.push(new_val),
             Err(_) => break, // Stop on error
         }
     }
@@ -11722,6 +11725,37 @@ mod tests {
                     OwnedValue::Int(2),
                     OwnedValue::Int(4),
                     OwnedValue::Int(8),
+                ]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_repeat() {
+        // repeat(expr) - repeatedly evaluate expr with original input
+        // jq behavior: repeat(. * 2) on input 1 produces 2, 2, 2, ...
+        query!(br#"1"#, r#"[limit(5; repeat(. * 2))]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(2),
+                    OwnedValue::Int(2),
+                ]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_repeat_identity() {
+        // repeat(.) produces the same value infinitely
+        query!(br#""hello""#, r#"[limit(3; repeat(.))]"#,
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![
+                    OwnedValue::String("hello".into()),
+                    OwnedValue::String("hello".into()),
+                    OwnedValue::String("hello".into()),
                 ]);
             }
         );
