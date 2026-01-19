@@ -131,6 +131,14 @@ pub enum Expr {
     /// Variable reference: `$x`
     Var(String),
 
+    /// Location reference: `$__loc__`
+    /// Returns {"file": "<stdin>", "line": N} where N is the 1-based line number
+    /// in the jq filter source where $__loc__ appears.
+    Loc {
+        /// 1-based line number in the jq source
+        line: usize,
+    },
+
     /// Reduce: `reduce .[] as $x (0; . + $x)`
     Reduce {
         /// Input expression (what to iterate over)

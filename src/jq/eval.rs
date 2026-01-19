@@ -284,6 +284,14 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>>(
             // In practice, variables are resolved by eval_as which substitutes them
             QueryResult::Error(EvalError::new(format!("undefined variable: ${}", name)))
         }
+        Expr::Loc { line } => {
+            // $__loc__ returns {"file": "<stdin>", "line": N}
+            // where N is the 1-based line number in the jq filter source
+            let mut obj = IndexMap::new();
+            obj.insert("file".into(), OwnedValue::String("<stdin>".into()));
+            obj.insert("line".into(), OwnedValue::Int(*line as i64));
+            QueryResult::Owned(OwnedValue::Object(obj))
+        }
         Expr::Reduce {
             input,
             var,
@@ -4719,6 +4727,7 @@ fn substitute_var(expr: &Expr, var_name: &str, replacement: &OwnedValue) -> Expr
     match expr {
         Expr::Var(name) if name == var_name => owned_to_expr(replacement),
         Expr::Var(_) => expr.clone(),
+        Expr::Loc { line } => Expr::Loc { line: *line },
         Expr::Identity => Expr::Identity,
         Expr::Field(name) => Expr::Field(name.clone()),
         Expr::Index(i) => Expr::Index(*i),
@@ -8498,6 +8507,7 @@ fn expand_func_calls(expr: &Expr, func_name: &str, params: &[String], body: &Exp
         ),
         Expr::Format(f) => Expr::Format(f.clone()),
         Expr::Var(v) => Expr::Var(v.clone()),
+        Expr::Loc { line } => Expr::Loc { line: *line },
         Expr::As {
             expr,
             var,
@@ -8641,6 +8651,7 @@ fn substitute_func_param(expr: &Expr, param: &str, arg: &Expr) -> Expr {
         // A variable reference to the parameter becomes the argument expression
         Expr::Var(name) if name == param => arg.clone(),
         Expr::Var(_) => expr.clone(),
+        Expr::Loc { line } => Expr::Loc { line: *line },
         Expr::Identity => Expr::Identity,
         Expr::Field(name) => Expr::Field(name.clone()),
         Expr::Index(i) => Expr::Index(*i),
@@ -12368,5 +12379,85 @@ mod tests {
                 assert_eq!(s, "hello%GGworld");
             }
         );
+    }
+
+    #[test]
+    fn test_loc_basic() {
+        // $__loc__ returns {"file": "<stdin>", "line": N}
+        query!(b"null", "$__loc__",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("file"), Some(&OwnedValue::String("<stdin>".into())));
+                assert_eq!(obj.get("line"), Some(&OwnedValue::Int(1)));
+            }
+        );
+    }
+
+    #[test]
+    fn test_loc_line_number() {
+        // $__loc__ should report line 1 for single-line filter
+        query!(b"null", "$__loc__.line",
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 1);
+            }
+        );
+    }
+
+    #[test]
+    fn test_loc_file() {
+        // $__loc__.file should be "<stdin>"
+        query!(b"null", "$__loc__.file",
+            QueryResult::Owned(OwnedValue::String(s)) => {
+                assert_eq!(s, "<stdin>");
+            }
+        );
+    }
+
+    #[test]
+    fn test_loc_multiline() {
+        // Multi-line filter: $__loc__ on line 2 should report line 2
+        let filter = ".\n| $__loc__.line";
+        let json = b"null";
+        let index = crate::json::JsonIndex::build(json);
+        let cursor = index.root(json);
+        let expr = crate::jq::parse(filter).unwrap();
+        match eval(&expr, cursor) {
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 2, "expected line 2 for $__loc__ on second line");
+            }
+            other => panic!("expected Int, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_loc_multiline_line3() {
+        // $__loc__ on line 3 should report line 3
+        // Use valid jq syntax: pipe identity on separate lines
+        let filter = ".\n|\n$__loc__.line";
+        let json = b"null";
+        let index = crate::json::JsonIndex::build(json);
+        let cursor = index.root(json);
+        let expr = crate::jq::parse(filter).unwrap();
+        match eval(&expr, cursor) {
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 3, "expected line 3 for $__loc__ on third line");
+            }
+            other => panic!("expected Int, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_loc_in_function_def() {
+        // $__loc__ inside a function should report the line where it appears
+        let filter = "def f: $__loc__.line; f";
+        let json = b"null";
+        let index = crate::json::JsonIndex::build(json);
+        let cursor = index.root(json);
+        let expr = crate::jq::parse(filter).unwrap();
+        match eval(&expr, cursor) {
+            QueryResult::Owned(OwnedValue::Int(n)) => {
+                assert_eq!(n, 1, "expected line 1 for $__loc__ in function on line 1");
+            }
+            other => panic!("expected Int, got {:?}", other),
+        }
     }
 }

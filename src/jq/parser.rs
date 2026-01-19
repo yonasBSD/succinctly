@@ -145,6 +145,14 @@ impl<'a> Parser<'a> {
         self.pos >= self.input.len()
     }
 
+    /// Get the 1-based line number at the current position.
+    fn current_line(&self) -> usize {
+        1 + self.input[..self.pos]
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count()
+    }
+
     /// Consume a specific character or return error.
     fn expect(&mut self, expected: char) -> Result<(), ParseError> {
         self.skip_ws();
@@ -862,11 +870,17 @@ impl<'a> Parser<'a> {
                 self.parse_postfix(expr)
             }
 
-            // Variable reference: $varname
+            // Variable reference: $varname or $__loc__
             Some('$') => {
+                let line = self.current_line();
                 self.next();
                 let name = self.parse_ident()?;
-                Ok(Expr::Var(name))
+                let expr = if name == "__loc__" {
+                    Expr::Loc { line }
+                } else {
+                    Expr::Var(name)
+                };
+                self.parse_postfix(expr)
             }
 
             // Keywords: null, true, false, not, if, try, error, reduce, foreach, etc.
