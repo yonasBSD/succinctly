@@ -1190,6 +1190,54 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         self.index.is_alias(self.bp_pos)
     }
 
+    /// Get the 1-based line number of this node's position in the YAML text.
+    ///
+    /// Returns the line number where this value starts. Line numbers are 1-based
+    /// to match common editor conventions and yq's `line` function.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use succinctly::yaml::YamlIndex;
+    ///
+    /// let yaml = b"name: Alice\nage: 30";
+    /// let index = YamlIndex::build(yaml).unwrap();
+    /// let root = index.root(yaml);
+    ///
+    /// // Root mapping is on line 1
+    /// assert_eq!(root.line(), 1);
+    /// ```
+    #[inline]
+    pub fn line(&self) -> usize {
+        let offset = self.text_position().unwrap_or(0);
+        let (line, _column) = self.index.to_line_column(offset);
+        line
+    }
+
+    /// Get the 1-based column number of this node's position in the YAML text.
+    ///
+    /// Returns the column number where this value starts. Column numbers are 1-based
+    /// to match common editor conventions and yq's `column` function.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use succinctly::yaml::YamlIndex;
+    ///
+    /// let yaml = b"name: Alice\nage: 30";
+    /// let index = YamlIndex::build(yaml).unwrap();
+    /// let root = index.root(yaml);
+    ///
+    /// // Root mapping starts at column 1
+    /// assert_eq!(root.column(), 1);
+    /// ```
+    #[inline]
+    pub fn column(&self) -> usize {
+        let offset = self.text_position().unwrap_or(0);
+        let (_line, column) = self.index.to_line_column(offset);
+        column
+    }
+
     /// Get the style of this node.
     ///
     /// Returns the YAML style indicator:
@@ -5850,5 +5898,139 @@ mod tests {
             }
         }
         panic!("Could not find alias");
+    }
+
+    // =========================================================================
+    // Line and Column Tests
+    // =========================================================================
+
+    #[test]
+    fn test_line_basic() {
+        let yaml = b"name: Alice\nage: 30";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Root mapping is on line 1
+        assert_eq!(root.line(), 1);
+    }
+
+    #[test]
+    fn test_line_multiline() {
+        let yaml = b"first: one\nsecond: two\nthird: three";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(mut fields) = first_doc(root) {
+            // First field value: line 1
+            if let Some(field) = fields.next() {
+                let cursor = field.value_cursor();
+                assert_eq!(cursor.line(), 1);
+            }
+            // Second field value: line 2
+            if let Some(field) = fields.next() {
+                let cursor = field.value_cursor();
+                assert_eq!(cursor.line(), 2);
+            }
+            // Third field value: line 3
+            if let Some(field) = fields.next() {
+                let cursor = field.value_cursor();
+                assert_eq!(cursor.line(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn test_column_basic() {
+        let yaml = b"name: Alice";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Root mapping starts at column 1
+        assert_eq!(root.column(), 1);
+
+        if let YamlValue::Mapping(mut fields) = first_doc(root) {
+            if let Some(field) = fields.next() {
+                // The value "Alice" starts at column 7 (after "name: ")
+                let cursor = field.value_cursor();
+                assert_eq!(cursor.column(), 7);
+            }
+        }
+    }
+
+    #[test]
+    fn test_column_sequence() {
+        let yaml = b"- first\n- second";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Sequence(elements) = first_doc(root) {
+            // The cursor for a sequence element points to the element start position
+            // which is where the "-" indicator is, at column 1
+            let mut cursor = elements.element_cursor.unwrap();
+            assert_eq!(cursor.column(), 1);
+            assert_eq!(cursor.line(), 1);
+
+            // Second element is on line 2, also at column 1 (the "-" position)
+            cursor = cursor.next_sibling().unwrap();
+            assert_eq!(cursor.column(), 1);
+            assert_eq!(cursor.line(), 2);
+        }
+    }
+
+    #[test]
+    fn test_line_and_column_nested() {
+        let yaml = b"outer:\n  inner: value";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(mut fields) = first_doc(root) {
+            if let Some(outer_field) = fields.next() {
+                // outer's value (a mapping) is on line 2, column 3
+                let outer_cursor = outer_field.value_cursor();
+                assert_eq!(outer_cursor.line(), 2);
+                assert_eq!(outer_cursor.column(), 3);
+
+                if let YamlValue::Mapping(mut inner_fields) = outer_field.value() {
+                    if let Some(inner_field) = inner_fields.next() {
+                        // inner's value "value" is on line 2, column 10
+                        let inner_cursor = inner_field.value_cursor();
+                        assert_eq!(inner_cursor.line(), 2);
+                        assert_eq!(inner_cursor.column(), 10);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_line_flow_collection() {
+        let yaml = b"items: [a, b, c]";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(mut fields) = first_doc(root) {
+            if let Some(field) = fields.next() {
+                // Flow collection starts at column 8
+                let cursor = field.value_cursor();
+                assert_eq!(cursor.line(), 1);
+                assert_eq!(cursor.column(), 8);
+            }
+        }
+    }
+
+    #[test]
+    fn test_line_block_scalar() {
+        let yaml = b"text: |\n  line one\n  line two";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        if let YamlValue::Mapping(mut fields) = first_doc(root) {
+            if let Some(field) = fields.next() {
+                // Block scalar indicator is at column 7
+                let cursor = field.value_cursor();
+                assert_eq!(cursor.line(), 1);
+                assert_eq!(cursor.column(), 7);
+            }
+        }
     }
 }

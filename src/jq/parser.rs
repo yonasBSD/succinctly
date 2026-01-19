@@ -2731,6 +2731,18 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Key));
         }
 
+        // line - yq: return 1-based line number
+        if self.matches_keyword("line") {
+            self.consume_keyword("line");
+            return Ok(Some(Builtin::Line));
+        }
+
+        // column - yq: return 1-based column number
+        if self.matches_keyword("column") {
+            self.consume_keyword("column");
+            return Ok(Some(Builtin::Column));
+        }
+
         // Phase 12: Additional builtins
         if self.matches_keyword("now") {
             self.consume_keyword("now");

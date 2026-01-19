@@ -748,6 +748,10 @@ pub enum Builtin {
     Kind,
     /// `key` - return the current key when iterating (yq)
     Key,
+    /// `line` - return the 1-based line number of the current node (yq)
+    Line,
+    /// `column` - return the 1-based column number of the current node (yq)
+    Column,
 
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path

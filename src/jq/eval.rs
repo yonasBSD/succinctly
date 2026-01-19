@@ -1379,6 +1379,8 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Anchor => builtin_anchor(),
         Builtin::Style => builtin_style(value),
         Builtin::Kind => builtin_kind(value),
+        Builtin::Line => builtin_line(),
+        Builtin::Column => builtin_column(),
         Builtin::Key => {
             // Key requires path context which is handled in eval_pipe_with_context
             // If we reach here without context, return null (at root level)
@@ -5975,6 +5977,8 @@ fn substitute_var_in_builtin(
         Builtin::Style => Builtin::Style,
         Builtin::Kind => Builtin::Kind,
         Builtin::Key => Builtin::Key,
+        Builtin::Line => Builtin::Line,
+        Builtin::Column => Builtin::Column,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -9267,6 +9271,8 @@ fn builtin_builtins<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
         "style/0",
         "kind/0",
         "key/0",
+        "line/0",
+        "column/0",
         "parent/0",
         "parent/1",
     ];
@@ -10646,6 +10652,24 @@ fn builtin_kind<'a, W: Clone + AsRef<[u64]>>(value: StandardJson<'a, W>) -> Quer
     QueryResult::Owned(OwnedValue::String(kind.to_string()))
 }
 
+/// `line` - returns the 1-based line number of the current node (yq)
+/// Since YAML position metadata is lost during conversion to OwnedValue, this returns 0.
+/// In a full yq implementation, this would require tracking source positions through the pipeline.
+fn builtin_line<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
+    // Currently source positions are not preserved through the OwnedValue conversion.
+    // Return 0 to indicate position is unknown (yq returns 1 for actual positions).
+    QueryResult::Owned(OwnedValue::Int(0))
+}
+
+/// `column` - returns the 1-based column number of the current node (yq)
+/// Since YAML position metadata is lost during conversion to OwnedValue, this returns 0.
+/// In a full yq implementation, this would require tracking source positions through the pipeline.
+fn builtin_column<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
+    // Currently source positions are not preserved through the OwnedValue conversion.
+    // Return 0 to indicate position is unknown (yq returns 1 for actual positions).
+    QueryResult::Owned(OwnedValue::Int(0))
+}
+
 // ============================================================================
 // Phase 9: Variables & Definitions
 // ============================================================================
@@ -11585,6 +11609,8 @@ fn expand_func_calls_in_builtin(
         Builtin::Style => Builtin::Style,
         Builtin::Kind => Builtin::Kind,
         Builtin::Key => Builtin::Key,
+        Builtin::Line => Builtin::Line,
+        Builtin::Column => Builtin::Column,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
         // Phase 12 builtins (no args to expand)
         Builtin::Now => Builtin::Now,
@@ -11866,6 +11892,8 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Style => Builtin::Style,
         Builtin::Kind => Builtin::Kind,
         Builtin::Key => Builtin::Key,
+        Builtin::Line => Builtin::Line,
+        Builtin::Column => Builtin::Column,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,

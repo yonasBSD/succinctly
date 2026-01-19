@@ -198,16 +198,20 @@ The implementation is already production-ready for ~90% of jq use cases.
 - [x] `style` - return scalar/collection style (double, single, literal, folded, flow, or empty) - fully working at cursor level
 - [x] `kind` - return node kind (scalar, seq, map, alias) - fully working, matches yq behavior
 - [x] `key` - return current key when iterating (string for objects, int for arrays) - fully working
+- [x] `line` - return 1-based line number of current node - fully working at cursor level
+- [x] `column` - return 1-based column number of current node - fully working at cursor level
 
-**Note on anchor/alias/style metadata**: The YamlCursor type has full metadata access methods:
+**Note on anchor/alias/style/line/column metadata**: The YamlCursor type has full metadata access methods:
 - `cursor.anchor()` returns `Option<&str>` with the anchor name (e.g., "myanchor" for `&myanchor value`)
 - `cursor.alias()` returns `Option<&str>` with the referenced anchor name for alias nodes (e.g., "myanchor" for `*myanchor`)
 - `cursor.is_alias()` returns `bool` indicating if the node is an alias
 - `cursor.style()` returns `&'static str` indicating the style ("double", "single", "literal", "folded", "flow", or "" for plain)
 - `cursor.tag()` returns `&'static str` with the inferred YAML type tag
 - `cursor.kind()` returns `&'static str` indicating the structural kind ("scalar", "seq", "map", "alias")
+- `cursor.line()` returns `usize` with the 1-based line number of the node
+- `cursor.column()` returns `usize` with the 1-based column number of the node
 
-The jq builtins return empty string for anchor/style because metadata is lost during YAML→OwnedValue→JSON conversion for evaluation. Direct YAML cursor access preserves all metadata.
+The jq builtins return empty string for anchor/style and 0 for line/column because metadata is lost during YAML→OwnedValue→JSON conversion for evaluation. Direct YAML cursor access preserves all metadata.
 
 ### Module System
 - [x] `import "path" as name;` - Import module with namespace
@@ -338,3 +342,5 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-20 | Added reverse anchor mapping (bp_pos → anchor_name) to YamlIndex for O(1) anchor lookup|
 | 2026-01-20 | Added YamlCursor::alias() and is_alias() methods to match yq's alias function (✅ complete)|
 | 2026-01-20 | Updated kind() to return "alias" for alias nodes, matching yq behavior (✅ complete)|
+| 2026-01-20 | Added YamlCursor::line() and column() methods for yq position metadata (✅ complete)|
+| 2026-01-20 | Added `line` and `column` jq builtins (return 0 in evaluation, full support at cursor level)|
