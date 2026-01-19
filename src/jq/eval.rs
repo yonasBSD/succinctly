@@ -1338,6 +1338,9 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
             builtin_range_from_to_by(from, to, by, value, optional)
         }
         Builtin::IsEmpty(expr) => builtin_isempty(expr, value, optional),
+
+        // Phase 14: Recursive traversal (extends Phase 8)
+        Builtin::RecurseDown => builtin_recurse(value, optional), // alias for recurse
     }
 }
 
@@ -5263,6 +5266,8 @@ fn substitute_var_in_builtin(
             Box::new(substitute_var(by, var_name, replacement)),
         ),
         Builtin::IsEmpty(e) => Builtin::IsEmpty(Box::new(substitute_var(e, var_name, replacement))),
+        // Phase 14: Recursive traversal (extends Phase 8)
+        Builtin::RecurseDown => Builtin::RecurseDown,
     }
 }
 
@@ -9614,6 +9619,8 @@ fn expand_func_calls_in_builtin(
         Builtin::IsEmpty(e) => {
             Builtin::IsEmpty(Box::new(expand_func_calls(e, func_name, params, body)))
         }
+        // Phase 14: Recursive traversal (extends Phase 8)
+        Builtin::RecurseDown => Builtin::RecurseDown,
     }
 }
 
@@ -9836,6 +9843,8 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
             Box::new(substitute_func_param(by, param, arg)),
         ),
         Builtin::IsEmpty(e) => Builtin::IsEmpty(Box::new(substitute_func_param(e, param, arg))),
+        // Phase 14: Recursive traversal (extends Phase 8)
+        Builtin::RecurseDown => Builtin::RecurseDown,
     }
 }
 
@@ -13150,6 +13159,81 @@ mod tests {
         query!(b"[1, 2, 3, 4, 5]", "first(.[] | select(. > 2))",
             QueryResult::One(StandardJson::Number(n)) => {
                 assert_eq!(n.as_i64().unwrap(), 3);
+            }
+        );
+    }
+
+    // =========================================================================
+    // Phase 14 Tests: Recursive Traversal
+    // =========================================================================
+
+    #[test]
+    fn test_recurse_down() {
+        // recurse_down is an alias for recurse
+        // Just verify it parses and returns the expected structure
+        query!(br#"{"a": 1}"#, "[recurse_down]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                // Should return the original object and the number 1
+                assert_eq!(arr.len(), 2);
+            }
+        );
+    }
+
+    #[test]
+    fn test_recurse_with_filter() {
+        // recurse(.children[]?) - follow .children at each level
+        query!(br#"{"name": "root", "children": [{"name": "a", "children": [{"name": "b"}]}, {"name": "c"}]}"#,
+            "[recurse(.children[]?) | .name]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                // Should collect: root, a, b, c
+                assert_eq!(arr.len(), 4);
+            }
+        );
+    }
+
+    #[test]
+    fn test_recurse_with_condition() {
+        // recurse(f; cond) - recurse while condition is true
+        // Stop when value >= 5
+        query!(b"1", "[recurse(. + 1; . < 5)]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                // Should produce: 1, 2, 3, 4
+                assert_eq!(arr.len(), 4);
+                assert_eq!(arr[0], OwnedValue::Int(1));
+                assert_eq!(arr[3], OwnedValue::Int(4));
+            }
+        );
+    }
+
+    #[test]
+    fn test_walk_strings() {
+        // walk to uppercase all strings
+        query!(br#"{"name": "alice", "nested": {"value": "bob"}}"#,
+            "walk(if type == \"string\" then ascii_upcase else . end)",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.get("name"), Some(&OwnedValue::String("ALICE".into())));
+                if let Some(OwnedValue::Object(nested)) = obj.get("nested") {
+                    assert_eq!(nested.get("value"), Some(&OwnedValue::String("BOB".into())));
+                } else {
+                    panic!("expected nested object");
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_walk_arrays() {
+        // walk to reverse all arrays
+        query!(br#"{"items": [1, 2, 3], "nested": {"more": [4, 5]}}"#,
+            "walk(if type == \"array\" then reverse else . end)",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                if let Some(OwnedValue::Array(items)) = obj.get("items") {
+                    assert_eq!(items[0], OwnedValue::Int(3));
+                    assert_eq!(items[1], OwnedValue::Int(2));
+                    assert_eq!(items[2], OwnedValue::Int(1));
+                } else {
+                    panic!("expected items array");
+                }
             }
         );
     }

@@ -795,6 +795,10 @@ pub enum Builtin {
     RangeFromToBy(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `isempty(expr)` - returns true if expr produces no outputs
     IsEmpty(Box<Expr>),
+
+    // Phase 14: Recursive traversal (extends Phase 8)
+    /// `recurse_down` - recurse downward (alias for recurse)
+    RecurseDown,
 }
 
 /// Arithmetic operators.

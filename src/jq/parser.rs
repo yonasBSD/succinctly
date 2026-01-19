@@ -2744,6 +2744,13 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::IsEmpty(Box::new(expr))));
         }
 
+        // Phase 14: Recursive traversal (extends Phase 8)
+        // recurse_down is an alias for recurse
+        if self.matches_keyword("recurse_down") {
+            self.consume_keyword("recurse_down");
+            return Ok(Some(Builtin::RecurseDown));
+        }
+
         Ok(None)
     }
 
