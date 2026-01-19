@@ -870,13 +870,15 @@ impl<'a> Parser<'a> {
                 self.parse_postfix(expr)
             }
 
-            // Variable reference: $varname or $__loc__
+            // Variable reference: $varname, $__loc__, or $ENV
             Some('$') => {
                 let line = self.current_line();
                 self.next();
                 let name = self.parse_ident()?;
                 let expr = if name == "__loc__" {
                     Expr::Loc { line }
+                } else if name == "ENV" {
+                    Expr::Env
                 } else {
                     Expr::Var(name)
                 };

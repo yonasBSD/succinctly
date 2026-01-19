@@ -139,6 +139,10 @@ pub enum Expr {
         line: usize,
     },
 
+    /// Environment variables: `$ENV`
+    /// Returns an object containing all environment variables.
+    Env,
+
     /// Reduce: `reduce .[] as $x (0; . + $x)`
     Reduce {
         /// Input expression (what to iterate over)

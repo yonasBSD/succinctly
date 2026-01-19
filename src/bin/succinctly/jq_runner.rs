@@ -443,6 +443,7 @@ fn rewrite_namespaced_calls(expr: Expr) -> Expr {
         | Expr::Literal(_)
         | Expr::Var(_)
         | Expr::Loc { .. }
+        | Expr::Env
         | Expr::Not
         | Expr::Format(_)
         | Expr::Builtin(_) => expr,
