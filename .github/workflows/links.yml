@@ -38,6 +38,8 @@ jobs:
             --exclude '^https://www\.intel\.com/'
             --exclude '^https://dl\.acm\.org/'
             --exclude '^https://lib\.rs/'
+            --exclude '^https://developer\.arm\.com/'
+            --exclude '^https://www\.agner\.org/'
             '**/*.md'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
