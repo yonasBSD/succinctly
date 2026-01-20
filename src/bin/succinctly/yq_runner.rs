@@ -8,10 +8,11 @@ use indexmap::IndexMap;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
+use succinctly::jq::eval_generic::{eval_with_cursor, to_owned, GenericResult};
 use succinctly::jq::{self, Expr, OwnedValue, QueryResult};
 use succinctly::json::light::StandardJson;
 use succinctly::json::JsonIndex;
-use succinctly::yaml::{YamlIndex, YamlValue};
+use succinctly::yaml::{YamlCursor, YamlIndex, YamlValue};
 
 use super::{InputFormat, OutputFormat, YqCommand};
 
@@ -288,6 +289,70 @@ fn parse_input(bytes: &[u8], format: InputFormat) -> Result<Vec<OwnedValue>> {
     }
 }
 
+/// Parse and evaluate YAML bytes directly using the generic evaluator.
+///
+/// This keeps the index alive during evaluation and preserves position metadata.
+#[allow(dead_code)] // Used in tests
+fn parse_and_evaluate_yaml(bytes: &[u8], expr: &Expr) -> Result<Vec<OwnedValue>> {
+    let index = YamlIndex::build(bytes).map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
+    let root = index.root(bytes);
+
+    // YAML documents are wrapped in a sequence at the root
+    match root.value() {
+        YamlValue::Sequence(mut docs) => {
+            let mut all_results = Vec::new();
+            while let Some((cursor, rest)) = docs.uncons_cursor() {
+                let results = evaluate_yaml_cursor(cursor, expr)?;
+                all_results.extend(results);
+                docs = rest;
+            }
+            Ok(all_results)
+        }
+        _ => {
+            // Single document - navigate to actual content
+            if let Some(content_cursor) = root.first_child() {
+                evaluate_yaml_cursor(content_cursor, expr)
+            } else {
+                // Empty document
+                Ok(vec![])
+            }
+        }
+    }
+}
+
+/// Evaluate YAML input directly using the generic evaluator with per-document processing.
+///
+/// This processes YAML documents directly without intermediate OwnedValue conversion,
+/// preserving position metadata for `line` and `column` builtins. Returns results
+/// grouped by document for proper multi-doc handling (with `---` separators).
+fn evaluate_yaml_direct(bytes: &[u8], expr: &Expr) -> Result<Vec<Vec<OwnedValue>>> {
+    let index = YamlIndex::build(bytes).map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
+    let root = index.root(bytes);
+
+    // YAML documents are wrapped in a sequence at the root
+    match root.value() {
+        YamlValue::Sequence(mut docs) => {
+            let mut doc_results = Vec::new();
+            while let Some((cursor, rest)) = docs.uncons_cursor() {
+                let results = evaluate_yaml_cursor(cursor, expr)?;
+                doc_results.push(results);
+                docs = rest;
+            }
+            Ok(doc_results)
+        }
+        _ => {
+            // Single document - navigate to actual content
+            if let Some(content_cursor) = root.first_child() {
+                let results = evaluate_yaml_cursor(content_cursor, expr)?;
+                Ok(vec![results])
+            } else {
+                // Empty document
+                Ok(vec![vec![]])
+            }
+        }
+    }
+}
+
 /// Evaluate a jq expression on an OwnedValue by converting to JSON and back.
 fn evaluate_input(
     input: &OwnedValue,
@@ -317,6 +382,35 @@ fn evaluate_input(
         QueryResult::Owned(v) => Ok(vec![v]),
         QueryResult::ManyOwned(vs) => Ok(vs),
         QueryResult::Break(label) => {
+            eprintln!("yq: error: break ${} not in label", label);
+            Ok(vec![])
+        }
+    }
+}
+
+/// Evaluate a jq expression directly on a YAML cursor.
+///
+/// This uses the generic evaluator to preserve position metadata (line/column).
+#[allow(dead_code)] // Used by parse_and_evaluate_yaml
+fn evaluate_yaml_cursor<W: AsRef<[u64]> + Clone>(
+    cursor: YamlCursor<'_, W>,
+    expr: &Expr,
+) -> Result<Vec<OwnedValue>> {
+    let result = eval_with_cursor(expr, cursor);
+
+    // Convert GenericResult to Vec<OwnedValue>
+    match result {
+        GenericResult::One(v) => Ok(vec![to_owned(&v)]),
+        GenericResult::OneCursor(c) => Ok(vec![to_owned(&c.value())]),
+        GenericResult::Many(vs) => Ok(vs.iter().map(to_owned).collect()),
+        GenericResult::None => Ok(vec![]),
+        GenericResult::Error(e) => {
+            eprintln!("yq: error: {}", e);
+            Ok(vec![])
+        }
+        GenericResult::Owned(v) => Ok(vec![v]),
+        GenericResult::ManyOwned(vs) => Ok(vs),
+        GenericResult::Break(label) => {
             eprintln!("yq: error: break ${} not in label", label);
             Ok(vec![])
         }
@@ -1078,41 +1172,68 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
                 .with_context(|| format!("failed to write to file: {}", path.display()))?;
         }
     } else {
-        // Standard path: collect inputs via OwnedValue
-        let inputs: Vec<OwnedValue> = if args.files.is_empty() {
-            // Read from stdin - use specified format or default to YAML
+        // Standard path: evaluate inputs
+        // For YAML inputs, use direct evaluation to preserve position metadata
+        // For JSON inputs, use the OwnedValue path
+
+        // Collect input sources with their bytes and formats
+        let input_sources: Vec<(Vec<u8>, InputFormat)> = if args.files.is_empty() {
             let input_bytes = read_stdin()?;
             let format = resolve_input_format(args.input_format, None);
-            parse_input(&input_bytes, format)?
+            vec![(input_bytes, format)]
         } else {
-            // Read from files, respecting input format
-            let mut values = Vec::new();
+            let mut sources = Vec::new();
             for file_path in &args.files {
                 let path = Path::new(file_path);
                 let input_bytes = read_file(path)?;
                 let format = resolve_input_format(args.input_format, Some(path));
-                values.extend(parse_input(&input_bytes, format)?);
+                sources.push((input_bytes, format));
             }
-            values
+            sources
         };
 
-        // Process each input document
-        let is_multi_doc = inputs.len() > 1;
-        for input in inputs {
-            // Add document separator in YAML mode for multi-doc
-            // yq adds --- before each document (including the first one) in multi-doc output
-            if output_config.output_format == OutputFormat::Yaml
-                && !output_config.no_doc
-                && is_multi_doc
-            {
-                writeln!(writer, "---")?;
+        // Process all inputs first to collect results, then determine multi-doc status
+        // This avoids double-parsing YAML for document counting
+        let mut all_results: Vec<Vec<Vec<OwnedValue>>> = Vec::new();
+        for (bytes, format) in &input_sources {
+            match format {
+                InputFormat::Yaml | InputFormat::Auto => {
+                    // Use direct YAML evaluation to preserve position metadata
+                    let doc_results = evaluate_yaml_direct(bytes, &program.expr)?;
+                    all_results.push(doc_results);
+                }
+                InputFormat::Json => {
+                    // Use OwnedValue path for JSON
+                    let inputs = parse_input(bytes, InputFormat::Json)?;
+                    let mut json_results = Vec::new();
+                    for input in inputs {
+                        let results = evaluate_input(&input, &program.expr, &context)?;
+                        json_results.push(results);
+                    }
+                    all_results.push(json_results);
+                }
             }
+        }
 
-            let results = evaluate_input(&input, &program.expr, &context)?;
-            for result in results {
-                last_output = Some(result.clone());
-                had_output = true;
-                output_value(&mut writer, &result, &output_config)?;
+        // Count total documents from collected results
+        let total_docs: usize = all_results.iter().map(|docs| docs.len()).sum();
+        let is_multi_doc = total_docs > 1;
+
+        // Output all results with proper separators
+        for doc_results in all_results {
+            for results in doc_results {
+                // Add document separator in YAML mode for multi-doc
+                if output_config.output_format == OutputFormat::Yaml
+                    && !output_config.no_doc
+                    && is_multi_doc
+                {
+                    writeln!(writer, "---")?;
+                }
+                for result in results {
+                    last_output = Some(result.clone());
+                    had_output = true;
+                    output_value(&mut writer, &result, &output_config)?;
+                }
             }
         }
     }
@@ -1350,5 +1471,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Tests for the generic evaluator integration
+
+    #[test]
+    fn test_parse_and_evaluate_yaml_identity() {
+        let yaml = b"name: Alice\nage: 30";
+        let expr = Expr::Identity;
+        let results = parse_and_evaluate_yaml(yaml, &expr).unwrap();
+
+        assert_eq!(results.len(), 1);
+        if let OwnedValue::Object(map) = &results[0] {
+            assert_eq!(
+                map.get("name"),
+                Some(&OwnedValue::String("Alice".to_string()))
+            );
+            assert_eq!(map.get("age"), Some(&OwnedValue::Int(30)));
+        } else {
+            panic!("expected object, got {:?}", results[0]);
+        }
+    }
+
+    #[test]
+    fn test_parse_and_evaluate_yaml_field() {
+        let yaml = b"name: Alice\nage: 30";
+        let expr = Expr::Field("name".to_string());
+        let results = parse_and_evaluate_yaml(yaml, &expr).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], OwnedValue::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_parse_and_evaluate_yaml_line_builtin() {
+        use succinctly::jq::Builtin;
+
+        let yaml = b"name: Alice\nage: 30";
+        let expr = Expr::Builtin(Builtin::Line);
+        let results = parse_and_evaluate_yaml(yaml, &expr).unwrap();
+
+        assert_eq!(results.len(), 1);
+        // The mapping starts at line 1
+        assert_eq!(results[0], OwnedValue::Int(1));
+    }
+
+    #[test]
+    fn test_parse_and_evaluate_yaml_pipe() {
+        let yaml = b"users:\n  - name: Alice\n  - name: Bob";
+        // .users | .[0] | .name
+        let expr = Expr::Pipe(vec![
+            Expr::Field("users".to_string()),
+            Expr::Index(0),
+            Expr::Field("name".to_string()),
+        ]);
+        let results = parse_and_evaluate_yaml(yaml, &expr).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], OwnedValue::String("Alice".to_string()));
     }
 }

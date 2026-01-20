@@ -361,3 +361,48 @@ Each phase is independently testable. If issues arise:
 | Date | Change |
 |------|--------|
 | 2026-01-20 | Initial plan created based on eval.rs analysis |
+| 2026-01-20 | Phase 1-7 completed: Generic evaluator infrastructure created |
+| 2026-01-20 | Phase 8: Generic evaluator wired into main CLI path |
+
+## Implementation Status
+
+### ✅ COMPLETED
+
+All phases have been implemented and validated.
+
+### Completed Phases
+- ✅ Phase 1: Added helper methods to `DocumentValue` trait (`is_bool`, `is_number`, etc.)
+- ✅ Phase 2: Added `line()` and `column()` methods to `DocumentCursor` trait
+- ✅ Phase 3: Created `to_owned<V: DocumentValue>()` function in `eval_generic.rs`
+- ✅ Phase 4: Created `GenericResult<V>` enum and `eval_single` function
+- ✅ Phase 5: Implemented 20+ builtin functions generically
+- ✅ Phase 6: `Line` and `Column` builtins use cursor position metadata
+- ✅ Phase 7: Created `evaluate_yaml_cursor` and `parse_and_evaluate_yaml` functions
+- ✅ Phase 8: Wired generic evaluator into main CLI evaluation path in `run_yq()`
+- ✅ Phase 9: Performance validated with benchmarks
+
+### Key Files Created/Modified
+- `src/jq/eval_generic.rs` - New module with generic evaluator (~750 lines)
+- `src/jq/document.rs` - Added helper methods and position methods
+- `src/yaml/light.rs` - Implemented `line()`/`column()` for `YamlCursor`
+- `src/bin/succinctly/yq_runner.rs` - Added YAML evaluation entry points and wired into main path
+
+### Test Coverage
+- 16 tests in `eval_generic.rs` (8 JSON, 8 YAML)
+- 4 new tests in `yq_runner.rs` for generic evaluator integration
+- 32 yq CLI tests pass
+- All 915+ library tests pass
+
+### Performance Results (Apple M1 Max)
+
+| Size | succinctly | system yq | Speedup |
+|------|------------|-----------|---------|
+| 10KB | 4.27 ms (2.29 MiB/s) | 8.61 ms (1.14 MiB/s) | **2.0x** |
+| 100KB | 5.43 ms (16.95 MiB/s) | 20.02 ms (4.60 MiB/s) | **3.7x** |
+| 1MB | 14.93 ms (61.79 MiB/s) | 118.92 ms (7.76 MiB/s) | **8.0x** |
+
+### Success Metrics Achieved
+1. ✅ **Correctness**: All 915+ tests pass
+2. ✅ **Metadata**: `line`/`column` builtins now work with YAML cursor metadata
+3. ✅ **Performance**: 2-8x faster than system yq (exceeds 1.5x target)
+4. ✅ **Code quality**: Unified evaluation path with generic DocumentValue trait

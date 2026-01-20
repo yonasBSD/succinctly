@@ -75,21 +75,25 @@ pub struct EvalError {
 }
 
 impl EvalError {
-    fn new(message: impl Into<String>) -> Self {
+    /// Create a new evaluation error with a message.
+    pub fn new(message: impl Into<String>) -> Self {
         EvalError {
             message: message.into(),
         }
     }
 
-    fn type_error(expected: &str, got: &str) -> Self {
+    /// Create a type error.
+    pub fn type_error(expected: &str, got: &str) -> Self {
         EvalError::new(format!("expected {}, got {}", expected, got))
     }
 
-    fn field_not_found(name: &str) -> Self {
+    /// Create a field not found error.
+    pub fn field_not_found(name: &str) -> Self {
         EvalError::new(format!("field '{}' not found", name))
     }
 
-    fn index_out_of_bounds(index: i64, len: usize) -> Self {
+    /// Create an index out of bounds error.
+    pub fn index_out_of_bounds(index: i64, len: usize) -> Self {
         EvalError::new(format!("index {} out of bounds (length {})", index, len))
     }
 }

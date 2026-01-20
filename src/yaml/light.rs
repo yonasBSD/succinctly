@@ -3608,6 +3608,16 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
     fn text_position(&self) -> Option<usize> {
         YamlCursor::text_position(self)
     }
+
+    #[inline]
+    fn line(&self) -> usize {
+        YamlCursor::line(self)
+    }
+
+    #[inline]
+    fn column(&self) -> usize {
+        YamlCursor::column(self)
+    }
 }
 
 impl<'a, W: AsRef<[u64]> + Clone> DocumentValue for YamlValue<'a, W> {
