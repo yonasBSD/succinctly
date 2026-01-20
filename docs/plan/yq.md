@@ -12,7 +12,7 @@ This document outlines the plan to add a `yq` subcommand to succinctly for query
 | **4** | Multi-document streams | ✅ Mostly complete |
 | **5** | YAML-specific query extensions | 🔄 Partial |
 | **6** | yq-specific operators | 🔜 In scope |
-| **7** | Date/time operators | 🔜 In scope |
+| **7** | Date/time operators | 🔄 Partial |
 | **8** | Additional format encoders | 🔜 In scope |
 
 ### Performance (Apple M1 Max)
@@ -271,7 +271,7 @@ These operators use Go's time format strings (not POSIX strftime).
 
 | Operator | Description | Priority | Status |
 |----------|-------------|----------|--------|
-| `now` | Current timestamp (RFC3339) | High | ❌ |
+| `now` | Current Unix timestamp (float) | High | ✅ |
 | `strftime(fmt)` | Format timestamp as string | High | ❌ |
 | `strptime(fmt)` | Parse string to timestamp | High | ❌ |
 | `from_unix` | Convert Unix epoch to datetime | Medium | ❌ |
@@ -281,9 +281,9 @@ These operators use Go's time format strings (not POSIX strftime).
 
 #### Operator Details
 
-**`now`** - Current timestamp in RFC3339 format
+**`now`** - Current Unix timestamp as float (jq-compatible)
 ```bash
-now  # → "2024-01-20T15:04:05Z"
+now  # → 1705766400.123456 (seconds since Unix epoch)
 .timestamp = now
 ```
 
