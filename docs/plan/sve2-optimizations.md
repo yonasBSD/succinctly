@@ -1,5 +1,7 @@
 # SVE2 Optimization Plan for Succinctly
 
+**Status**: P1 (DSV BDEP) implemented - pending CI validation on SVE2 hardware
+
 ## Executive Summary
 
 This document analyzes all current x86 and ARM NEON optimizations in the Succinctly codebase and plans SVE2 equivalents for ARM CPUs that support it (Azure Cobalt 100/Neoverse N2, AWS Graviton 3+, etc.).
@@ -89,34 +91,50 @@ From [Rust Project Goals](https://rust-lang.github.io/rust-project-goals/2025h2/
 
 ## Proposed SVE2 Optimizations
 
-### Priority 1: DSV Quote Masking with BDEP (High Impact)
+### Priority 1: DSV Quote Masking with BDEP (High Impact) ✅ IMPLEMENTED
 
 **Current bottleneck**: DSV parsing uses `prefix_xor` on ARM, which is ~10x slower than x86 BMI2.
 
 **SVE2 solution**: Use `BDEP` instruction for quote state masking.
 
-```rust
-// Current ARM approach (slow)
-fn prefix_xor(mut y: u64) -> u64 {
-    y ^= y << 1;
-    y ^= y << 2;
-    // ... 6 operations
-}
+**Implementation** (completed 2026-01-21):
+- [src/util/simd/sve2.rs](../../src/util/simd/sve2.rs) - BDEP/BEXT wrappers using inline assembly
+- [src/dsv/simd/sve2.rs](../../src/dsv/simd/sve2.rs) - DSV indexing with SVE2 BDEP
+- [src/dsv/simd/mod.rs](../../src/dsv/simd/mod.rs) - Runtime dispatch (SVE2 > NEON)
 
-// SVE2 approach (fast)
+```rust
+// SVE2 BDEP implementation using inline assembly
 #[target_feature(enable = "sve2-bitperm")]
-unsafe fn toggle64_sve2(carry: u64, quote_mask: u64) -> (u64, u64) {
-    // SVE2 BDEP equivalent to x86 PDEP
-    // Operates on vector lanes, need to extract scalar result
-    // ...
+pub unsafe fn bdep_u64(data: u64, mask: u64) -> u64 {
+    let result: u64;
+    asm!(
+        "fmov d0, {data}",
+        "fmov d1, {mask}",
+        "bdep z0.d, z0.d, z1.d",
+        "fmov {result}, d0",
+        data = in(reg) data,
+        mask = in(reg) mask,
+        result = out(reg) result,
+        options(pure, nomem, nostack)
+    );
+    result
 }
 ```
 
-**Files to modify**:
-- `src/dsv/simd/mod.rs` - Add SVE2 dispatch
-- `src/dsv/simd/sve2.rs` - New file with BDEP implementation
+**Runtime dispatch**:
+```rust
+#[cfg(all(target_arch = "aarch64", feature = "std"))]
+pub fn build_index_simd(text: &[u8], config: &DsvConfig) -> DsvIndex {
+    if is_aarch64_feature_detected!("sve2-bitperm") {
+        return sve2::build_index_simd(text, config);
+    }
+    neon::build_index_simd(text, config)
+}
+```
 
 **Expected improvement**: 5-10x for DSV parsing on SVE2-capable ARM
+
+**Status**: Pending CI validation on GitHub Actions ARM runners (Azure Cobalt 100)
 
 ### Priority 2: Popcount with SVE2 CNT
 
