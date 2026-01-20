@@ -432,6 +432,12 @@ fn eval_builtin<V: DocumentValue>(
             let column = cursor.map(|c| c.column()).unwrap_or(0);
             GenericResult::Owned(OwnedValue::Int(column as i64))
         }
+
+        Builtin::DocumentIndex => {
+            let doc_index = cursor.and_then(|c| c.document_index()).unwrap_or(0);
+            GenericResult::Owned(OwnedValue::Int(doc_index as i64))
+        }
+
         Builtin::Type => {
             let type_name = value.type_name();
             GenericResult::Owned(OwnedValue::String(type_name.to_string()))
@@ -935,5 +941,99 @@ mod tests {
         let owned = result.into_owned().unwrap();
 
         assert_eq!(owned, OwnedValue::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_yaml_document_index_single_doc() {
+        use crate::yaml::YamlIndex;
+
+        let yaml = b"name: Alice\nage: 30";
+        let index = YamlIndex::build(yaml).unwrap();
+        let cursor = index.root(yaml);
+
+        // Navigate to the actual mapping (first document)
+        let mapping_cursor = cursor
+            .first_child()
+            .expect("YAML document should have content");
+
+        // Use eval_with_cursor to preserve position metadata
+        let result = eval_with_cursor(&Expr::Builtin(Builtin::DocumentIndex), mapping_cursor);
+        let owned = result.into_owned().unwrap();
+
+        // Single document = index 0
+        assert_eq!(owned, OwnedValue::Int(0));
+    }
+
+    #[test]
+    fn test_yaml_document_index_multi_doc() {
+        use crate::yaml::YamlIndex;
+
+        let yaml = b"---\nname: Alice\n---\nname: Bob\n---\nname: Charlie";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Navigate to documents
+        let doc1 = root.first_child().expect("should have first doc");
+        let doc2 = doc1.next_sibling().expect("should have second doc");
+        let doc3 = doc2.next_sibling().expect("should have third doc");
+
+        // Test document_index for each document
+        let result1 = eval_with_cursor(&Expr::Builtin(Builtin::DocumentIndex), doc1);
+        assert_eq!(result1.into_owned().unwrap(), OwnedValue::Int(0));
+
+        let result2 = eval_with_cursor(&Expr::Builtin(Builtin::DocumentIndex), doc2);
+        assert_eq!(result2.into_owned().unwrap(), OwnedValue::Int(1));
+
+        let result3 = eval_with_cursor(&Expr::Builtin(Builtin::DocumentIndex), doc3);
+        assert_eq!(result3.into_owned().unwrap(), OwnedValue::Int(2));
+    }
+
+    #[test]
+    fn test_yaml_document_index_nested_value() {
+        use crate::yaml::YamlIndex;
+
+        // Use a simpler nested structure
+        let yaml = b"---\nname: Alice\n---\nname: Bob";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Navigate to second document
+        let doc2 = root
+            .first_child()
+            .expect("should have first doc")
+            .next_sibling()
+            .expect("should have second doc");
+
+        // Navigate into the mapping's value (the "name" key's content)
+        // doc2 contains {name: Bob}, navigate to the value
+        let name_value = doc2.first_child();
+
+        // Even from a child node, document_index returns the document's index
+        if let Some(cursor) = name_value {
+            let result = eval_with_cursor(&Expr::Builtin(Builtin::DocumentIndex), cursor);
+            assert_eq!(result.into_owned().unwrap(), OwnedValue::Int(1));
+        } else {
+            // Just test the doc directly
+            let result = eval_with_cursor(&Expr::Builtin(Builtin::DocumentIndex), doc2);
+            assert_eq!(result.into_owned().unwrap(), OwnedValue::Int(1));
+        }
+    }
+
+    #[test]
+    fn test_yaml_di_alias() {
+        // Test that 'di' is an alias for document_index
+        use crate::yaml::YamlIndex;
+
+        let yaml = b"name: Alice";
+        let index = YamlIndex::build(yaml).unwrap();
+        let cursor = index.root(yaml);
+        let mapping_cursor = cursor
+            .first_child()
+            .expect("YAML document should have content");
+
+        // Parse 'di' and verify it works the same as document_index
+        let expr = crate::jq::parse("di").unwrap();
+        let result = eval_with_cursor(&expr, mapping_cursor);
+        assert_eq!(result.into_owned().unwrap(), OwnedValue::Int(0));
     }
 }

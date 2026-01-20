@@ -1238,6 +1238,69 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
         column
     }
 
+    /// Get the 0-indexed document position in a multi-document stream.
+    ///
+    /// Returns the document index (0 for first document, 1 for second, etc.)
+    /// for multi-document YAML files. For single-document files, returns 0.
+    ///
+    /// This navigates up to find the document-level ancestor (direct child of
+    /// the implicit root sequence), then counts preceding siblings to determine
+    /// the document index.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use succinctly::yaml::YamlIndex;
+    ///
+    /// let yaml = b"---\nname: Alice\n---\nname: Bob";
+    /// let index = YamlIndex::build(yaml).unwrap();
+    /// let root = index.root(yaml);
+    ///
+    /// // Navigate to first document's content
+    /// if let Some(doc1) = root.first_child() {
+    ///     assert_eq!(doc1.document_index(), Some(0));
+    /// }
+    /// ```
+    pub fn document_index(&self) -> Option<usize> {
+        // If we're at the root (bp_pos=0), there's no document index
+        if self.bp_pos == 0 {
+            return None;
+        }
+
+        // Find the document-level ancestor (direct child of root)
+        // Navigate up until parent is root (bp_pos=0)
+        let mut doc_ancestor = *self;
+        while let Some(parent) = doc_ancestor.parent() {
+            if parent.bp_pos == 0 {
+                // doc_ancestor is now the document-level node
+                break;
+            }
+            doc_ancestor = parent;
+        }
+
+        // Count preceding siblings to get the document index
+        // Start from root's first child and count until we reach doc_ancestor
+        let root = YamlCursor::new(self.index, self.text, 0);
+        let mut current = root.first_child()?;
+        let mut index = 0;
+
+        loop {
+            if current.bp_pos == doc_ancestor.bp_pos {
+                return Some(index);
+            }
+            match current.next_sibling() {
+                Some(next) => {
+                    current = next;
+                    index += 1;
+                }
+                None => {
+                    // Shouldn't happen if doc_ancestor is valid, but safety fallback
+                    return Some(0);
+                }
+            }
+        }
+    }
+
     /// Get the style of this node.
     ///
     /// Returns the YAML style indicator:
@@ -3617,6 +3680,11 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
     #[inline]
     fn column(&self) -> usize {
         YamlCursor::column(self)
+    }
+
+    #[inline]
+    fn document_index(&self) -> Option<usize> {
+        YamlCursor::document_index(self)
     }
 }
 

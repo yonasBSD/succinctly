@@ -48,6 +48,14 @@ pub trait DocumentCursor: Sized + Copy + Clone {
     fn column(&self) -> usize {
         0
     }
+
+    /// Get the 0-indexed document position in a multi-document stream.
+    ///
+    /// Returns 0 for single-document files or the first document.
+    /// Returns None if document index tracking is not available.
+    fn document_index(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A value from a document (JSON value or YAML value).

@@ -1386,6 +1386,7 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Kind => builtin_kind(value),
         Builtin::Line => builtin_line(),
         Builtin::Column => builtin_column(),
+        Builtin::DocumentIndex => builtin_document_index(),
         Builtin::Key => {
             // Key requires path context which is handled in eval_pipe_with_context
             // If we reach here without context, return null (at root level)
@@ -5985,6 +5986,7 @@ fn substitute_var_in_builtin(
         Builtin::Key => Builtin::Key,
         Builtin::Line => Builtin::Line,
         Builtin::Column => Builtin::Column,
+        Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -10782,6 +10784,16 @@ fn builtin_column<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
     QueryResult::Owned(OwnedValue::Int(0))
 }
 
+/// `document_index` / `di` - returns the 0-indexed document position in multi-doc stream (yq)
+/// Since document context is lost during conversion to OwnedValue for JSON processing,
+/// this returns 0. The actual document index is preserved through the generic evaluator
+/// when processing YAML directly.
+fn builtin_document_index<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
+    // For JSON input or when document context is lost, return 0 (single document assumed).
+    // The generic evaluator handles this properly for YAML with cursor metadata.
+    QueryResult::Owned(OwnedValue::Int(0))
+}
+
 // ============================================================================
 // Phase 9: Variables & Definitions
 // ============================================================================
@@ -11724,6 +11736,7 @@ fn expand_func_calls_in_builtin(
         Builtin::Key => Builtin::Key,
         Builtin::Line => Builtin::Line,
         Builtin::Column => Builtin::Column,
+        Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
         // Phase 12 builtins (no args to expand)
         Builtin::Now => Builtin::Now,
@@ -12008,6 +12021,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Key => Builtin::Key,
         Builtin::Line => Builtin::Line,
         Builtin::Column => Builtin::Column,
+        Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -15965,5 +15979,53 @@ mod tests {
                 assert_eq!(keys, vec!["c", "b"]);
             }
         );
+    }
+
+    // ============================================================================
+    // document_index / di tests
+    // ============================================================================
+
+    #[test]
+    fn test_document_index_parses() {
+        // Test that document_index parses correctly
+        let expr = crate::jq::parse("document_index").unwrap();
+        assert!(matches!(
+            expr,
+            crate::jq::Expr::Builtin(crate::jq::Builtin::DocumentIndex)
+        ));
+    }
+
+    #[test]
+    fn test_di_parses() {
+        // Test that di (shorthand) parses correctly
+        let expr = crate::jq::parse("di").unwrap();
+        assert!(matches!(
+            expr,
+            crate::jq::Expr::Builtin(crate::jq::Builtin::DocumentIndex)
+        ));
+    }
+
+    #[test]
+    fn test_document_index_json_returns_zero() {
+        // For JSON input, document_index returns 0 (single document assumed)
+        query!(br#"{"name": "test"}"#, "document_index",
+            QueryResult::Owned(OwnedValue::Int(0)) => {}
+        );
+    }
+
+    #[test]
+    fn test_di_json_returns_zero() {
+        // For JSON input, di returns 0 (single document assumed)
+        query!(br#"[1, 2, 3]"#, "di",
+            QueryResult::Owned(OwnedValue::Int(0)) => {}
+        );
+    }
+
+    #[test]
+    fn test_document_index_in_select() {
+        // document_index can be used in select expressions
+        let expr = crate::jq::parse("select(document_index == 0)").unwrap();
+        // Verify it parses without error
+        assert!(matches!(expr, crate::jq::Expr::Builtin(_)));
     }
 }

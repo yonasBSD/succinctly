@@ -2755,6 +2755,16 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Column));
         }
 
+        // document_index / di - yq: return 0-indexed document position in multi-doc stream
+        if self.matches_keyword("document_index") {
+            self.consume_keyword("document_index");
+            return Ok(Some(Builtin::DocumentIndex));
+        }
+        if self.matches_keyword("di") {
+            self.consume_keyword("di");
+            return Ok(Some(Builtin::DocumentIndex));
+        }
+
         // Phase 12: Additional builtins
         if self.matches_keyword("now") {
             self.consume_keyword("now");
