@@ -438,6 +438,34 @@ fn eval_builtin<V: DocumentValue>(
             GenericResult::Owned(OwnedValue::Int(doc_index as i64))
         }
 
+        Builtin::Shuffle => {
+            #[cfg(feature = "cli")]
+            {
+                use rand::seq::SliceRandom;
+                use rand::SeedableRng;
+                use rand_chacha::ChaCha8Rng;
+
+                if let Some(elements) = value.as_array() {
+                    let mut values: Vec<OwnedValue> =
+                        elements.collect_values().iter().map(to_owned).collect();
+                    let mut rng = ChaCha8Rng::from_entropy();
+                    values.shuffle(&mut rng);
+                    GenericResult::Owned(OwnedValue::Array(values))
+                } else {
+                    GenericResult::Error(EvalError::new(format!(
+                        "shuffle requires array, got {}",
+                        value.type_name()
+                    )))
+                }
+            }
+            #[cfg(not(feature = "cli"))]
+            {
+                GenericResult::Error(EvalError::new(
+                    "shuffle requires the 'cli' feature to be enabled".to_string(),
+                ))
+            }
+        }
+
         Builtin::Type => {
             let type_name = value.type_name();
             GenericResult::Owned(OwnedValue::String(type_name.to_string()))

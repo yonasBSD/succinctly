@@ -1387,6 +1387,7 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Line => builtin_line(),
         Builtin::Column => builtin_column(),
         Builtin::DocumentIndex => builtin_document_index(),
+        Builtin::Shuffle => builtin_shuffle(value, optional),
         Builtin::Key => {
             // Key requires path context which is handled in eval_pipe_with_context
             // If we reach here without context, return null (at root level)
@@ -5987,6 +5988,7 @@ fn substitute_var_in_builtin(
         Builtin::Line => Builtin::Line,
         Builtin::Column => Builtin::Column,
         Builtin::DocumentIndex => Builtin::DocumentIndex,
+        Builtin::Shuffle => Builtin::Shuffle,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -10794,6 +10796,42 @@ fn builtin_document_index<'a, W: Clone + AsRef<[u64]>>() -> QueryResult<'a, W> {
     QueryResult::Owned(OwnedValue::Int(0))
 }
 
+/// `shuffle` - randomly shuffle array elements (yq)
+/// Uses non-cryptographic RNG for performance.
+#[cfg(feature = "cli")]
+fn builtin_shuffle<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    match value {
+        StandardJson::Array(elements) => {
+            let mut items: Vec<OwnedValue> = elements.map(|e| to_owned(&e)).collect();
+            // Use a seeded RNG for reproducibility in tests if needed,
+            // but seed from system entropy for actual randomness
+            let mut rng = ChaCha8Rng::from_entropy();
+            items.shuffle(&mut rng);
+            QueryResult::Owned(OwnedValue::Array(items))
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::type_error("array", type_name(&value))),
+    }
+}
+
+/// `shuffle` - fallback when cli feature is not enabled
+#[cfg(not(feature = "cli"))]
+fn builtin_shuffle<'a, W: Clone + AsRef<[u64]>>(
+    _value: StandardJson<'a, W>,
+    _optional: bool,
+) -> QueryResult<'a, W> {
+    QueryResult::Error(EvalError::new(
+        "shuffle requires the 'cli' feature to be enabled",
+    ))
+}
+
 // ============================================================================
 // Phase 9: Variables & Definitions
 // ============================================================================
@@ -11737,6 +11775,7 @@ fn expand_func_calls_in_builtin(
         Builtin::Line => Builtin::Line,
         Builtin::Column => Builtin::Column,
         Builtin::DocumentIndex => Builtin::DocumentIndex,
+        Builtin::Shuffle => Builtin::Shuffle,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
         // Phase 12 builtins (no args to expand)
         Builtin::Now => Builtin::Now,
@@ -12022,6 +12061,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Line => Builtin::Line,
         Builtin::Column => Builtin::Column,
         Builtin::DocumentIndex => Builtin::DocumentIndex,
+        Builtin::Shuffle => Builtin::Shuffle,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -16027,5 +16067,93 @@ mod tests {
         let expr = crate::jq::parse("select(document_index == 0)").unwrap();
         // Verify it parses without error
         assert!(matches!(expr, crate::jq::Expr::Builtin(_)));
+    }
+
+    // ============================================================================
+    // shuffle tests
+    // ============================================================================
+
+    #[test]
+    fn test_shuffle_parses() {
+        // Test that shuffle parses correctly
+        let expr = crate::jq::parse("shuffle").unwrap();
+        assert!(matches!(
+            expr,
+            crate::jq::Expr::Builtin(crate::jq::Builtin::Shuffle)
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_shuffle_returns_array_same_length() {
+        // shuffle should return an array with the same length
+        query!(br#"[1, 2, 3, 4, 5]"#, "shuffle",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 5);
+                // All original elements should be present (just reordered)
+                assert!(arr.contains(&OwnedValue::Int(1)));
+                assert!(arr.contains(&OwnedValue::Int(2)));
+                assert!(arr.contains(&OwnedValue::Int(3)));
+                assert!(arr.contains(&OwnedValue::Int(4)));
+                assert!(arr.contains(&OwnedValue::Int(5)));
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_shuffle_preserves_element_types() {
+        // shuffle should preserve element types (strings, numbers, objects)
+        query!(br#"["a", 1, true, null]"#, "shuffle",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 4);
+                assert!(arr.contains(&OwnedValue::String("a".to_string())));
+                assert!(arr.contains(&OwnedValue::Int(1)));
+                assert!(arr.contains(&OwnedValue::Bool(true)));
+                assert!(arr.contains(&OwnedValue::Null));
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_shuffle_empty_array() {
+        // shuffle of empty array should return empty array
+        query!(br#"[]"#, "shuffle",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert!(arr.is_empty());
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_shuffle_single_element() {
+        // shuffle of single element should return the same element
+        query!(br#"[42]"#, "shuffle",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![OwnedValue::Int(42)]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_shuffle_type_error_on_non_array() {
+        // shuffle requires array input
+        query!(br#""not an array""#, "shuffle",
+            QueryResult::Error(err) => {
+                let msg = format!("{}", err);
+                assert!(msg.contains("array") || msg.contains("cli"));
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_shuffle_in_pipeline() {
+        // shuffle can be used in a pipeline
+        query!(br#"[3, 1, 2]"#, "shuffle | length",
+            QueryResult::Owned(OwnedValue::Int(3)) => {}
+        );
     }
 }

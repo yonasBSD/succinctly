@@ -757,6 +757,8 @@ pub enum Builtin {
     Column,
     /// `document_index` / `di` - return the 0-indexed document position in multi-doc stream (yq)
     DocumentIndex,
+    /// `shuffle` - randomly shuffle array elements (yq)
+    Shuffle,
 
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path

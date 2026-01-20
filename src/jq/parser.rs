@@ -2765,6 +2765,12 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::DocumentIndex));
         }
 
+        // shuffle - yq: randomly shuffle array elements
+        if self.matches_keyword("shuffle") {
+            self.consume_keyword("shuffle");
+            return Ok(Some(Builtin::Shuffle));
+        }
+
         // Phase 12: Additional builtins
         if self.matches_keyword("now") {
             self.consume_keyword("now");
