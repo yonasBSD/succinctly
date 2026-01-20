@@ -17,7 +17,7 @@ use indexmap::IndexMap;
 
 use super::document::{DocumentCursor, DocumentElements, DocumentFields, DocumentValue};
 use super::eval::{eval as full_eval, EvalError, QueryResult};
-use super::expr::{Builtin, Expr, Literal};
+use super::expr::{Builtin, CompareOp, Expr, Literal};
 use super::value::OwnedValue;
 use crate::json::JsonIndex;
 
@@ -99,6 +99,53 @@ fn standard_json_to_owned<W: Clone + AsRef<[u64]>>(
                 .collect(),
         ),
         StandardJson::Error(_) => OwnedValue::Null,
+    }
+}
+
+/// Compare two OwnedValues for ordering.
+///
+/// Uses jq ordering: null < bool < number < string < array < object.
+/// Returns Some(Ordering) if values are comparable, None if not (for mixed incompatible types).
+fn compare_values(left: &OwnedValue, right: &OwnedValue) -> Option<core::cmp::Ordering> {
+    use core::cmp::Ordering;
+
+    fn type_order(v: &OwnedValue) -> u8 {
+        match v {
+            OwnedValue::Null => 0,
+            OwnedValue::Bool(_) => 1,
+            OwnedValue::Int(_) | OwnedValue::Float(_) => 2,
+            OwnedValue::String(_) => 3,
+            OwnedValue::Array(_) => 4,
+            OwnedValue::Object(_) => 5,
+        }
+    }
+
+    let left_type = type_order(left);
+    let right_type = type_order(right);
+
+    if left_type != right_type {
+        return Some(left_type.cmp(&right_type));
+    }
+
+    match (left, right) {
+        (OwnedValue::Null, OwnedValue::Null) => Some(Ordering::Equal),
+        (OwnedValue::Bool(a), OwnedValue::Bool(b)) => Some(a.cmp(b)),
+        (OwnedValue::Int(a), OwnedValue::Int(b)) => Some(a.cmp(b)),
+        (OwnedValue::Float(a), OwnedValue::Float(b)) => a.partial_cmp(b),
+        (OwnedValue::Int(a), OwnedValue::Float(b)) => (*a as f64).partial_cmp(b),
+        (OwnedValue::Float(a), OwnedValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (OwnedValue::String(a), OwnedValue::String(b)) => Some(a.cmp(b)),
+        // Arrays and objects: compare element-wise (simplified)
+        (OwnedValue::Array(a), OwnedValue::Array(b)) => {
+            for (ai, bi) in a.iter().zip(b.iter()) {
+                match compare_values(ai, bi) {
+                    Some(Ordering::Equal) => continue,
+                    other => return other,
+                }
+            }
+            Some(a.len().cmp(&b.len()))
+        }
+        _ => None,
     }
 }
 
@@ -384,6 +431,94 @@ fn eval_single<V: DocumentValue>(
 
         Expr::Builtin(builtin) => eval_builtin(builtin, value, optional, cursor),
 
+        // Comparison operations - handle locally to preserve cursor context
+        Expr::Compare { op, left, right } => {
+            // Evaluate left and right with cursor context preserved
+            let left_result = eval_single(left, value.clone(), false, cursor);
+            let right_result = eval_single(right, value, false, cursor);
+
+            // Convert results to OwnedValue for comparison
+            let left_owned = match left_result {
+                GenericResult::Owned(o) => o,
+                GenericResult::One(v) => to_owned(&v),
+                GenericResult::OneCursor(c) => to_owned(&c.value()),
+                GenericResult::Error(e) => {
+                    return if optional {
+                        GenericResult::None
+                    } else {
+                        GenericResult::Error(e)
+                    }
+                }
+                GenericResult::None => return GenericResult::None,
+                GenericResult::Many(vs) => {
+                    if let Some(first) = vs.first() {
+                        to_owned(first)
+                    } else {
+                        return GenericResult::None;
+                    }
+                }
+                GenericResult::ManyOwned(vs) => {
+                    if let Some(first) = vs.first() {
+                        first.clone()
+                    } else {
+                        return GenericResult::None;
+                    }
+                }
+                GenericResult::Break(label) => return GenericResult::Break(label),
+            };
+
+            let right_owned = match right_result {
+                GenericResult::Owned(o) => o,
+                GenericResult::One(v) => to_owned(&v),
+                GenericResult::OneCursor(c) => to_owned(&c.value()),
+                GenericResult::Error(e) => {
+                    return if optional {
+                        GenericResult::None
+                    } else {
+                        GenericResult::Error(e)
+                    }
+                }
+                GenericResult::None => return GenericResult::None,
+                GenericResult::Many(vs) => {
+                    if let Some(first) = vs.first() {
+                        to_owned(first)
+                    } else {
+                        return GenericResult::None;
+                    }
+                }
+                GenericResult::ManyOwned(vs) => {
+                    if let Some(first) = vs.first() {
+                        first.clone()
+                    } else {
+                        return GenericResult::None;
+                    }
+                }
+                GenericResult::Break(label) => return GenericResult::Break(label),
+            };
+
+            // Perform the comparison
+            let result = match op {
+                CompareOp::Eq => left_owned == right_owned,
+                CompareOp::Ne => left_owned != right_owned,
+                CompareOp::Lt => {
+                    compare_values(&left_owned, &right_owned) == Some(core::cmp::Ordering::Less)
+                }
+                CompareOp::Le => matches!(
+                    compare_values(&left_owned, &right_owned),
+                    Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
+                ),
+                CompareOp::Gt => {
+                    compare_values(&left_owned, &right_owned) == Some(core::cmp::Ordering::Greater)
+                }
+                CompareOp::Ge => matches!(
+                    compare_values(&left_owned, &right_owned),
+                    Some(core::cmp::Ordering::Greater | core::cmp::Ordering::Equal)
+                ),
+            };
+
+            GenericResult::Owned(OwnedValue::Bool(result))
+        }
+
         // Fall back to the full evaluator for complex expressions
         _ => {
             // Convert to OwnedValue, then to JSON, then evaluate with full evaluator
@@ -436,6 +571,58 @@ fn eval_builtin<V: DocumentValue>(
         Builtin::DocumentIndex => {
             let doc_index = cursor.and_then(|c| c.document_index()).unwrap_or(0);
             GenericResult::Owned(OwnedValue::Int(doc_index as i64))
+        }
+
+        Builtin::Select(cond) => {
+            // Evaluate condition with cursor context preserved
+            // This is critical for select(di == N) to work correctly
+            let cond_result = eval_single(cond, value.clone(), false, cursor);
+
+            // Helper to check if an OwnedValue is truthy
+            let is_truthy = |v: &OwnedValue| -> bool {
+                match v {
+                    OwnedValue::Bool(false) | OwnedValue::Null => false,
+                    _ => true, // All other values are truthy
+                }
+            };
+
+            match cond_result {
+                GenericResult::Owned(ref o) => {
+                    if is_truthy(o) {
+                        GenericResult::One(value)
+                    } else {
+                        GenericResult::None
+                    }
+                }
+                GenericResult::One(v) => {
+                    if is_truthy(&to_owned(&v)) {
+                        GenericResult::One(value)
+                    } else {
+                        GenericResult::None
+                    }
+                }
+                GenericResult::OneCursor(c) => {
+                    if is_truthy(&to_owned(&c.value())) {
+                        GenericResult::One(value)
+                    } else {
+                        GenericResult::None
+                    }
+                }
+                GenericResult::Error(e) => {
+                    if optional {
+                        GenericResult::None
+                    } else {
+                        GenericResult::Error(e)
+                    }
+                }
+                GenericResult::None => GenericResult::None,
+                GenericResult::Many(_) | GenericResult::ManyOwned(_) => {
+                    // Multiple results from condition - this is unusual but treat first as condition
+                    // jq behavior: select with multiple outputs uses first truthy value
+                    GenericResult::One(value)
+                }
+                GenericResult::Break(label) => GenericResult::Break(label),
+            }
         }
 
         Builtin::Shuffle => {
@@ -1151,5 +1338,74 @@ mod tests {
         let expr = crate::jq::parse("di").unwrap();
         let result = eval_with_cursor(&expr, mapping_cursor);
         assert_eq!(result.into_owned().unwrap(), OwnedValue::Int(0));
+    }
+
+    #[test]
+    fn test_yaml_select_di_eq_n() {
+        // Test that select(di == N) filters by document index correctly
+        use crate::yaml::YamlIndex;
+        use crate::yaml::YamlValue;
+
+        let yaml = b"---\na: 1\n---\nb: 2\n---\nc: 3";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Parse select(di == 1) - should match second document
+        let expr = crate::jq::parse("select(di == 1)").unwrap();
+
+        // Evaluate on each document
+        let mut results = Vec::new();
+        if let YamlValue::Sequence(mut docs) = root.value() {
+            while let Some((cursor, rest)) = docs.uncons_cursor() {
+                let result = eval_with_cursor(&expr, cursor);
+                match result {
+                    GenericResult::One(v) => results.push(to_owned(&v)),
+                    GenericResult::Owned(o) => results.push(o),
+                    GenericResult::None => {} // Filtered out
+                    _ => {}
+                }
+                docs = rest;
+            }
+        }
+
+        // Should have exactly one result (document index 1)
+        assert_eq!(results.len(), 1);
+
+        // The result should be the second document's content
+        if let OwnedValue::Object(map) = &results[0] {
+            assert!(map.contains_key("b"));
+            assert_eq!(map.get("b"), Some(&OwnedValue::Int(2)));
+        } else {
+            panic!("Expected object with 'b' key, got {:?}", results[0]);
+        }
+    }
+
+    #[test]
+    fn test_yaml_select_di_comparison() {
+        // Test various select(di comparison) operations
+        use crate::yaml::YamlIndex;
+        use crate::yaml::YamlValue;
+
+        let yaml = b"---\na: 1\n---\nb: 2\n---\nc: 3";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Test select(di > 0) - should match documents 1 and 2
+        let expr = crate::jq::parse("select(di > 0)").unwrap();
+
+        let mut count = 0;
+        if let YamlValue::Sequence(mut docs) = root.value() {
+            while let Some((cursor, rest)) = docs.uncons_cursor() {
+                let result = eval_with_cursor(&expr, cursor);
+                match result {
+                    GenericResult::One(_) | GenericResult::Owned(_) => count += 1,
+                    _ => {}
+                }
+                docs = rest;
+            }
+        }
+
+        // Should match 2 documents (index 1 and 2)
+        assert_eq!(count, 2);
     }
 }

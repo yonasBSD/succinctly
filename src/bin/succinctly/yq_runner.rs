@@ -360,7 +360,10 @@ fn evaluate_yaml_direct_filtered(
 
                 if should_eval {
                     let results = evaluate_yaml_cursor(cursor, expr)?;
-                    doc_results.push(results);
+                    // Only include documents that have results (select may filter them out)
+                    if !results.is_empty() {
+                        doc_results.push(results);
+                    }
                 }
 
                 local_idx += 1;

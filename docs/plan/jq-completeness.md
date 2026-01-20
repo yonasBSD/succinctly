@@ -365,3 +365,4 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-20 | Added `-R`/`--raw-input` CLI option for yq (✅ complete)|
 | 2026-01-20 | Added `--doc N` CLI option for yq document selection (✅ complete)|
 | 2026-01-20 | Added `split_doc` yq operator for outputting results as separate documents (✅ complete)|
+| 2026-01-20 | Fixed `select(di == N)` to work correctly - added Select and Compare to generic evaluator (✅ complete)|
