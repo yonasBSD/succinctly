@@ -13,7 +13,7 @@ Succinctly provides space-efficient data structures with fast rank and select op
 
 - **Bitvector with O(1) rank and O(log n) select** - Poppy-style 3-level directory with ~3% space overhead
 - **Balanced parentheses for tree navigation** - RangeMin structure with O(1) operations and ~6% overhead
-- **JSON semi-indexing with SIMD acceleration** - Up to 950 MiB/s throughput with table-driven PFSM parser
+- **JSON semi-indexing with SIMD acceleration** - Up to 950 MiB/s throughput on x86_64 (AMD Zen 4) with table-driven PFSM parser
 - **jq-style query expressions** - Navigate JSON without full parsing
 - **`no_std` compatible** - Works in embedded and WASM environments
 - **Cross-platform SIMD** - Runtime detection for AVX2, AVX-512, SSE4.2, and ARM NEON

@@ -82,13 +82,13 @@ use succinctly::jq::{parse, eval};
 
 ### Core Data Structures
 
-| Structure         | Description                            | Performance   |
-|-------------------|----------------------------------------|---------------|
-| **BitVec**        | O(1) rank, O(log n) select             | ~3-4% overhead|
-| **BalancedParens**| Succinct tree navigation               | ~6% overhead  |
-| **JsonIndex**     | JSON semi-indexing with PFSM parser    | ~950 MiB/s    |
-| **YamlIndex**     | YAML semi-indexing with oracle parser  | ~250-400 MiB/s|
-| **DsvIndex**      | DSV semi-indexing with lightweight rank| 11-169 MiB/s (CLI), 85-1676 MiB/s (API)|
+| Structure         | Description                            | Performance (x86_64 Zen 4) |
+|-------------------|----------------------------------------|----------------------------|
+| **BitVec**        | O(1) rank, O(log n) select             | ~3-4% overhead             |
+| **BalancedParens**| Succinct tree navigation               | ~6% overhead               |
+| **JsonIndex**     | JSON semi-indexing with PFSM parser    | ~950 MiB/s                 |
+| **YamlIndex**     | YAML semi-indexing with oracle parser  | ~250-400 MiB/s             |
+| **DsvIndex**      | DSV semi-indexing with lightweight rank| 85-1676 MiB/s (API)        |
 
 ### jq Format Functions
 
