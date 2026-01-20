@@ -419,7 +419,7 @@ fn eval_single<V: DocumentValue>(
 fn eval_builtin<V: DocumentValue>(
     builtin: &Builtin,
     value: V,
-    _optional: bool,
+    optional: bool,
     cursor: Option<V::Cursor>,
 ) -> GenericResult<V> {
     match builtin {
@@ -463,6 +463,88 @@ fn eval_builtin<V: DocumentValue>(
                 GenericResult::Error(EvalError::new(
                     "shuffle requires the 'cli' feature to be enabled".to_string(),
                 ))
+            }
+        }
+
+        Builtin::Pivot => {
+            if let Some(elements) = value.as_array() {
+                let items: Vec<OwnedValue> =
+                    elements.collect_values().iter().map(to_owned).collect();
+                if items.is_empty() {
+                    return GenericResult::Owned(OwnedValue::Array(vec![]));
+                }
+
+                let all_arrays = items.iter().all(|v| matches!(v, OwnedValue::Array(_)));
+                let all_objects = items.iter().all(|v| matches!(v, OwnedValue::Object(_)));
+
+                if all_arrays {
+                    // Transpose array of arrays: [[a, b], [x, y]] → [[a, x], [b, y]]
+                    let max_len = items
+                        .iter()
+                        .filter_map(|v| {
+                            if let OwnedValue::Array(arr) = v {
+                                Some(arr.len())
+                            } else {
+                                None
+                            }
+                        })
+                        .max()
+                        .unwrap_or(0);
+
+                    if max_len == 0 {
+                        return GenericResult::Owned(OwnedValue::Array(vec![]));
+                    }
+
+                    let mut result = Vec::with_capacity(max_len);
+                    for col_idx in 0..max_len {
+                        let mut column = Vec::with_capacity(items.len());
+                        for item in &items {
+                            if let OwnedValue::Array(arr) = item {
+                                column.push(arr.get(col_idx).cloned().unwrap_or(OwnedValue::Null));
+                            } else {
+                                column.push(OwnedValue::Null);
+                            }
+                        }
+                        result.push(OwnedValue::Array(column));
+                    }
+                    GenericResult::Owned(OwnedValue::Array(result))
+                } else if all_objects {
+                    // Transpose array of objects: [{a: 1}, {a: 2, b: 3}] → {a: [1, 2], b: [null, 3]}
+                    let mut all_keys: Vec<String> = Vec::new();
+                    for item in &items {
+                        if let OwnedValue::Object(obj) = item {
+                            for key in obj.keys() {
+                                if !all_keys.contains(key) {
+                                    all_keys.push(key.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    let mut result_obj = IndexMap::new();
+                    for key in &all_keys {
+                        let mut values = Vec::with_capacity(items.len());
+                        for item in &items {
+                            if let OwnedValue::Object(obj) = item {
+                                values.push(obj.get(key).cloned().unwrap_or(OwnedValue::Null));
+                            } else {
+                                values.push(OwnedValue::Null);
+                            }
+                        }
+                        result_obj.insert(key.clone(), OwnedValue::Array(values));
+                    }
+                    GenericResult::Owned(OwnedValue::Object(result_obj))
+                } else if optional {
+                    GenericResult::None
+                } else {
+                    GenericResult::Error(EvalError::new(
+                        "pivot requires array of arrays or array of objects".to_string(),
+                    ))
+                }
+            } else if optional {
+                GenericResult::None
+            } else {
+                GenericResult::Error(EvalError::type_error("array", value.type_name()))
             }
         }
 

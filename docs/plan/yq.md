@@ -195,7 +195,7 @@ These operators extend jq compatibility with yq-specific functionality commonly 
 |----------|-------------|----------|--------|
 | `omit(keys)` | Remove keys from object/indices from array | High | ✅ |
 | `shuffle` | Randomize array order | Medium | ✅ |
-| `pivot` | Transpose arrays/objects (SQL-style) | Medium | ❌ |
+| `pivot` | Transpose arrays/objects (SQL-style) | Medium | ✅ |
 | `document_index` / `di` | Get 0-indexed document position | High | ✅ |
 | `split_doc` | Split into multiple YAML documents | Low | ❌ |
 | `load(file)` | Load external YAML file | Low | ❌ |

@@ -1388,6 +1388,7 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::Column => builtin_column(),
         Builtin::DocumentIndex => builtin_document_index(),
         Builtin::Shuffle => builtin_shuffle(value, optional),
+        Builtin::Pivot => builtin_pivot(value, optional),
         Builtin::Key => {
             // Key requires path context which is handled in eval_pipe_with_context
             // If we reach here without context, return null (at root level)
@@ -5989,6 +5990,7 @@ fn substitute_var_in_builtin(
         Builtin::Column => Builtin::Column,
         Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Shuffle => Builtin::Shuffle,
+        Builtin::Pivot => Builtin::Pivot,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -10832,6 +10834,124 @@ fn builtin_shuffle<'a, W: Clone + AsRef<[u64]>>(
     ))
 }
 
+/// `pivot` - transpose arrays/objects (yq)
+///
+/// For array of arrays: transposes rows/columns
+///   [[a, b], [x, y]] | pivot  → [[a, x], [b, y]]
+///
+/// For array of objects: collects values by key
+///   [{name: "Alice", age: 30}, {name: "Bob", age: 25}] | pivot
+///   → {name: ["Alice", "Bob"], age: [30, 25]}
+///
+/// Handles missing keys with null padding.
+fn builtin_pivot<'a, W: Clone + AsRef<[u64]>>(
+    value: StandardJson<'a, W>,
+    optional: bool,
+) -> QueryResult<'a, W> {
+    match value {
+        StandardJson::Array(elements) => {
+            let items: Vec<OwnedValue> = elements.map(|e| to_owned(&e)).collect();
+
+            if items.is_empty() {
+                // Empty array pivots to empty array
+                return QueryResult::Owned(OwnedValue::Array(vec![]));
+            }
+
+            // Check if all elements are arrays (array-of-arrays case)
+            let all_arrays = items.iter().all(|v| matches!(v, OwnedValue::Array(_)));
+            // Check if all elements are objects (array-of-objects case)
+            let all_objects = items.iter().all(|v| matches!(v, OwnedValue::Object(_)));
+
+            if all_arrays {
+                // Transpose array of arrays
+                pivot_arrays(&items)
+            } else if all_objects {
+                // Transpose array of objects
+                pivot_objects(&items)
+            } else {
+                // Mixed or unsupported types
+                if optional {
+                    QueryResult::None
+                } else {
+                    QueryResult::Error(EvalError::new(
+                        "pivot requires array of arrays or array of objects",
+                    ))
+                }
+            }
+        }
+        _ if optional => QueryResult::None,
+        _ => QueryResult::Error(EvalError::type_error("array", type_name(&value))),
+    }
+}
+
+/// Transpose array of arrays: [[a, b], [x, y]] → [[a, x], [b, y]]
+fn pivot_arrays<'a, W: Clone + AsRef<[u64]>>(items: &[OwnedValue]) -> QueryResult<'a, W> {
+    // Get the maximum row length
+    let max_len = items
+        .iter()
+        .filter_map(|v| {
+            if let OwnedValue::Array(arr) = v {
+                Some(arr.len())
+            } else {
+                None
+            }
+        })
+        .max()
+        .unwrap_or(0);
+
+    if max_len == 0 {
+        return QueryResult::Owned(OwnedValue::Array(vec![]));
+    }
+
+    // Build transposed array
+    let mut result = Vec::with_capacity(max_len);
+    for col_idx in 0..max_len {
+        let mut column = Vec::with_capacity(items.len());
+        for item in items {
+            if let OwnedValue::Array(arr) = item {
+                // Get element at col_idx, or null if missing
+                column.push(arr.get(col_idx).cloned().unwrap_or(OwnedValue::Null));
+            } else {
+                column.push(OwnedValue::Null);
+            }
+        }
+        result.push(OwnedValue::Array(column));
+    }
+
+    QueryResult::Owned(OwnedValue::Array(result))
+}
+
+/// Transpose array of objects: [{a: 1}, {a: 2, b: 3}] → {a: [1, 2], b: [null, 3]}
+fn pivot_objects<'a, W: Clone + AsRef<[u64]>>(items: &[OwnedValue]) -> QueryResult<'a, W> {
+    // Collect all unique keys in order of first appearance
+    let mut all_keys: Vec<String> = Vec::new();
+    for item in items {
+        if let OwnedValue::Object(obj) = item {
+            for key in obj.keys() {
+                if !all_keys.contains(key) {
+                    all_keys.push(key.clone());
+                }
+            }
+        }
+    }
+
+    // Build result object with arrays for each key
+    let mut result = IndexMap::new();
+    for key in &all_keys {
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            if let OwnedValue::Object(obj) = item {
+                values.push(obj.get(key).cloned().unwrap_or(OwnedValue::Null));
+            } else {
+                values.push(OwnedValue::Null);
+            }
+        }
+        result.insert(key.clone(), OwnedValue::Array(values));
+    }
+
+    QueryResult::Owned(OwnedValue::Object(result))
+}
+
 // ============================================================================
 // Phase 9: Variables & Definitions
 // ============================================================================
@@ -11776,6 +11896,7 @@ fn expand_func_calls_in_builtin(
         Builtin::Column => Builtin::Column,
         Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Shuffle => Builtin::Shuffle,
+        Builtin::Pivot => Builtin::Pivot,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
         // Phase 12 builtins (no args to expand)
         Builtin::Now => Builtin::Now,
@@ -12062,6 +12183,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::Column => Builtin::Column,
         Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Shuffle => Builtin::Shuffle,
+        Builtin::Pivot => Builtin::Pivot,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -16154,6 +16276,178 @@ mod tests {
         // shuffle can be used in a pipeline
         query!(br#"[3, 1, 2]"#, "shuffle | length",
             QueryResult::Owned(OwnedValue::Int(3)) => {}
+        );
+    }
+
+    // ============================================================================
+    // pivot tests
+    // ============================================================================
+
+    #[test]
+    fn test_pivot_parses() {
+        // Test that pivot parses correctly
+        let expr = crate::jq::parse("pivot").unwrap();
+        assert!(matches!(
+            expr,
+            crate::jq::Expr::Builtin(crate::jq::Builtin::Pivot)
+        ));
+    }
+
+    #[test]
+    fn test_pivot_array_of_arrays() {
+        // Transpose array of arrays: [[a, b], [x, y]] → [[a, x], [b, y]]
+        query!(br#"[[1, 2], [3, 4]]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], OwnedValue::Array(vec![OwnedValue::Int(1), OwnedValue::Int(3)]));
+                assert_eq!(arr[1], OwnedValue::Array(vec![OwnedValue::Int(2), OwnedValue::Int(4)]));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_array_of_arrays_3x3() {
+        // 3x3 matrix transpose
+        query!(br#"[[1, 2, 3], [4, 5, 6], [7, 8, 9]]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], OwnedValue::Array(vec![OwnedValue::Int(1), OwnedValue::Int(4), OwnedValue::Int(7)]));
+                assert_eq!(arr[1], OwnedValue::Array(vec![OwnedValue::Int(2), OwnedValue::Int(5), OwnedValue::Int(8)]));
+                assert_eq!(arr[2], OwnedValue::Array(vec![OwnedValue::Int(3), OwnedValue::Int(6), OwnedValue::Int(9)]));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_array_of_arrays_ragged() {
+        // Ragged arrays get null padding: [[1, 2], [3]] → [[1, 3], [2, null]]
+        query!(br#"[[1, 2], [3]]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], OwnedValue::Array(vec![OwnedValue::Int(1), OwnedValue::Int(3)]));
+                assert_eq!(arr[1], OwnedValue::Array(vec![OwnedValue::Int(2), OwnedValue::Null]));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_array_of_objects() {
+        // Transpose array of objects: [{a: 1}, {a: 2}] → {a: [1, 2]}
+        query!(br#"[{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.len(), 2);
+                assert_eq!(obj.get("name"), Some(&OwnedValue::Array(vec![
+                    OwnedValue::String("Alice".to_string()),
+                    OwnedValue::String("Bob".to_string())
+                ])));
+                assert_eq!(obj.get("age"), Some(&OwnedValue::Array(vec![
+                    OwnedValue::Int(30),
+                    OwnedValue::Int(25)
+                ])));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_array_of_objects_missing_keys() {
+        // Missing keys get null: [{a: 1}, {a: 2, b: 3}] → {a: [1, 2], b: [null, 3]}
+        query!(br#"[{"a": 1}, {"a": 2, "b": 3}]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert_eq!(obj.len(), 2);
+                assert_eq!(obj.get("a"), Some(&OwnedValue::Array(vec![
+                    OwnedValue::Int(1),
+                    OwnedValue::Int(2)
+                ])));
+                assert_eq!(obj.get("b"), Some(&OwnedValue::Array(vec![
+                    OwnedValue::Null,
+                    OwnedValue::Int(3)
+                ])));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_empty_array() {
+        // Empty array returns empty array
+        query!(br#"[]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert!(arr.is_empty());
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_array_of_empty_arrays() {
+        // Array of empty arrays returns empty array
+        query!(br#"[[], []]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert!(arr.is_empty());
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_array_of_empty_objects() {
+        // Array of empty objects returns empty object
+        query!(br#"[{}, {}]"#, "pivot",
+            QueryResult::Owned(OwnedValue::Object(obj)) => {
+                assert!(obj.is_empty());
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_type_error_on_non_array() {
+        // pivot requires array input
+        query!(br#""not an array""#, "pivot",
+            QueryResult::Error(err) => {
+                let msg = format!("{}", err);
+                assert!(msg.contains("array"));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_error_on_mixed_types() {
+        // pivot requires all arrays or all objects, not mixed
+        query!(br#"[[1], {"a": 2}]"#, "pivot",
+            QueryResult::Error(err) => {
+                let msg = format!("{}", err);
+                assert!(msg.contains("array of arrays") || msg.contains("array of objects"));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_error_on_scalars() {
+        // pivot requires arrays or objects, not scalar values
+        query!(br#"[1, 2, 3]"#, "pivot",
+            QueryResult::Error(err) => {
+                let msg = format!("{}", err);
+                assert!(msg.contains("array of arrays") || msg.contains("array of objects"));
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_in_pipeline() {
+        // pivot can be used in a pipeline
+        query!(br#"[[1, 2], [3, 4]]"#, "pivot | .[0]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr, vec![OwnedValue::Int(1), OwnedValue::Int(3)]);
+            }
+        );
+    }
+
+    #[test]
+    fn test_pivot_double_pivot_identity() {
+        // Double pivot should return original for square matrices
+        query!(br#"[[1, 2], [3, 4]]"#, "pivot | pivot",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], OwnedValue::Array(vec![OwnedValue::Int(1), OwnedValue::Int(2)]));
+                assert_eq!(arr[1], OwnedValue::Array(vec![OwnedValue::Int(3), OwnedValue::Int(4)]));
+            }
         );
     }
 }

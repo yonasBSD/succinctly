@@ -2771,6 +2771,12 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Shuffle));
         }
 
+        // pivot - yq: transpose arrays/objects
+        if self.matches_keyword("pivot") {
+            self.consume_keyword("pivot");
+            return Ok(Some(Builtin::Pivot));
+        }
+
         // Phase 12: Additional builtins
         if self.matches_keyword("now") {
             self.consume_keyword("now");

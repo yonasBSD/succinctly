@@ -759,6 +759,10 @@ pub enum Builtin {
     DocumentIndex,
     /// `shuffle` - randomly shuffle array elements (yq)
     Shuffle,
+    /// `pivot` - transpose arrays/objects (yq)
+    /// For array of arrays: transposes rows/columns
+    /// For array of objects: collects values by key
+    Pivot,
 
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path
