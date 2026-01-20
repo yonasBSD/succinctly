@@ -364,3 +364,4 @@ echo '{"a":1}' | succinctly jq '.a'
 | 2026-01-20 | Added `from_unix`, `to_unix`, `tz(zone)` yq date/time extensions (✅ complete)|
 | 2026-01-20 | Added `-R`/`--raw-input` CLI option for yq (✅ complete)|
 | 2026-01-20 | Added `--doc N` CLI option for yq document selection (✅ complete)|
+| 2026-01-20 | Added `split_doc` yq operator for outputting results as separate documents (✅ complete)|

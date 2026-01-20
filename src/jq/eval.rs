@@ -1389,6 +1389,11 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
         Builtin::DocumentIndex => builtin_document_index(),
         Builtin::Shuffle => builtin_shuffle(value, optional),
         Builtin::Pivot => builtin_pivot(value, optional),
+        Builtin::SplitDoc => {
+            // split_doc is identity - the output formatting (--- separators)
+            // is handled by the yq runner, not here
+            QueryResult::One(value.clone())
+        }
         Builtin::Key => {
             // Key requires path context which is handled in eval_pipe_with_context
             // If we reach here without context, return null (at root level)
@@ -6183,6 +6188,7 @@ fn substitute_var_in_builtin(
         Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Shuffle => Builtin::Shuffle,
         Builtin::Pivot => Builtin::Pivot,
+        Builtin::SplitDoc => Builtin::SplitDoc,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_var(e, var_name, replacement))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,
@@ -12446,6 +12452,7 @@ fn expand_func_calls_in_builtin(
         Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Shuffle => Builtin::Shuffle,
         Builtin::Pivot => Builtin::Pivot,
+        Builtin::SplitDoc => Builtin::SplitDoc,
         Builtin::Del(e) => Builtin::Del(Box::new(expand_func_calls(e, func_name, params, body))),
         // Phase 12 builtins (no args to expand)
         Builtin::Now => Builtin::Now,
@@ -12738,6 +12745,7 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
         Builtin::DocumentIndex => Builtin::DocumentIndex,
         Builtin::Shuffle => Builtin::Shuffle,
         Builtin::Pivot => Builtin::Pivot,
+        Builtin::SplitDoc => Builtin::SplitDoc,
         Builtin::Del(e) => Builtin::Del(Box::new(substitute_func_param(e, param, arg))),
         // Phase 12 builtins (no args to substitute)
         Builtin::Now => Builtin::Now,

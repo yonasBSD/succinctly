@@ -9,7 +9,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
 use succinctly::jq::eval_generic::{eval_with_cursor, to_owned, GenericResult};
-use succinctly::jq::{self, Expr, OwnedValue, QueryResult};
+use succinctly::jq::{self, Builtin, Expr, OwnedValue, QueryResult};
 use succinctly::json::light::StandardJson;
 use succinctly::json::JsonIndex;
 use succinctly::yaml::{YamlCursor, YamlIndex, YamlValue};
@@ -497,6 +497,32 @@ fn standard_json_to_owned<W: Clone + AsRef<[u64]>>(value: &StandardJson<'_, W>) 
                 .collect(),
         ),
         StandardJson::Error(_) => OwnedValue::Null,
+    }
+}
+
+/// State for tracking split_doc output separators.
+struct SplitDocState {
+    has_split_doc: bool,
+    is_first_output: bool,
+}
+
+impl SplitDocState {
+    fn new(has_split_doc: bool) -> Self {
+        Self {
+            has_split_doc,
+            is_first_output: true,
+        }
+    }
+
+    /// Write a separator if needed for split_doc mode. Returns Ok(()) always.
+    fn write_separator<W: Write>(&mut self, writer: &mut W, config: &OutputConfig) -> Result<()> {
+        if self.has_split_doc && config.output_format == OutputFormat::Yaml && !config.no_doc {
+            if !self.is_first_output {
+                writeln!(writer, "---")?;
+            }
+            self.is_first_output = false;
+        }
+        Ok(())
     }
 }
 
@@ -1072,6 +1098,197 @@ fn parse_variables(args: &YqCommand) -> Result<EvalContext> {
     Ok(context)
 }
 
+/// Check if an expression contains the split_doc builtin.
+/// This is used to determine if output should use per-result document separators.
+fn contains_split_doc(expr: &Expr) -> bool {
+    match expr {
+        Expr::Builtin(Builtin::SplitDoc) => true,
+        Expr::Pipe(exprs) | Expr::Comma(exprs) => exprs.iter().any(contains_split_doc),
+        Expr::Array(inner)
+        | Expr::Paren(inner)
+        | Expr::Optional(inner)
+        | Expr::FirstExpr(inner)
+        | Expr::LastExpr(inner)
+        | Expr::Repeat(inner)
+        | Expr::Error(Some(inner)) => contains_split_doc(inner),
+        Expr::Arithmetic { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::And(left, right)
+        | Expr::Or(left, right)
+        | Expr::Alternative(left, right)
+        | Expr::Assign {
+            path: left,
+            value: right,
+        }
+        | Expr::Update {
+            path: left,
+            filter: right,
+        }
+        | Expr::NthExpr {
+            n: left,
+            expr: right,
+        }
+        | Expr::Until {
+            cond: left,
+            update: right,
+        }
+        | Expr::While {
+            cond: left,
+            update: right,
+        } => contains_split_doc(left) || contains_split_doc(right),
+        Expr::CompoundAssign { path, value, .. } | Expr::AlternativeAssign { path, value } => {
+            contains_split_doc(path) || contains_split_doc(value)
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            contains_split_doc(cond)
+                || contains_split_doc(then_branch)
+                || contains_split_doc(else_branch)
+        }
+        Expr::Try { expr, catch } => {
+            contains_split_doc(expr) || catch.as_ref().is_some_and(|c| contains_split_doc(c))
+        }
+        Expr::As { expr, body, .. } | Expr::AsPattern { expr, body, .. } => {
+            contains_split_doc(expr) || contains_split_doc(body)
+        }
+        Expr::Label { body, .. } => contains_split_doc(body),
+        Expr::Limit { n, expr } => contains_split_doc(n) || contains_split_doc(expr),
+        Expr::Reduce {
+            input,
+            init,
+            update,
+            ..
+        }
+        | Expr::Range {
+            from: input,
+            to: Some(init),
+            step: Some(update),
+        } => contains_split_doc(input) || contains_split_doc(init) || contains_split_doc(update),
+        Expr::Foreach {
+            input,
+            init,
+            update,
+            extract,
+            ..
+        } => {
+            contains_split_doc(input)
+                || contains_split_doc(init)
+                || contains_split_doc(update)
+                || extract.as_ref().is_some_and(|e| contains_split_doc(e))
+        }
+        Expr::Range { from, to, step } => {
+            contains_split_doc(from)
+                || to.as_ref().is_some_and(|e| contains_split_doc(e))
+                || step.as_ref().is_some_and(|e| contains_split_doc(e))
+        }
+        Expr::Object(entries) => entries.iter().any(|entry| {
+            matches!(&entry.key, succinctly::jq::ObjectKey::Expr(e) if contains_split_doc(e))
+                || contains_split_doc(&entry.value)
+        }),
+        Expr::StringInterpolation(parts) => parts.iter().any(
+            |part| matches!(part, succinctly::jq::StringPart::Expr(e) if contains_split_doc(e)),
+        ),
+        Expr::FuncDef { body, then, .. } => contains_split_doc(body) || contains_split_doc(then),
+        Expr::FuncCall { args, .. } | Expr::NamespacedCall { args, .. } => {
+            args.iter().any(contains_split_doc)
+        }
+        Expr::Builtin(b) => match b {
+            Builtin::Has(e)
+            | Builtin::In(e)
+            | Builtin::Select(e)
+            | Builtin::Map(e)
+            | Builtin::MapValues(e)
+            | Builtin::MinBy(e)
+            | Builtin::MaxBy(e)
+            | Builtin::Ltrimstr(e)
+            | Builtin::Rtrimstr(e)
+            | Builtin::Startswith(e)
+            | Builtin::Endswith(e)
+            | Builtin::Split(e)
+            | Builtin::Join(e)
+            | Builtin::Contains(e)
+            | Builtin::Inside(e)
+            | Builtin::Nth(e)
+            | Builtin::FlattenDepth(e)
+            | Builtin::GroupBy(e)
+            | Builtin::UniqueBy(e)
+            | Builtin::SortBy(e)
+            | Builtin::WithEntries(e)
+            | Builtin::Test(e)
+            | Builtin::Indices(e)
+            | Builtin::Index(e)
+            | Builtin::Rindex(e)
+            | Builtin::GetPath(e)
+            | Builtin::RecurseF(e)
+            | Builtin::Walk(e)
+            | Builtin::IsValid(e)
+            | Builtin::Path(e)
+            | Builtin::ParentN(e)
+            | Builtin::PathsFilter(e)
+            | Builtin::DelPaths(e)
+            | Builtin::DebugMsg(e)
+            | Builtin::EnvVar(e)
+            | Builtin::BSearch(e)
+            | Builtin::ModuleMeta(e)
+            | Builtin::Pick(e)
+            | Builtin::Omit(e)
+            | Builtin::Del(e)
+            | Builtin::Strftime(e)
+            | Builtin::Strptime(e)
+            | Builtin::Match(e)
+            | Builtin::Capture(e)
+            | Builtin::Scan(e)
+            | Builtin::Splits(e)
+            | Builtin::Range(e)
+            | Builtin::CombinationsN(e)
+            | Builtin::Tz(e) => contains_split_doc(e),
+            Builtin::RecurseCond(e1, e2)
+            | Builtin::SetPath(e1, e2)
+            | Builtin::Pow(e1, e2)
+            | Builtin::Atan2(e1, e2)
+            | Builtin::Limit(e1, e2)
+            | Builtin::NthStream(e1, e2)
+            | Builtin::RangeFromTo(e1, e2)
+            | Builtin::Skip(e1, e2)
+            | Builtin::TestFlags(e1, e2)
+            | Builtin::MatchFlags(e1, e2)
+            | Builtin::CaptureFlags(e1, e2)
+            | Builtin::Sub(e1, e2)
+            | Builtin::Gsub(e1, e2)
+            | Builtin::ScanFlags(e1, e2)
+            | Builtin::SplitRegex(e1, e2)
+            | Builtin::SplitsFlags(e1, e2) => contains_split_doc(e1) || contains_split_doc(e2),
+            Builtin::FirstStream(e) | Builtin::LastStream(e) | Builtin::IsEmpty(e) => {
+                contains_split_doc(e)
+            }
+            Builtin::RangeFromToBy(e1, e2, e3)
+            | Builtin::SubFlags(e1, e2, e3)
+            | Builtin::GsubFlags(e1, e2, e3) => {
+                contains_split_doc(e1) || contains_split_doc(e2) || contains_split_doc(e3)
+            }
+            _ => false,
+        },
+        // Terminal expressions that cannot contain split_doc
+        Expr::Identity
+        | Expr::Field(_)
+        | Expr::Index(_)
+        | Expr::Slice { .. }
+        | Expr::Iterate
+        | Expr::Literal(_)
+        | Expr::RecursiveDescent
+        | Expr::Not
+        | Expr::Format(_)
+        | Expr::Var(_)
+        | Expr::Loc { .. }
+        | Expr::Env
+        | Expr::Break(_)
+        | Expr::Error(None) => false,
+    }
+}
+
 /// Main entry point for the yq command.
 pub fn run_yq(args: YqCommand) -> Result<i32> {
     // Handle --version
@@ -1116,6 +1333,9 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
     // Track last output for exit status
     let mut last_output: Option<OwnedValue> = None;
     let mut had_output = false;
+
+    // Check if expression contains split_doc - if so, each result is a separate document
+    let has_split_doc = contains_split_doc(&program.expr);
 
     // Fast path: identity filter with JSON compact output - stream directly from YAML cursor
     // This avoids building OwnedValue DOM and JSON round-trip
@@ -1209,8 +1429,10 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
         }
     } else if args.null_input {
         // Handle --null-input
+        let mut split_doc_state = SplitDocState::new(has_split_doc);
         let results = evaluate_input(&OwnedValue::Null, &program.expr, &context)?;
         for result in results {
+            split_doc_state.write_separator(&mut writer, &output_config)?;
             last_output = Some(result.clone());
             had_output = true;
             output_value(&mut writer, &result, &output_config)?;
@@ -1229,6 +1451,7 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
             content
         };
 
+        let mut split_doc_state = SplitDocState::new(has_split_doc);
         if args.slurp {
             // With --slurp, collect all lines into an array
             let lines: Vec<OwnedValue> = input_content
@@ -1238,6 +1461,7 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
             let slurped = OwnedValue::Array(lines);
             let results = evaluate_input(&slurped, &program.expr, &context)?;
             for result in results {
+                split_doc_state.write_separator(&mut writer, &output_config)?;
                 last_output = Some(result.clone());
                 had_output = true;
                 output_value(&mut writer, &result, &output_config)?;
@@ -1248,6 +1472,7 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
                 let input = OwnedValue::String(line.to_string());
                 let results = evaluate_input(&input, &program.expr, &context)?;
                 for result in results {
+                    split_doc_state.write_separator(&mut writer, &output_config)?;
                     last_output = Some(result.clone());
                     had_output = true;
                     output_value(&mut writer, &result, &output_config)?;
@@ -1294,7 +1519,9 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
         // Create slurped array and evaluate
         let slurped = OwnedValue::Array(all_docs);
         let results = evaluate_input(&slurped, &program.expr, &context)?;
+        let mut split_doc_state = SplitDocState::new(has_split_doc);
         for result in results {
+            split_doc_state.write_separator(&mut writer, &output_config)?;
             last_output = Some(result.clone());
             had_output = true;
             output_value(&mut writer, &result, &output_config)?;
@@ -1328,6 +1555,7 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
                 };
                 let is_multi_doc = matching_docs > 1;
 
+                let mut split_doc_state = SplitDocState::new(has_split_doc);
                 for (local_idx, input) in inputs.iter().enumerate() {
                     let current_doc_index = global_doc_index + local_idx;
                     // Apply --doc filter if specified
@@ -1337,19 +1565,22 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
                         }
                     }
 
-                    if output_config.output_format == OutputFormat::Yaml
+                    // For regular multi-doc (without split_doc), add --- before each doc
+                    if !has_split_doc
+                        && output_config.output_format == OutputFormat::Yaml
                         && !output_config.no_doc
                         && is_multi_doc
                     {
                         writeln!(buf_writer, "---")?;
                     }
                     let results = evaluate_input(input, &program.expr, &context)?;
+                    // Write without color for inplace editing
+                    let mut no_color_config = output_config.clone();
+                    no_color_config.use_color = false;
                     for result in results {
+                        split_doc_state.write_separator(&mut buf_writer, &no_color_config)?;
                         last_output = Some(result.clone());
                         had_output = true;
-                        // Write without color for inplace editing
-                        let mut no_color_config = output_config.clone();
-                        no_color_config.use_color = false;
                         output_value(&mut buf_writer, &result, &no_color_config)?;
                     }
                 }
@@ -1425,16 +1656,21 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
         let is_multi_doc = total_docs > 1;
 
         // Output all results with proper separators
+        // For split_doc: add --- BETWEEN each result (not before first)
+        // For regular multi-doc: add --- before each document's results
+        let mut split_doc_state = SplitDocState::new(has_split_doc);
         for doc_results in all_results {
             for results in doc_results {
-                // Add document separator in YAML mode for multi-doc
-                if output_config.output_format == OutputFormat::Yaml
+                // Add document separator in YAML mode for multi-doc (before each doc's results)
+                if !has_split_doc
+                    && output_config.output_format == OutputFormat::Yaml
                     && !output_config.no_doc
                     && is_multi_doc
                 {
                     writeln!(writer, "---")?;
                 }
                 for result in results {
+                    split_doc_state.write_separator(&mut writer, &output_config)?;
                     last_output = Some(result.clone());
                     had_output = true;
                     output_value(&mut writer, &result, &output_config)?;

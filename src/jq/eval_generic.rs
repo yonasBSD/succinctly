@@ -548,6 +548,12 @@ fn eval_builtin<V: DocumentValue>(
             }
         }
 
+        Builtin::SplitDoc => {
+            // split_doc is identity - the output formatting (--- separators)
+            // is handled by the yq runner, not here
+            GenericResult::Owned(to_owned(&value))
+        }
+
         Builtin::Type => {
             let type_name = value.type_name();
             GenericResult::Owned(OwnedValue::String(type_name.to_string()))

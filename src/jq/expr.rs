@@ -767,6 +767,10 @@ pub enum Builtin {
     /// For array of arrays: transposes rows/columns
     /// For array of objects: collects values by key
     Pivot,
+    /// `split_doc` - marks outputs as separate YAML documents (yq)
+    /// Each output from this operator should be printed with `---` separator.
+    /// Semantically returns the input unchanged, but signals document boundary.
+    SplitDoc,
 
     // Phase 11: Path manipulation
     /// `del(path)` - delete value at path

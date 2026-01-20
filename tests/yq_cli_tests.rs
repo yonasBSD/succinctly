@@ -803,3 +803,106 @@ fn test_doc_with_slurp() -> Result<()> {
     assert_eq!(output, "[{\"b\":2}]\n");
     Ok(())
 }
+
+// ============================================================================
+// split_doc tests
+// ============================================================================
+
+#[test]
+fn test_split_doc_basic_array() -> Result<()> {
+    // split_doc should add --- between results
+    let input = "[1, 2, 3]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "1\n---\n2\n---\n3\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_with_strings() -> Result<()> {
+    let input = "[\"hello\", \"world\"]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "hello\n---\nworld\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_with_objects() -> Result<()> {
+    let input = "[{name: alice}, {name: bob}]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "name: alice\n---\nname: bob\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_single_result() -> Result<()> {
+    // With only one result, no separator should be added
+    let input = "[42]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "42\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_with_no_doc_flag() -> Result<()> {
+    // --no-doc should suppress document separators
+    let input = "[1, 2, 3]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &["--no-doc"])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "1\n2\n3\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_json_output() -> Result<()> {
+    // JSON output should not get --- separators
+    let input = "[1, 2, 3]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &["-o", "json"])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "1\n2\n3\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_with_filter() -> Result<()> {
+    // split_doc can be combined with other filters
+    let input = "[1, 2, 3, 4, 5]";
+    let (output, exit_code) = run_yq_stdin(".[] | select(. > 2) | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "3\n---\n4\n---\n5\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_empty_array() -> Result<()> {
+    // Empty array should produce no output
+    let input = "[]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_nested_arrays() -> Result<()> {
+    // split_doc on nested structure
+    let input = "[[1, 2], [3, 4]]";
+    let (output, exit_code) = run_yq_stdin(".[] | split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    // Each sub-array is output as a YAML sequence
+    assert_eq!(output, "- 1\n- 2\n---\n- 3\n- 4\n");
+    Ok(())
+}
+
+#[test]
+fn test_split_doc_identity_passthrough() -> Result<()> {
+    // split_doc is semantically identity - just changes output formatting
+    let input = "42";
+    let (output, exit_code) = run_yq_stdin("split_doc", input, &[])?;
+    assert_eq!(exit_code, 0);
+    assert_eq!(output, "42\n");
+    Ok(())
+}

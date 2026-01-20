@@ -198,7 +198,7 @@ These operators extend jq compatibility with yq-specific functionality commonly 
 | `shuffle` | Randomize array order | Medium | ✅ |
 | `pivot` | Transpose arrays/objects (SQL-style) | Medium | ✅ |
 | `document_index` / `di` | Get 0-indexed document position | High | ✅ |
-| `split_doc` | Split into multiple YAML documents | Low | ❌ |
+| `split_doc` | Split into multiple YAML documents | Low | ✅ |
 | `load(file)` | Load external YAML file | Low | ❌ |
 | `eval(expr)` | Evaluate string as expression | Low | ❌ |
 
@@ -630,3 +630,4 @@ This plan depends on the YAML parser implementation phases defined in [parsing/y
 | 2026-01-20 | Added `-R`/`--raw-input` CLI option |
 | 2026-01-20 | Added `--doc N` CLI option for selecting specific document from multi-doc stream |
 | 2026-01-20 | Added `@props` format encoder for Java properties output |
+| 2026-01-20 | Added `split_doc` operator for outputting results as separate YAML documents |

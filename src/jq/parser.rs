@@ -2779,6 +2779,12 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Pivot));
         }
 
+        // split_doc - yq: mark output as separate YAML documents
+        if self.matches_keyword("split_doc") {
+            self.consume_keyword("split_doc");
+            return Ok(Some(Builtin::SplitDoc));
+        }
+
         // Phase 12: Additional builtins
         if self.matches_keyword("now") {
             self.consume_keyword("now");
