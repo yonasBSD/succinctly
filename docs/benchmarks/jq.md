@@ -137,7 +137,80 @@ Run with:
 
 ---
 
-# ARM Neoverse-V1 (AWS Graviton, aarch64)
+# ARM Neoverse-V2 (AWS Graviton 4, aarch64)
+
+**CPU**: ARM Neoverse-V2 (AWS Graviton 4)
+**OS**: Linux 6.14.0-1018-aws
+**jq version**: jq-1.8.1
+**succinctly**: Built with `--release --features cli`
+**SIMD**: NEON (128-bit), SVE2 (128-bit vectors), SVEBITPERM (BDEP/BEXT)
+
+## Summary - Comprehensive Pattern
+
+| Size    | succinctly | jq       | Speedup  |
+|---------|------------|----------|----------|
+| **1KB** | 0.87 ms    | 1.31 ms  | **1.5x** |
+| **10KB**| 1.09 ms    | 1.62 ms  | **1.5x** |
+| **100KB**| 3.13 ms   | 4.84 ms  | **1.5x** |
+| **1MB** | 22.1 ms    | 37.6 ms  | **1.7x** |
+
+## Pattern: comprehensive
+
+| Size      | jq       | succinctly   | Speedup       |
+|-----------|----------|--------------|---------------|
+| **1mb**   |   37.6ms | **  22.1ms** | **     1.7x** |
+| **100kb** |    4.8ms | **   3.1ms** | **     1.5x** |
+| **10kb**  |    1.6ms | **   1.1ms** | **     1.5x** |
+| **1kb**   |    1.3ms | **   0.9ms** | **     1.5x** |
+
+## Pattern: users
+
+| Size      | jq       | succinctly   | Speedup       |
+|-----------|----------|--------------|---------------|
+| **1mb**   |   23.2ms | **  13.4ms** | **     1.7x** |
+| **100kb** |    3.1ms | **   2.1ms** | **     1.5x** |
+| **10kb**  |    1.4ms | **   0.95ms**| **     1.5x** |
+| **1kb**   |    1.3ms | **   0.84ms**| **     1.5x** |
+
+## Pattern: nested
+
+| Size      | jq       | succinctly   | Speedup       |
+|-----------|----------|--------------|---------------|
+| **1mb**   |   20.0ms | **   7.3ms** | **     2.7x** |
+| **100kb** |    3.1ms | **   1.5ms** | **     2.1x** |
+| **10kb**  |    1.4ms | **   0.89ms**| **     1.6x** |
+| **1kb**   |    1.3ms | **   0.83ms**| **     1.6x** |
+
+## Pattern: arrays
+
+| Size      | jq       | succinctly   | Speedup       |
+|-----------|----------|--------------|---------------|
+| **1mb**   |   69.4ms | **  35.0ms** | **     2.0x** |
+| **100kb** |    8.1ms | **   4.1ms** | **     2.0x** |
+| **10kb**  |    1.8ms | **   1.1ms** | **     1.6x** |
+| **1kb**   |    1.3ms | **   0.85ms**| **     1.5x** |
+
+## Pattern: strings
+
+| Size      | jq       | succinctly   | Speedup       |
+|-----------|----------|--------------|---------------|
+| **1mb**   |   18.2ms | **   7.2ms** | **     2.5x** |
+| **100kb** |    2.9ms | **   1.4ms** | **     2.1x** |
+| **10kb**  |    1.4ms | **   0.88ms**| **     1.6x** |
+| **1kb**   |    1.3ms | **   0.83ms**| **     1.6x** |
+
+## Key Findings (ARM Neoverse-V2)
+
+- **Speedup range**: 1.5x - 2.7x faster than jq
+- **Best performance**: Nested structures (2.7x on 1MB)
+- **Consistent speedup**: 1.5-2.0x across most patterns
+- **NEON SIMD**: Effective use of ARM NEON for string scanning
+- **SVE2 support**: Platform supports SVE2 with SVEBITPERM (BDEP/BEXT for DSV parsing)
+- **vs Neoverse-V1**: ~20% faster due to improved microarchitecture
+
+---
+
+# ARM Neoverse-V1 (AWS Graviton 3, aarch64)
 
 **CPU**: ARM Neoverse-V1 (4 cores)
 **OS**: Linux 6.14.0-1018-aws
