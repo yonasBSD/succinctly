@@ -8,8 +8,8 @@ Performance comparisons between succinctly and other tools.
 
 | Benchmark | Description | Key Finding |
 |-----------|-------------|-------------|
-| [jq](jq.md) | succinctly jq vs system jq | 1.0-1.6x faster |
-| [yq](yq.md) | succinctly yq vs system yq | 1.8-8.7x faster (ARM), 16-40x faster (x86_64) |
+| [jq](jq.md) | succinctly jq vs system jq | 1.6-2.7x faster across platforms |
+| [yq](yq.md) | succinctly yq vs system yq | 1.8-8.7x faster (ARM M1), 16-40x faster (x86_64) |
 | [Rust Parsers](rust-parsers.md) | vs serde_json, sonic-rs, simd-json | Competitive with specialized parsers |
 | [Cross-Language](cross-language.md) | Multi-language parser comparison | Best-in-class for semi-indexing |
 | [DSV](dsv.md) | CSV/TSV parsing performance | 85-1676 MiB/s (API) |
@@ -40,6 +40,11 @@ cargo bench --bench yaml_bench
 ```
 
 ## Platform Notes
+
+### ARM Neoverse-V1 (AWS Graviton)
+- Uses ARM NEON SIMD (128-bit vectors)
+- Supports SVE (256-bit vectors, not yet utilized)
+- Tested: 4 cores, Linux 6.14.0-1018-aws
 
 ### Apple Silicon (M1/M2/M3)
 - Uses ARM NEON SIMD (16 bytes/iteration)

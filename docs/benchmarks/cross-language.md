@@ -16,6 +16,10 @@ Comprehensive benchmarks comparing **succinctly** against other Rust JSON parser
 - **Rust**: 1.89.0
 - **Date**: 2026-01-08
 
+### ARM Neoverse-V1 (AWS Graviton)
+- **Status**: Benchmarks pending
+- **Note**: See [jq.md](jq.md) and [yq.md](yq.md) for Neoverse-V1 end-to-end performance
+
 ## Parsers Tested
 
 | Parser         | Version | Description                                  |
