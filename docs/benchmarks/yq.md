@@ -85,17 +85,17 @@ Note: System `yq` was not installed for comparison. Results show succinctly perf
 
 | Size      | succinctly   | yq           | Speedup       |
 |-----------|--------------|--------------|---------------|
-| **10KB**  |   3.9 ms     |   7.5 ms     | **1.9x**      |
-| **100KB** |   4.7 ms     |  19.5 ms     | **4.1x**      |
-| **1MB**   |  13.3 ms     | 115.7 ms     | **8.7x**      |
+| **10KB**  |   4.2 ms     |   8.4 ms     | **2.0x**      |
+| **100KB** |   5.5 ms     |  20.6 ms     | **3.8x**      |
+| **1MB**   |  15.3 ms     | 120.7 ms     | **7.9x**      |
 
 #### Throughput Comparison (ARM)
 
 | Size      | succinctly      | yq             | Ratio         |
 |-----------|-----------------|----------------|---------------|
-| **10KB**  |   2.5 MiB/s     |   1.3 MiB/s    | **1.9x**      |
-| **100KB** |  19.5 MiB/s     |   4.7 MiB/s    | **4.1x**      |
-| **1MB**   |  69.2 MiB/s     |   8.0 MiB/s    | **8.7x**      |
+| **10KB**  |   2.3 MiB/s     |   1.2 MiB/s    | **2.0x**      |
+| **100KB** |  16.8 MiB/s     |   4.5 MiB/s    | **3.8x**      |
+| **1MB**   |  60.2 MiB/s     |   7.6 MiB/s    | **7.9x**      |
 
 ### x86_64 (AMD Ryzen 9 7950X) - yq Identity Comparison
 
@@ -366,8 +366,8 @@ $ echo 'id: "001"' | succinctly yq -o json '.'
 ### Performance Benefits
 
 `succinctly yq` offers significant performance advantages over `yq`:
-- **8.7x faster** on 1MB files (Apple M1 Max)
-- **4.1x faster** on 100KB files (Apple M1 Max)
+- **7.9x faster** on 1MB files (Apple M1 Max)
+- **3.8x faster** on 100KB files (Apple M1 Max)
 - **16x faster** on 1MB files (AMD Ryzen 9 7950X)
 - **40x faster** on 10KB files (AMD Ryzen 9 7950X)
 - **Lower memory usage** on large files
