@@ -9,7 +9,7 @@ Performance comparisons between succinctly and other tools.
 | Benchmark | Description | Key Finding |
 |-----------|-------------|-------------|
 | [jq](jq.md) | succinctly jq vs system jq | 1.5-2.7x faster across platforms |
-| [yq](yq.md) | succinctly yq vs system yq | 5-11x faster (Graviton 4), 16-40x faster (x86_64) |
+| [yq](yq.md) | succinctly yq vs system yq | 4.5-11x faster (Graviton 4), 16-40x faster (x86_64) |
 | [Rust Parsers](rust-parsers.md) | vs serde_json, sonic-rs, simd-json | Competitive with specialized parsers |
 | [Cross-Language](cross-language.md) | Multi-language parser comparison | Best-in-class for semi-indexing |
 | [DSV](dsv.md) | CSV/TSV parsing performance | 85-1676 MiB/s (API) |

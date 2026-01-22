@@ -235,6 +235,14 @@ To regenerate: `cargo bench --bench jq_comparison`
 | **100KB** |  8.8 ms (10.5 MiB/s)  | 19.9 ms  (4.6 MiB/s)  | **2.3x**   |
 | **1MB**   | 55.0 ms (16.8 MiB/s)  |117.1 ms  (7.9 MiB/s)  | **2.1x**   |
 
+### yq Query Performance (ARM Neoverse-V2)
+
+| Size      | succinctly              | yq                    | Speedup    |
+|-----------|-------------------------|-----------------------|------------|
+| **10KB**  | 0.99 ms  (9.9 MiB/s)    | 4.46 ms (2.2 MiB/s)   | **4.5x**   |
+| **100KB** | 2.20 ms (41.8 MiB/s)    | 20.1 ms (4.6 MiB/s)   | **9.1x**   |
+| **1MB**   | 13.6 ms (68.0 MiB/s)    | 154 ms (6.0 MiB/s)    | **11.4x**  |
+
 ### yq Query Performance (ARM Neoverse-V1)
 
 Note: System `yq` not installed; showing succinctly-only performance.

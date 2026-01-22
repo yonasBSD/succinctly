@@ -53,15 +53,15 @@ cargo bench --bench yq_comparison
 
 | Size      | succinctly             | yq                     | Speedup    |
 |-----------|------------------------|------------------------|------------|
-| **10KB**  | 1.04 ms (9.4 MiB/s)    |  5.3 ms (1.8 MiB/s)    | **5.1x**   |
-| **100KB** | 2.19 ms (42.0 MiB/s)   | 20.1 ms (4.6 MiB/s)    | **9.2x**   |
-| **1MB**   | 13.7 ms (67.2 MiB/s)   | 153 ms (6.0 MiB/s)     | **11.2x**  |
+| **10KB**  | 0.99 ms (9.9 MiB/s)    | 4.46 ms (2.2 MiB/s)    | **4.5x**   |
+| **100KB** | 2.20 ms (41.8 MiB/s)   | 20.1 ms (4.6 MiB/s)    | **9.1x**   |
+| **1MB**   | 13.6 ms (68.0 MiB/s)   | 154 ms (6.0 MiB/s)     | **11.4x**  |
 
 **Key metrics:**
-- ✅ NEON SIMD optimizations active
+- ✅ NEON SIMD optimizations active (block scalar + anchor parsing)
 - ✅ SVE2 with SVEBITPERM support (BDEP/BEXT for DSV)
-- ✅ **11.2x faster** than yq on 1MB files
-- ✅ 67 MiB/s throughput vs yq's 6 MiB/s
+- ✅ **11.4x faster** than yq on 1MB files
+- ✅ 68 MiB/s throughput vs yq's 6 MiB/s
 - ✅ ~20% faster than Neoverse-V1 due to improved microarchitecture
 
 ### ARM (Neoverse-V1 / Graviton 3) - succinctly yq Performance
