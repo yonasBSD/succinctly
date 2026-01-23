@@ -39,8 +39,9 @@ This document records all optimization attempts in the succinctly library, showi
 | NEON Batched Popcount  | **-25%**                 | ARM      | Rejected     |
 | NEON Movemask Batching | **0%** (no effect)       | ARM      | Rejected     |
 | NEON Prefetching       | **0%** (no effect)       | ARM      | Rejected     |
+| BP L0 Index Unrolling  | **-19%** (e2e)           | All      | Rejected     |
 
-**Total Failed**: 8 attempts
+**Total Failed**: 9 attempts
 **Worst Failure**: BMI2 PDEP (-71%, 3.4x slower)
 
 ---
@@ -230,6 +231,34 @@ Table-driven state machine with BMI2/AVX2 batch bit extraction (ported from hask
 
 **Lesson**: Parallel computation is useless if results must be consumed sequentially.
 
+### 6. BP L0 Index Unrolling - REJECTED
+
+**Hypothesis**: Unroll `word_min_excess` loop and batch all 8 byte lookups upfront for better cache locality.
+
+**Micro-benchmark results** (BP construction only):
+
+| Size | Before | After | Improvement |
+|------|--------|-------|-------------|
+| 10K  | 2.65 µs | 2.02 µs | **+24%** |
+| 100K | 25.5 µs | 19.5 µs | **+23%** |
+| 1M   | 294.8 µs | 193.7 µs | **+34%** |
+
+**End-to-end results** (JSON semi-indexing):
+
+| Size | Before | After | Regression |
+|------|--------|-------|------------|
+| 1KB  | 883 MiB/s | 714 MiB/s | **-19%** |
+| 10KB | 872 MiB/s | 647 MiB/s | **-26%** |
+| 100KB| 677 MiB/s | 580 MiB/s | **-14%** |
+
+**Why it failed**:
+1. **Instruction cache pollution**: Unrolled code is larger, evicts other hot code
+2. **Register pressure**: Explicit variables interfere with compiler's allocation
+3. **Inlining disruption**: Larger function body may prevent beneficial inlining
+4. **Compiler already optimal**: Loop-based version allowed better compiler optimizations
+
+**Lesson**: Micro-benchmark wins ≠ end-to-end improvements. Always benchmark the complete pipeline. This is the fourth optimization (after P2.6, P2.8, P3 in YAML) where micro-benchmarks showed gains but end-to-end showed regressions.
+
 ---
 
 ## Lessons Learned
@@ -275,6 +304,11 @@ Table-driven state machine with BMI2/AVX2 batch bit extraction (ported from hask
 4. **"Clever" code without profiling**
    - TZCNT/BLSR iteration: Intuitive but slower
    - BMI2 PDEP: Fancy instruction, wrong use case
+
+5. **Micro-benchmark-driven optimization**
+   - BP unrolling: +34% micro, -19% end-to-end
+   - YAML P2.6/P2.8/P3: Similar micro wins, end-to-end regressions
+   - Always test full pipeline, not isolated components
 
 ---
 
