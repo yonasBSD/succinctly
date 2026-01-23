@@ -252,6 +252,97 @@ fn build_l0_index(words: &[u64], len: usize, num_words: usize) -> (Vec<i8>, Vec<
     (l0_min_excess, l0_word_excess)
 }
 
+/// Build L1 index using NEON SIMD with prefix sums and VMINV.
+///
+/// Processes 8 words at a time using SIMD operations:
+/// 1. Load min_excess and word_excess vectors
+/// 2. Compute prefix sums of word_excess
+/// 3. Add prefix sums to min_excess
+/// 4. Find block minimum using vminvq_s16
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+fn build_l1_index_neon(
+    l0_min_excess: &[i8],
+    l0_word_excess: &[i16],
+    num_l1: usize,
+) -> (Vec<i16>, Vec<i16>) {
+    use core::arch::aarch64::*;
+
+    let mut l1_min_excess = Vec::with_capacity(num_l1);
+    let mut l1_block_excess = Vec::with_capacity(num_l1);
+
+    let num_words = l0_min_excess.len();
+
+    for block_idx in 0..num_l1 {
+        let start = block_idx * FACTOR_L1;
+        let end = (start + FACTOR_L1).min(num_words);
+        let mut block_min: i16 = 0;
+        let mut running_excess: i16 = 0;
+
+        // Process 8 words at a time with SIMD
+        let mut i = start;
+        while i + 8 <= end {
+            // SAFETY: We verified bounds above
+            unsafe {
+                // Load 8 min_excess values (i8) and widen to i16
+                let min_ptr = l0_min_excess.as_ptr().add(i);
+                let min_i8 = vld1_s8(min_ptr);
+                let min_lo = vmovl_s8(min_i8); // First 8 i8 -> 8 i16
+
+                // Load 8 word_excess values (i16)
+                let excess_ptr = l0_word_excess.as_ptr().add(i);
+                let excess = vld1q_s16(excess_ptr);
+
+                // Compute prefix sum of excess using parallel prefix pattern
+                // Step 1: Add adjacent pairs
+                let shifted1 = vextq_s16(vdupq_n_s16(0), excess, 7); // [0, e0, e1, e2, e3, e4, e5, e6]
+                let sum1 = vaddq_s16(excess, shifted1); // [e0, e0+e1, e1+e2, e2+e3, e3+e4, e4+e5, e5+e6, e6+e7]
+
+                // Step 2: Add pairs of pairs
+                let shifted2 = vextq_s16(vdupq_n_s16(0), sum1, 6); // [0, 0, s0, s1, s2, s3, s4, s5]
+                let sum2 = vaddq_s16(sum1, shifted2);
+
+                // Step 3: Add quads
+                let shifted4 = vextq_s16(vdupq_n_s16(0), sum2, 4); // [0, 0, 0, 0, s0, s1, s2, s3]
+                let prefix_sum = vaddq_s16(sum2, shifted4);
+
+                // Add running_excess offset to prefix sum
+                let offset = vdupq_n_s16(running_excess);
+                let adjusted_prefix = vaddq_s16(prefix_sum, offset);
+
+                // We need exclusive prefix sum for min calculation
+                // adjusted_min[i] = running_excess + sum(excess[0..i]) + min[i]
+                // The prefix_sum is inclusive, so we shift right and insert running_excess
+                let exclusive_prefix = vextq_s16(offset, adjusted_prefix, 7);
+
+                // Add to min_excess: min[i] + exclusive_prefix[i]
+                let adjusted_min = vaddq_s16(min_lo, exclusive_prefix);
+
+                // Find minimum using vminvq_s16
+                let chunk_min = vminvq_s16(adjusted_min);
+                block_min = block_min.min(chunk_min);
+
+                // Update running excess with sum of all 8 values
+                running_excess += vaddvq_s16(excess);
+            }
+            i += 8;
+        }
+
+        // Handle remaining words (< 8) with scalar code
+        while i < end {
+            let word_min = l0_min_excess[i] as i16;
+            let word_excess = l0_word_excess[i];
+            block_min = block_min.min(running_excess + word_min);
+            running_excess += word_excess;
+            i += 1;
+        }
+
+        l1_min_excess.push(block_min);
+        l1_block_excess.push(running_excess);
+    }
+
+    (l1_min_excess, l1_block_excess)
+}
+
 /// Fast byte-level scan to find where excess drops to 0.
 ///
 /// Given a word starting at `start_bit`, scans bytes using lookup tables
@@ -937,27 +1028,37 @@ fn build_bp_index(
     // Use NEON-optimized path on aarch64 with simd feature
     let (l0_min_excess, l0_word_excess) = build_l0_index(words, len, num_words);
 
-    // Build L1: per-32-word block statistics (same as original)
-    let mut l1_min_excess = Vec::with_capacity(num_l1);
-    let mut l1_block_excess = Vec::with_capacity(num_l1);
+    // Build L1: per-32-word block statistics
+    // Use NEON SIMD with VMINV on aarch64 for faster prefix-sum and min finding
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    let (l1_min_excess, l1_block_excess) =
+        build_l1_index_neon(&l0_min_excess, &l0_word_excess, num_l1);
 
-    for block_idx in 0..num_l1 {
-        let start = block_idx * FACTOR_L1;
-        let end = (start + FACTOR_L1).min(num_words);
+    #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
+    let (l1_min_excess, l1_block_excess) = {
+        let mut l1_min_excess = Vec::with_capacity(num_l1);
+        let mut l1_block_excess = Vec::with_capacity(num_l1);
 
-        let mut block_min: i16 = 0;
-        let mut running_excess: i16 = 0;
+        for block_idx in 0..num_l1 {
+            let start = block_idx * FACTOR_L1;
+            let end = (start + FACTOR_L1).min(num_words);
 
-        for i in start..end {
-            let word_min = l0_min_excess[i] as i16;
-            let word_excess = l0_word_excess[i];
-            block_min = block_min.min(running_excess + word_min);
-            running_excess += word_excess;
+            let mut block_min: i16 = 0;
+            let mut running_excess: i16 = 0;
+
+            for i in start..end {
+                let word_min = l0_min_excess[i] as i16;
+                let word_excess = l0_word_excess[i];
+                block_min = block_min.min(running_excess + word_min);
+                running_excess += word_excess;
+            }
+
+            l1_min_excess.push(block_min);
+            l1_block_excess.push(running_excess);
         }
 
-        l1_min_excess.push(block_min);
-        l1_block_excess.push(running_excess);
-    }
+        (l1_min_excess, l1_block_excess)
+    };
 
     // Build L2: per-1024-word block statistics (same as original)
     let mut l2_min_excess = Vec::with_capacity(num_l2);

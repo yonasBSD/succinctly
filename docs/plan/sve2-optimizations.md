@@ -453,47 +453,49 @@ Based on analysis of ARM NEON instructions for indexing and data structures (Jan
 - The unrolled scalar approach achieves similar benefit with simpler code
 
 **Remaining opportunities** (not yet implemented):
-- `vminq_i8` for RangeMin tree queries (parallel min across 16 bytes)
 - `find_open` and `enclose` could benefit from similar unrolling
 
 ---
 
-### Medium Confidence: Popcount Loop Unrolling
+### ✅ Popcount Loop Unrolling (IMPLEMENTED - January 2026)
 
-**Current State** ([src/bits/popcount.rs](../../src/bits/popcount.rs#L125-L150)):
-```rust
-// Process 64-byte chunks with NEON
-while offset + 64 <= byte_len {
-    let count = unsafe { popcount_64bytes_neon(ptr.add(offset)) };
-    total += count;
-    offset += 64;
-}
-```
+**Status**: ✅ **Implemented and deployed**
 
-**Opportunity**: Unroll to 256 bytes with interleaved accumulation for better ILP:
-```rust
-// Process 256-byte chunks with better instruction-level parallelism
-while offset + 256 <= byte_len {
-    let c0 = popcount_64bytes_neon(ptr.add(offset));
-    let c1 = popcount_64bytes_neon(ptr.add(offset + 64));
-    let c2 = popcount_64bytes_neon(ptr.add(offset + 128));
-    let c3 = popcount_64bytes_neon(ptr.add(offset + 192));
-    total += c0 + c1 + c2 + c3;
-    offset += 256;
-}
-```
+**Implementation** ([src/bits/popcount.rs](../../src/bits/popcount.rs)):
+- Process 256 bytes (4 × 64 bytes) per iteration instead of 64 bytes
+- Enables better instruction-level parallelism on superscalar CPUs
 
-**Expected Impact**: 5-8% on large bitvector operations
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
 
-**Why this might work**:
-- Proven approach (AVX-512 VPOPCNTDQ already processes 512 bits/iteration)
-- Increases instruction-level parallelism
-- Reduces loop overhead (branch predictions, counter updates)
+| Metric | Improvement |
+|--------|-------------|
+| 10M bits raw popcount | **15.5% faster** |
+| 1M bits raw popcount | **10.8% faster** |
+| 1M bits construction | **4.0% faster** |
 
-**Risk**: Low - straightforward extension of existing pattern
+**Result**: Exceeded 5-8% expectation with 10-15% improvement.
 
-**Files to modify**:
-- `src/bits/popcount.rs` - Extend `popcount_words_neon` with 256-byte unrolling
+---
+
+### ✅ NEON VMINV for L1 Index Building (IMPLEMENTED - January 2026)
+
+**Status**: ✅ **Implemented and deployed**
+
+**Implementation** ([src/trees/bp.rs](../../src/trees/bp.rs)):
+- Process 8 words at a time using NEON int16x8
+- Compute prefix sums via parallel prefix pattern (3 shuffle+add steps)
+- Use `vminvq_s16` to find block minimum in one instruction
+
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
+
+| Size | Before | After | Improvement |
+|------|--------|-------|-------------|
+| 10K nodes | 5.4 µs | 2.07 µs | **2.6x faster** |
+| 100K nodes | 52.7 µs | 19.1 µs | **2.8x faster** |
+| 1M nodes | 527 µs | 185 µs | **2.8x faster** |
+
+**Key insight**: VMINV finds minimum across 8 vector lanes in one instruction,
+combined with SIMD prefix sums for dramatic speedup.
 
 ---
 
@@ -552,7 +554,7 @@ Based on research papers and production systems, these NEON instructions have pr
 | **PMULL** (`vmull_p64`) | Prefix XOR | 25% faster DSV index (deployed) |
 | **CLZ** (scalar) | First set bit | Single cycle |
 | **EXT** (`vextq_*`) | Sliding window | Essential for text parsing |
-| **MINV/MAXV** | Range queries | Potential for RangeMin tree |
+| **MINV** (`vminvq_s16`) | L1 block minimum | ✅ **2.8x faster BP construction (deployed)** |
 
 **Instructions NOT applicable to this codebase**:
 - **SDOT/UDOT**: No quantized embedding vectors
@@ -585,5 +587,5 @@ The YAML optimization history (see [docs/parsing/yaml.md](../parsing/yaml.md)) d
 4. **SIMD only wins when**:
    - Scanning long runs (30+ bytes average)
    - Processing 3+ character types simultaneously
-   - Using specialized instructions (PMULL for prefix XOR)
-   - Compute-bound operations (popcount, not parsing)
+   - Using specialized instructions (PMULL for prefix XOR, VMINV for reductions)
+   - Compute-bound operations (popcount, index building - not parsing)

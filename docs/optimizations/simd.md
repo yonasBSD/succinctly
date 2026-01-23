@@ -238,6 +238,31 @@ unsafe fn popcount_neon(data: &[u8; 64]) -> u32 {
 }
 ```
 
+### NEON Horizontal Reductions (VMINV, VMAXV, VADDV)
+
+NEON provides horizontal reduction instructions that operate across all lanes:
+
+```rust
+use core::arch::aarch64::*;
+
+unsafe fn find_min_across_vector(values: int16x8_t) -> i16 {
+    vminvq_s16(values)  // Single instruction - finds minimum across 8 lanes
+}
+
+unsafe fn sum_across_vector(values: int16x8_t) -> i16 {
+    vaddvq_s16(values)  // Single instruction - sums all 8 lanes
+}
+```
+
+**Result in succinctly**: VMINV enables 2.8x faster BP index construction by finding
+block minimums in a single instruction instead of a scalar loop.
+
+**Key pattern**: Combine SIMD prefix sums with horizontal reduction:
+1. Load 8 values
+2. Compute prefix sums using parallel prefix (3 shuffle+add steps)
+3. Add offset to all values
+4. Use VMINV/VMAXV to find min/max in one instruction
+
 ---
 
 ## Runtime Feature Detection
@@ -591,6 +616,8 @@ isolation but cause regression when integrated due to real-world data characteri
 | SSE4.2     | `json/simd/sse42.rs`    | String matching          | 1.38x   |
 | NEON       | `json/simd/neon.rs`     | ARM JSON parsing         | 1.11x   |
 | NEON       | `dsv/simd/neon.rs`      | ARM DSV parsing          | 1.8x    |
+| NEON       | `trees/bp.rs`           | BP L1 index (VMINV)      | 2.8x    |
+| NEON       | `bits/popcount.rs`      | 256-byte unrolling       | 1.15x   |
 | NEON/AVX2  | `yaml/simd/`            | YAML unquoted structural | 3-8%    |
 | NEON       | `yaml/simd/neon.rs`     | Block scalar scanning    | 11-23%  |
 | NEON       | `yaml/simd/neon.rs`     | Anchor name scanning     | 3-6%    |

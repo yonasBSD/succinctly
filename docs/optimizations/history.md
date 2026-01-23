@@ -18,13 +18,15 @@ This document records all optimization attempts in the succinctly library, showi
 | SSE4.2 PCMPISTRI          | **1.38x**                                  | x86_64   | Deployed |
 | NEON 32-byte Processing   | **1.11x** (avg), **1.69x** (strings)       | ARM      | Deployed |
 | NEON Nibble Lookup        | **1.02-1.06x**                             | ARM      | Deployed |
+| NEON 256-byte Popcount    | **1.10-1.15x** (micro), **1.02-1.04x** (e2e) | ARM    | Deployed |
+| NEON VMINV L1 Building    | **2.8x** (BP construction)                 | ARM      | Deployed |
 | DSV Lightweight Index ARM | **1.8x** (avg), **4.3x** (wide)            | ARM      | Deployed |
 | BP Byte Lookup Tables     | **11x**                                    | All      | Deployed |
 | Hierarchical RangeMin     | **40x**                                    | All      | Deployed |
 | Cumulative Index          | **627x**                                   | All      | Deployed |
 | Dual Select Methods       | **3.1x** (seq), **1.39x** (rand)           | All      | Deployed |
 
-**Total Successful**: 11 optimizations
+**Total Successful**: 13 optimizations
 **Best Result**: Cumulative index (627x)
 
 ### Failed Optimizations
@@ -391,21 +393,54 @@ Before implementing an optimization, ask:
 
 **Key insight**: Loop unrolling and batched lookups provide better instruction scheduling and cache locality, without needing SIMD intrinsics.
 
+### ✅ NEON 256-byte Popcount Unrolling (January 2026)
+
+**Status**: Implemented and deployed in [src/bits/popcount.rs](../../src/bits/popcount.rs)
+
+**Technique**: Process 256 bytes (4 × 64 bytes) per iteration instead of 64 bytes, enabling better instruction-level parallelism on superscalar CPUs.
+
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
+
+| Metric | Before (64B) | After (256B) | Improvement |
+|--------|--------------|--------------|-------------|
+| 10M bits raw popcount | baseline | -15.5% time | **15.5% faster** |
+| 1M bits raw popcount | baseline | -10.8% time | **10.8% faster** |
+| 1M bits construction | baseline | -4.0% time | **4.0% faster** |
+| 10M bits construction | baseline | -2.3% time | **2.3% faster** |
+
+**Key insight**: The 4 independent 64-byte operations can execute in parallel on superscalar CPUs before their results are summed. This amortizes horizontal reduction overhead and improves instruction scheduling.
+
+### ✅ NEON VMINV for L1 Index Building (January 2026)
+
+**Status**: Implemented and deployed in [src/trees/bp.rs](../../src/trees/bp.rs)
+
+**Technique**: Use NEON SIMD to process 8 words at a time during L1 index building:
+1. Load min_excess values (i8 → i16) and word_excess values (i16)
+2. Compute prefix sums using parallel prefix pattern (3 shuffle+add steps)
+3. Add prefix sums to min_excess values
+4. Use `vminvq_s16` to find block minimum in one instruction
+
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
+
+| Size | Before | After | Improvement |
+|------|--------|-------|-------------|
+| 10K nodes | 5.4 µs | 2.07 µs | **2.6x faster (-62%)** |
+| 100K nodes | 52.7 µs | 19.1 µs | **2.8x faster (-64%)** |
+| 1M nodes | 527 µs | 185 µs | **2.8x faster (-65%)** |
+
+**Key insight**: The VMINV instruction finds the minimum across a vector in a single operation, eliminating the scalar min-finding loop. Combined with SIMD prefix sums, this dramatically accelerates the L1 index construction which aggregates per-word statistics into per-block statistics.
+
 ---
 
 ## Future Optimization Opportunities
 
 Based on analysis of ARM NEON instructions for indexing and data structures (January 2026):
 
-### Medium Priority: Popcount Loop Unrolling
+### ✅ ~~Medium Priority: Popcount Loop Unrolling~~ — DEPLOYED
 
-**Current state**: [src/bits/popcount.rs](../../src/bits/popcount.rs) processes 64 bytes per iteration.
+**Status**: Implemented January 2026. See [Recent Optimizations](#-neon-256-byte-popcount-unrolling-january-2026) above.
 
-**Opportunity**: Unroll to 256 bytes (4x) for better instruction-level parallelism.
-
-**Expected improvement**: 5-8% on large bitvectors
-
-**Risk**: Low - straightforward extension of existing pattern
+**Result**: 10-15% faster (exceeded 5-8% expectation)
 
 ### Low Priority: Anchor Nibble Tables
 
@@ -427,7 +462,8 @@ Based on analysis of ARM NEON instructions for indexing and data structures (Jan
 | PMULL (`vmull_p64`) | Prefix XOR | ✅ Deployed (DSV, +25%) |
 | ADDV (`vaddvq_*`) | Horizontal sum | ✅ Deployed |
 | **Unrolled lookup** | BP min excess | ✅ **Deployed (BP, +17%)** |
-| **MINV/MAXV** | Range queries | ❌ Not yet used (BP opportunity) |
+| **256B loop unroll** | Popcount ILP | ✅ **Deployed (popcount, +10-15%)** |
+| **MINV** (`vminvq_s16`) | L1 block minimum | ✅ **Deployed (BP L1 building, +2.8x)** |
 | **Vector CLZ** | First match position | ❌ Not yet used (BP opportunity) |
 
 See [docs/plan/sve2-optimizations.md](../plan/sve2-optimizations.md#future-neon-optimization-opportunities) for detailed analysis.

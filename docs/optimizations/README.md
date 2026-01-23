@@ -32,9 +32,11 @@ This directory documents optimization techniques used in the succinctly library,
 | Lightweight DSV Index | **5-9x** | Cache/Memory | [cache-memory.md](cache-memory.md) |
 | AVX-512 VPOPCNTDQ | **5.2x** | SIMD | [simd.md](simd.md) |
 | Exponential Search | **3.1x** | Access patterns | [access-patterns.md](access-patterns.md) |
+| NEON VMINV L1 Building | **2.8x** | SIMD | [simd.md](simd.md) |
 | AVX2 JSON Parser | **1.78x** | SIMD | [simd.md](simd.md) |
 | PFSM Tables | **1.77x** | State machines | [state-machines.md](state-machines.md) |
 | NEON DSV Index | **1.8x** | SIMD | [simd.md](simd.md) |
+| NEON 256B Popcount | **1.15x** | SIMD | [simd.md](simd.md) |
 | SIMD Unquoted Structural Skip | **3-8%** | SIMD | [simd.md](simd.md) |
 | Lazy line + direct indexing | **2-6%** | State machines | [state-machines.md](state-machines.md) |
 
