@@ -463,6 +463,70 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         &self.bp_to_text
     }
 
+    /// Get a reference to the bp_to_text array.
+    ///
+    /// This array maps BP open index to text byte offset. It is sorted in
+    /// non-decreasing order (multiple opens can have the same text position
+    /// when containers share position with their first child).
+    #[inline]
+    pub fn bp_to_text(&self) -> &[u32] {
+        &self.bp_to_text
+    }
+
+    /// Find the BP position for the deepest node starting at a given text position.
+    ///
+    /// Uses binary search on bp_to_text to find the last open_idx with matching
+    /// text position, then converts to BP position. Returns None if no match found.
+    pub fn find_bp_at_text_pos(&self, text_pos: usize) -> Option<usize> {
+        let bp_to_text = &self.bp_to_text;
+        if bp_to_text.is_empty() {
+            return None;
+        }
+
+        let text_pos_u32 = text_pos as u32;
+
+        // Binary search to find any matching position
+        let search_result = bp_to_text.binary_search(&text_pos_u32);
+
+        // Find the last (rightmost) index with this text position
+        let last_match_idx = match search_result {
+            Ok(idx) => {
+                // Found a match, scan right to find the last one
+                let mut last = idx;
+                while last + 1 < bp_to_text.len() && bp_to_text[last + 1] == text_pos_u32 {
+                    last += 1;
+                }
+                last
+            }
+            Err(_) => return None, // No match found
+        };
+
+        // Convert open_idx to bp_pos by finding the position where rank1 first exceeds open_idx
+        // This is equivalent to select1(open_idx) but we don't have that for BP.
+        // We binary search: find smallest bp_pos where rank1(bp_pos + 1) > open_idx
+        let bp = &self.bp;
+        let bp_len = bp.len();
+        let target_rank = last_match_idx + 1; // rank1 at the position should be this
+
+        let mut lo = 0;
+        let mut hi = bp_len;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if bp.rank1(mid + 1) < target_rank {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // lo is now the BP position where the (open_idx)-th open is
+        if lo < bp_len && bp.rank1(lo) == last_match_idx && bp.is_open(lo) {
+            Some(lo)
+        } else {
+            None
+        }
+    }
+
     /// Get the target BP position for an alias at the given BP position.
     ///
     /// Returns `None` if the position is not an alias.

@@ -71,47 +71,8 @@ fn escape_jq_string(s: &str) -> String {
     result
 }
 
-/// Convert a text position to the BP position of the node starting at that position.
-///
-/// This searches through BP opens to find the deepest one with the matching text
-/// position. YAML has more BP opens than IB bits (containers don't have IB bits),
-/// and multiple BP opens can share the same text position (e.g., root mapping and
-/// its first key both start at offset 0). We return the last (deepest) match.
-fn text_pos_to_bp_pos<W: AsRef<[u64]>>(index: &YamlIndex<W>, text_pos: usize) -> Option<usize> {
-    let bp = index.bp();
-    let bp_len = bp.len();
-
-    if bp_len == 0 {
-        return None;
-    }
-
-    // Iterate through BP positions looking for opens with matching text position.
-    // We want the LAST match (deepest node) because YAML's virtual containers
-    // share the same text position as their first child.
-    //
-    // For example, in "name: Alice":
-    // - BP[0] (root) has text_pos 0
-    // - BP[1] (mapping) has text_pos 0
-    // - BP[2] (name key) has text_pos 0 <- This is what we want
-    let mut last_match = None;
-
-    for bp_pos in 0..bp_len {
-        if bp.is_open(bp_pos) {
-            if let Some(this_text_pos) = index.bp_to_text_pos(bp_pos) {
-                if this_text_pos == text_pos {
-                    last_match = Some(bp_pos);
-                } else if this_text_pos > text_pos {
-                    // BP text positions are generally increasing (with some
-                    // exceptions for containers at the same position as children),
-                    // so once we see a larger text_pos, we can stop looking.
-                    break;
-                }
-            }
-        }
-    }
-
-    last_match
-}
+// text_pos_to_bp_pos is now implemented as YamlIndex::find_bp_at_text_pos
+// which uses binary search on bp_to_text for O(log n) lookup.
 
 /// Find the BP position of the structural node containing a byte offset.
 fn find_node_at_offset<W: AsRef<[u64]>>(
@@ -143,8 +104,8 @@ fn find_node_at_offset<W: AsRef<[u64]>>(
         return None;
     };
 
-    // Find the BP position for this text position
-    text_pos_to_bp_pos(index, struct_text_pos)
+    // Find the BP position for this text position using binary search
+    index.find_bp_at_text_pos(struct_text_pos)
 }
 
 /// Count siblings before target_bp in a container.
