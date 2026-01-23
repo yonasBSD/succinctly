@@ -229,7 +229,11 @@ fn build_l0_index(words: &[u64], len: usize, num_words: usize) -> (Vec<i8>, Vec<
     let mut l0_word_excess = Vec::with_capacity(num_words);
 
     // Process all full words with unrolled optimization
-    let full_words = if len % 64 == 0 { num_words } else { num_words - 1 };
+    let full_words = if len % 64 == 0 {
+        num_words
+    } else {
+        num_words - 1
+    };
 
     for &word in words.iter().take(full_words) {
         let (min_e, total_e) = word_min_excess_unrolled(word);

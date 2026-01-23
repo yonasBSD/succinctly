@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughpu
 use std::fs;
 use succinctly::dsv::{build_index, Dsv, DsvConfig, DsvRows};
 
-fn profile_dsv_parsing(c: &mut Criterion) {
+fn bench_dsv_parsing(c: &mut Criterion) {
     let sizes = vec![
         ("1mb", "data/bench/generated/dsv/strings/1mb.csv"),
         ("10mb", "data/bench/generated/dsv/strings/10mb.csv"),
@@ -63,7 +63,7 @@ fn profile_dsv_parsing(c: &mut Criterion) {
     }
 }
 
-fn profile_dsv_random_access(c: &mut Criterion) {
+fn bench_dsv_random_access(c: &mut Criterion) {
     let sizes = vec![
         ("1mb", "data/bench/generated/dsv/strings/1mb.csv"),
         ("10mb", "data/bench/generated/dsv/strings/10mb.csv"),
@@ -119,5 +119,5 @@ fn profile_dsv_random_access(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, profile_dsv_parsing, profile_dsv_random_access);
+criterion_group!(benches, bench_dsv_parsing, bench_dsv_random_access);
 criterion_main!(benches);
