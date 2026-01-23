@@ -61,7 +61,7 @@ Both parsers share optimization techniques:
 
 | Format | Platform | CPU | Throughput |
 |--------|----------|-----|------------|
-| JSON | x86_64 PFSM | AMD Ryzen 9 7950X (Zen 4) | ~950 MiB/s |
+| JSON | x86_64 PFSM | AMD Ryzen 9 7950X (Zen 4) | ~880 MiB/s |
 | JSON | ARM NEON | Apple M1 Max | ~570 MiB/s |
 | DSV | x86_64 BMI2 | AMD Ryzen 9 7950X (Zen 4) | 1.3-3.7 GB/s |
 | DSV | ARM NEON | Apple M1 Max | ~800 MiB/s |
