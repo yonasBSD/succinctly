@@ -141,7 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **JSON Semi-Indexing**
   - Interest Bits (IB) and Balanced Parentheses (BP) encoding
-  - Table-driven PFSM parser achieving 950 MiB/s throughput on x86_64 (AMD Zen 4)
+  - Table-driven PFSM parser achieving 880 MiB/s throughput on x86_64 (AMD Zen 4)
   - `JsonIndex` for building semi-indices from JSON bytes
   - `StandardJson` cursor for lazy navigation without full parsing
 
@@ -182,7 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance (x86_64 AMD Ryzen 9 7950X)
 
-- JSON semi-indexing: 950 MiB/s (PFSM), 732 MiB/s (AVX2)
+- JSON semi-indexing: 880 MiB/s (PFSM), 732 MiB/s (AVX2)
 - Rank queries: ~3 ns (O(1))
 - Select queries: ~50 ns (O(log n))
 - Popcount: 96.8 GiB/s (AVX-512), 18.5 GiB/s (scalar)

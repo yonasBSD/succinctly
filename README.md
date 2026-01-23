@@ -13,7 +13,7 @@ Succinctly provides space-efficient data structures with fast rank and select op
 
 - **Bitvector with O(1) rank and O(log n) select** - Poppy-style 3-level directory with ~3% space overhead
 - **Balanced parentheses for tree navigation** - RangeMin structure with O(1) operations and ~6% overhead
-- **JSON semi-indexing with SIMD acceleration** - Up to 950 MiB/s throughput on x86_64 (AMD Zen 4) with table-driven PFSM parser
+- **JSON semi-indexing with SIMD acceleration** - Up to 880 MiB/s throughput on x86_64 (AMD Zen 4) with table-driven PFSM parser
 - **YAML semi-indexing** - Complete YAML 1.2 parser with anchor/alias resolution (~250-400 MiB/s)
 - **DSV/CSV semi-indexing** - High-performance CSV/TSV parsing (85-1676 MiB/s) with BMI2 acceleration
 - **jq/yq-style query expressions** - Navigate JSON and YAML without full parsing
