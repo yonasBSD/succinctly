@@ -328,6 +328,34 @@ fn bench_construction(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark construction with large data sizes (10M, 100M nodes).
+/// This tests whether L2 SIMD optimization provides benefit at scale.
+fn bench_construction_large(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bp/construction_large");
+    group.sample_size(10); // Fewer samples for large data
+
+    // 10M nodes = ~2.5MB of BP data
+    // 100M nodes = ~25MB of BP data
+    // 500M nodes = ~125MB of BP data
+    for nodes in [10_000_000usize, 100_000_000, 500_000_000] {
+        let label = if nodes >= 1_000_000_000 {
+            format!("{}G", nodes / 1_000_000_000)
+        } else {
+            format!("{}M", nodes / 1_000_000)
+        };
+
+        let (words, len) = generate_balanced_parens(nodes, 1000, 42);
+
+        group.bench_with_input(
+            BenchmarkId::new("rangemin", &label),
+            &(words, len),
+            |b, (words, len)| b.iter(|| BalancedParens::new(black_box(words.clone()), *len)),
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_navigation(c: &mut Criterion) {
     let mut group = c.benchmark_group("bp/navigation");
 
@@ -442,6 +470,7 @@ criterion_group!(
     bench_enclose,
     bench_tree_structures,
     bench_construction,
+    bench_construction_large,
     bench_navigation,
     bench_rank1,
     bench_excess,
