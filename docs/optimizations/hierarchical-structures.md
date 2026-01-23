@@ -242,6 +242,35 @@ fn find_close(&self, pos: u64) -> u64 {
 
 **Result**: 40x speedup on tree navigation.
 
+### SIMD-Accelerated Index Construction (January 2026)
+
+On ARM, the L1 index building can be accelerated using NEON SIMD:
+
+```rust
+// Process 8 words at a time
+unsafe fn build_l1_neon(l0_min: &[i8], l0_excess: &[i16]) -> (Vec<i16>, Vec<i16>) {
+    // 1. Load 8 min_excess values (i8 → i16)
+    let min_lo = vmovl_s8(vld1_s8(min_ptr));
+
+    // 2. Load 8 word_excess values
+    let excess = vld1q_s16(excess_ptr);
+
+    // 3. Compute prefix sums using parallel prefix (3 shuffle+add steps)
+    let prefix_sum = simd_prefix_sum(excess);
+
+    // 4. Add to min values
+    let adjusted = vaddq_s16(min_lo, prefix_sum);
+
+    // 5. Find minimum with VMINV (single instruction!)
+    let block_min = vminvq_s16(adjusted);
+}
+```
+
+**Result**: 2.8x faster L1 index construction on ARM (Graviton 4).
+
+The same SIMD pattern is also applied to L2 index building, providing 1-3%
+improvement at large scales (100M+ nodes) with no regression at smaller sizes.
+
 ### Prior Art
 
 - **Munro & Raman (2001)**: "Succinct Representation of Balanced Parentheses"

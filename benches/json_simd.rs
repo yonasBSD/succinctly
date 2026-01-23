@@ -158,8 +158,8 @@ fn bench_json_files(c: &mut Criterion) {
             b.iter(|| succinctly::json::simd::x86::build_semi_index_standard(black_box(bytes)))
         });
 
-        // Scalar baseline
-        group.bench_with_input(BenchmarkId::new("Scalar", name), &bytes, |b, bytes| {
+        // PFSM (table-based state machine) baseline
+        group.bench_with_input(BenchmarkId::new("PFSM", name), &bytes, |b, bytes| {
             b.iter(|| succinctly::json::standard::build_semi_index(black_box(bytes)))
         });
     }
@@ -202,7 +202,7 @@ fn bench_simple_cursor_files(c: &mut Criterion) {
             b.iter(|| succinctly::json::simd::x86::build_semi_index_simple(black_box(bytes)))
         });
 
-        // Scalar
+        // Scalar (byte-by-byte simple cursor)
         group.bench_with_input(BenchmarkId::new("Scalar", name), &bytes, |b, bytes| {
             b.iter(|| succinctly::json::simple::build_semi_index(black_box(bytes)))
         });
@@ -279,7 +279,7 @@ fn bench_pattern_comparison(c: &mut Criterion) {
             });
         }
 
-        group.bench_with_input(BenchmarkId::new("Scalar", pattern), &bytes, |b, bytes| {
+        group.bench_with_input(BenchmarkId::new("PFSM", pattern), &bytes, |b, bytes| {
             b.iter(|| succinctly::json::standard::build_semi_index(black_box(bytes)))
         });
     }
@@ -317,8 +317,8 @@ fn bench_json_files(c: &mut Criterion) {
             b.iter(|| succinctly::json::simd::neon::build_semi_index_standard(black_box(bytes)))
         });
 
-        // Scalar baseline
-        group.bench_with_input(BenchmarkId::new("Scalar", name), &bytes, |b, bytes| {
+        // PFSM (table-based state machine) baseline
+        group.bench_with_input(BenchmarkId::new("PFSM", name), &bytes, |b, bytes| {
             b.iter(|| succinctly::json::standard::build_semi_index(black_box(bytes)))
         });
 
@@ -373,7 +373,7 @@ fn bench_pattern_comparison(c: &mut Criterion) {
             b.iter(|| succinctly::json::simd::neon::build_semi_index_standard(black_box(bytes)))
         });
 
-        group.bench_with_input(BenchmarkId::new("Scalar", pattern), &bytes, |b, bytes| {
+        group.bench_with_input(BenchmarkId::new("PFSM", pattern), &bytes, |b, bytes| {
             b.iter(|| succinctly::json::standard::build_semi_index(black_box(bytes)))
         });
     }
@@ -400,7 +400,7 @@ fn bench_json_files(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(*file_size));
 
-        group.bench_with_input(BenchmarkId::new("Scalar", name), &bytes, |b, bytes| {
+        group.bench_with_input(BenchmarkId::new("PFSM", name), &bytes, |b, bytes| {
             b.iter(|| succinctly::json::standard::build_semi_index(black_box(bytes)))
         });
 

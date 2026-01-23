@@ -1,9 +1,13 @@
-/// Benchmark the default `build_semi_index` which now uses PFSM optimized.
+//! Benchmark comparing PFSM (table-based) vs true scalar implementations.
+//!
+//! Both use the standard cursor (4-state, marks value starts).
+//! - PFSM: Uses 256-entry lookup tables for state transitions
+//! - Scalar: Byte-by-byte processing with explicit state machine
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use std::fs;
 use succinctly::json::standard;
 
-fn benchmark_standard_semi_index(c: &mut Criterion) {
+fn benchmark_pfsm_vs_scalar(c: &mut Criterion) {
     let test_files = [
         ("1kb", "data/bench/generated/comprehensive/1kb.json"),
         ("10kb", "data/bench/generated/comprehensive/10kb.json"),
@@ -19,16 +23,16 @@ fn benchmark_standard_semi_index(c: &mut Criterion) {
             }
         };
 
-        let mut group = c.benchmark_group(format!("standard_cursor/{}", name));
+        let mut group = c.benchmark_group(format!("pfsm_vs_scalar/{}", name));
         group.throughput(Throughput::Bytes(json.len() as u64));
 
-        // Benchmark default implementation (now PFSM optimized)
-        group.bench_function("build_semi_index", |b| {
+        // PFSM: table-based state machine
+        group.bench_function("PFSM", |b| {
             b.iter(|| standard::build_semi_index(black_box(json)));
         });
 
-        // Benchmark scalar fallback for comparison
-        group.bench_function("build_semi_index_scalar", |b| {
+        // Scalar: byte-by-byte fallback
+        group.bench_function("Scalar", |b| {
             b.iter(|| standard::build_semi_index_scalar(black_box(json)));
         });
 
@@ -36,5 +40,5 @@ fn benchmark_standard_semi_index(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_standard_semi_index);
+criterion_group!(benches, benchmark_pfsm_vs_scalar);
 criterion_main!(benches);

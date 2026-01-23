@@ -111,6 +111,10 @@ fn popcount_words_portable(words: &[u64]) -> u32 {
 
 /// NEON-accelerated popcount for word slices.
 ///
+/// Uses 256-byte loop unrolling (4 × 64 bytes) to maximize instruction-level
+/// parallelism. The 4 independent 64-byte operations can execute in parallel
+/// on superscalar CPUs before their results are summed.
+///
 /// Note: SVE2 was tested but showed 5-10% regression on Neoverse-V2 (128-bit vectors).
 /// The per-iteration horizontal reduction (UADDV + FMOV) is more expensive than
 /// NEON's batched approach which processes 64 bytes with deferred reduction.
@@ -132,7 +136,21 @@ fn popcount_words_neon(words: &[u64]) -> u32 {
     let byte_len = words.len() * 8;
     let mut offset = 0;
 
-    // Process 64-byte chunks with NEON
+    // Process 256-byte chunks (4 × 64 bytes) for better ILP
+    // The 4 independent operations can execute in parallel on superscalar CPUs
+    while offset + 256 <= byte_len {
+        // SAFETY: We verified bounds above
+        unsafe {
+            let c0 = popcount_64bytes_neon(ptr.add(offset));
+            let c1 = popcount_64bytes_neon(ptr.add(offset + 64));
+            let c2 = popcount_64bytes_neon(ptr.add(offset + 128));
+            let c3 = popcount_64bytes_neon(ptr.add(offset + 192));
+            total += c0 + c1 + c2 + c3;
+        }
+        offset += 256;
+    }
+
+    // Process remaining 64-byte chunks
     while offset + 64 <= byte_len {
         // SAFETY: We verified bounds above
         let count = unsafe { popcount_64bytes_neon(ptr.add(offset)) };

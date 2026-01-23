@@ -1,4 +1,7 @@
-//! End-to-end benchmark: PFSM vs existing implementations across all JSON patterns
+//! Benchmark comparing PFSM (table-based) vs SIMD implementations for JSON semi-indexing.
+//!
+//! PFSM (Parallel Finite State Machine) uses lookup tables for state transitions.
+//! SIMD implementations use vectorized instructions (AVX2/NEON) for parallel processing.
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::fs;
 use std::path::PathBuf;
@@ -45,7 +48,7 @@ fn discover_json_files() -> Vec<(String, PathBuf, u64)> {
     files
 }
 
-fn bench_end_to_end(c: &mut Criterion) {
+fn bench_pfsm_vs_simd(c: &mut Criterion) {
     let files = discover_json_files();
 
     if files.is_empty() {
@@ -62,29 +65,31 @@ fn bench_end_to_end(c: &mut Criterion) {
             }
         };
 
-        let mut group = c.benchmark_group("pfsm_end_to_end");
+        let mut group = c.benchmark_group("pfsm_vs_simd");
         group.throughput(Throughput::Bytes(file_size));
 
-        // Benchmark standard scalar (uses pfsm_optimized internally)
-        group.bench_with_input(
-            BenchmarkId::new("standard_scalar", &name),
-            json,
-            |b, json| {
-                b.iter(|| succinctly::json::standard::build_semi_index(black_box(json)));
-            },
-        );
+        // Benchmark PFSM (table-based state machine)
+        group.bench_with_input(BenchmarkId::new("PFSM", &name), json, |b, json| {
+            b.iter(|| succinctly::json::standard::build_semi_index(black_box(json)));
+        });
 
-        // Benchmark AVX2 if available
+        // Benchmark AVX2 SIMD if available
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") {
-            group.bench_with_input(BenchmarkId::new("standard_avx2", &name), json, |b, json| {
+            group.bench_with_input(BenchmarkId::new("AVX2", &name), json, |b, json| {
                 b.iter(|| succinctly::json::simd::avx2::build_semi_index_standard(black_box(json)));
             });
         }
+
+        // Benchmark NEON SIMD on ARM
+        #[cfg(target_arch = "aarch64")]
+        group.bench_with_input(BenchmarkId::new("NEON", &name), json, |b, json| {
+            b.iter(|| succinctly::json::simd::neon::build_semi_index_standard(black_box(json)));
+        });
 
         group.finish();
     }
 }
 
-criterion_group!(benches, bench_end_to_end);
+criterion_group!(benches, bench_pfsm_vs_simd);
 criterion_main!(benches);

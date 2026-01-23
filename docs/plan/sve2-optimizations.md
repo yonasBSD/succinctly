@@ -1,15 +1,106 @@
 # SVE2 Optimization Plan for Succinctly
 
-**Status**: Updated 2026-01-22 - NEON PMULL approach outperforms SVE2 for most ARM platforms
+**Status**: Updated 2026-01-23 - Graviton 4 optimizations complete, low-hanging fruit exhausted
 
 ## Executive Summary
 
 This document analyzes all current x86 and ARM NEON optimizations in the Succinctly codebase and plans SVE2 equivalents for ARM CPUs that support it (Azure Cobalt 100/Neoverse N2, AWS Graviton 3+, etc.).
 
 **Key finding**: SVE2 on Neoverse N2 (GitHub Actions ARM runners) has **128-bit vectors** - the same width as NEON. Therefore, SVE2's value comes from:
-1. **BDEP/BEXT instructions** - equivalent to x86 BMI2 PDEP/PEXT (currently software-emulated on ARM)
-2. **Predicated operations** - cleaner handling of tail bytes without scalar fallbacks
-3. **First-fault loads** - potential for speculative scanning
+1. **BDEP/BEXT instructions** - equivalent to x86 BMI2 PDEP/PEXT ✅ **Implemented**
+2. **Predicated operations** - cleaner handling of tail bytes without scalar fallbacks ❌ **Rejected** (50% slower)
+3. **First-fault loads** - potential for speculative scanning ❌ **Not pursued** (complexity vs benefit)
+
+---
+
+## Graviton 4 Optimization Status (January 2026)
+
+### ✅ Completed Optimizations
+
+| Optimization | Location | Speedup | Date |
+|--------------|----------|---------|------|
+| NEON JSON parsing | `json/simd/neon.rs` | 1.11x | Pre-2026 |
+| NEON YAML block scalars | `yaml/simd/neon.rs` | 11-23% | 2026-01 |
+| NEON YAML anchors | `yaml/simd/neon.rs` | 3-6% | 2026-01 |
+| NEON PMULL prefix XOR | `dsv/simd/neon.rs` | 25% | 2026-01-22 |
+| NEON VMINV BP L1 index | `trees/bp.rs` | 2.8x | 2026-01 |
+| NEON VMINV BP L2 index | `trees/bp.rs` | 1-3% | 2026-01 |
+| NEON popcount unrolling | `bits/popcount.rs` | 15% | 2026-01 |
+| SVE2-BITPERM BDEP select | `util/broadword.rs` | 5-17x micro, 2-5% e2e | 2026-01-23 |
+
+### ❌ Rejected Optimizations
+
+| Attempt | Result | Reason |
+|---------|--------|--------|
+| SVE2 inline assembly (block scalars) | -40% | Compiler can't optimize asm blocks |
+| SVE2 MATCH (multi-char search) | -46% | Same vector width as NEON, more overhead |
+| Software prefetch | -30% | Hardware prefetcher is better |
+| AVX-512 YAML | -7% | Memory bandwidth saturated |
+| Branchless char classification | -25-44% | Branch predictors are 93-95% accurate |
+
+### 🔮 Remaining Opportunities
+
+| Opportunity | Expected Gain | Effort | Platform |
+|-------------|---------------|--------|----------|
+| x86 PDEP select_in_word | 5-17x micro | Low | x86_64 only |
+| LTO (Link-Time Optimization) | 2-5% | Low | All |
+| PGO (Profile-Guided Optimization) | 5-10% | Medium | All |
+| Dead code cleanup (json/simd/bmi2.rs) | 0% (cleanliness) | Low | All |
+
+### Conclusion
+
+**For Graviton 4 (Neoverse-V2), the low-hanging SIMD fruit is exhausted.**
+
+- 128-bit SVE2 vectors don't provide wider-than-NEON benefits
+- SVE2 inline assembly is 40-50% slower than NEON intrinsics
+- Specialized instructions (BDEP via SVEBITPERM) are the only SVE2 win
+- Further gains require algorithmic changes, not SIMD optimizations
+
+**Next steps** (if pursuing further optimization):
+1. Profile real workloads to identify new hotspots
+2. Consider LTO for release builds
+3. Implement x86 PDEP select_in_word for cross-platform parity
+
+---
+
+## SVE2 Inline Assembly Benchmark Results (January 2026)
+
+**IMPORTANT FINDING**: SVE2 with inline assembly is **~50% slower** than NEON intrinsics on Graviton 4.
+
+### Experiment: find_block_scalar_end
+
+Tested SVE2 predicates (`whilelt`, `ld1b`, `cmpeq`, `brkb`, `cntp`) vs NEON intrinsics:
+
+| Test Case | NEON | SVE2 | Speedup |
+|-----------|------|------|---------|
+| 10 lines, 4 indent | 95 ns | 154 ns | **0.62x** |
+| 100 lines, 4 indent | 1052 ns | 1745 ns | **0.60x** |
+| 1000 lines, 4 indent | 10605 ns | 17617 ns | **0.60x** |
+
+### Experiment: Multi-character search (SVE2 MATCH approach)
+
+Tested SVE2 for finding newline, colon, or hash characters:
+
+| Size | NEON | SVE2 | Speedup |
+|------|------|------|---------|
+| 64B | 5.6 ns (11.5 GiB/s) | 10.3 ns (6.2 GiB/s) | **0.54x** |
+| 1KB | 85 ns (12.0 GiB/s) | 156 ns (6.5 GiB/s) | **0.54x** |
+| 16KB | 1345 ns (12.2 GiB/s) | 2483 ns (6.6 GiB/s) | **0.54x** |
+
+### Why SVE2 Inline Assembly is Slower
+
+1. **Same vector width**: SVE2 on Graviton 4 uses 128-bit vectors (identical to NEON)
+2. **Inline assembly overhead**: `core::arch::asm!` blocks prevent:
+   - Register allocation optimization
+   - Instruction scheduling
+   - Loop unrolling
+3. **Predicate management cost**: SVE2 predicates add instructions that NEON handles more efficiently with masks
+
+### Conclusion
+
+**Do NOT use SVE2 inline assembly for YAML parsing on Graviton 4.**
+
+The only beneficial SVE2 feature is **SVEBITPERM** (BDEP/BEXT instructions), which is already used in DSV parsing. For regular SIMD operations, NEON intrinsics remain superior until Rust SVE2 intrinsics stabilize.
 
 ---
 
@@ -418,3 +509,261 @@ These patterns should be extended for SVE2:
 #[target_feature(enable = "sve2-bitperm")]
 unsafe fn toggle64_sve2(carry: u64, w: u64) -> (u64, u64) { ... }
 ```
+
+---
+
+## Future NEON Optimization Opportunities
+
+Based on analysis of ARM NEON instructions for indexing and data structures (January 2026), the following opportunities have been identified. These are organized by confidence level.
+
+### ✅ Balanced Parentheses Unrolled Lookup (IMPLEMENTED - January 2026)
+
+**Status**: ✅ **Implemented and deployed**
+
+**Implementation** ([src/trees/bp.rs](../../src/trees/bp.rs)):
+- Added `word_min_excess_unrolled()` function with fully unrolled lookup table access
+- Batches all 8 byte lookups before computing prefix sums and global minimum
+- Enabled via `--features simd` flag
+
+**Benchmark Results** (Apple M1 Max):
+
+| Size | Without Optimization | With Optimization | Improvement |
+|------|---------------------|-------------------|-------------|
+| 10K nodes | 2.41 µs | 2.00 µs | **17%** |
+| 100K nodes | 20.70 µs | 17.07 µs | **18%** |
+| 1M nodes | 207.21 µs | 171.96 µs | **17%** |
+
+**Key insight**: The optimization doesn't use NEON intrinsics directly. Instead, it benefits from:
+1. **Loop unrolling** - eliminates branch overhead
+2. **Batched lookups** - better cache locality for lookup tables
+3. **Better instruction scheduling** - compiler can optimize independent operations
+
+**Why the original SIMD approach was not used**:
+- Min excess computation requires sequential prefix sums (each byte's excess depends on previous bytes)
+- True SIMD parallelism would need a parallel prefix scan, which adds complexity
+- The unrolled scalar approach achieves similar benefit with simpler code
+
+**Remaining opportunities** (not yet implemented):
+- `find_open` and `enclose` could benefit from similar unrolling
+
+---
+
+### ✅ Popcount Loop Unrolling (IMPLEMENTED - January 2026)
+
+**Status**: ✅ **Implemented and deployed**
+
+**Implementation** ([src/bits/popcount.rs](../../src/bits/popcount.rs)):
+- Process 256 bytes (4 × 64 bytes) per iteration instead of 64 bytes
+- Enables better instruction-level parallelism on superscalar CPUs
+
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
+
+| Metric | Improvement |
+|--------|-------------|
+| 10M bits raw popcount | **15.5% faster** |
+| 1M bits raw popcount | **10.8% faster** |
+| 1M bits construction | **4.0% faster** |
+
+**Result**: Exceeded 5-8% expectation with 10-15% improvement.
+
+---
+
+### ✅ NEON VMINV for L1 Index Building (IMPLEMENTED - January 2026)
+
+**Status**: ✅ **Implemented and deployed**
+
+**Implementation** ([src/trees/bp.rs](../../src/trees/bp.rs)):
+- Process 8 words at a time using NEON int16x8
+- Compute prefix sums via parallel prefix pattern (3 shuffle+add steps)
+- Use `vminvq_s16` to find block minimum in one instruction
+
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
+
+| Size | Before | After | Improvement |
+|------|--------|-------|-------------|
+| 10K nodes | 5.4 µs | 2.07 µs | **2.6x faster** |
+| 100K nodes | 52.7 µs | 19.1 µs | **2.8x faster** |
+| 1M nodes | 527 µs | 185 µs | **2.8x faster** |
+
+**Key insight**: VMINV finds minimum across 8 vector lanes in one instruction,
+combined with SIMD prefix sums for dramatic speedup.
+
+---
+
+### ✅ NEON VMINV for L2 Index Building (IMPLEMENTED - January 2026)
+
+**Status**: ✅ **Implemented and deployed**
+
+**Implementation** ([src/trees/bp.rs](../../src/trees/bp.rs)):
+- Same SIMD pattern as L1, processing 8 L1 entries at a time
+- Added for code consistency and benefit at large data sizes
+
+**Benchmark Results** (AWS Graviton 4 / Neoverse-V2):
+
+| Size | Nodes | L2 Entries | Scalar | SIMD | Improvement |
+|------|-------|------------|--------|------|-------------|
+| ~2.5MB | 10M | ~10K | 1.91ms | 1.91ms | ~0% (noise) |
+| ~25MB | 100M | ~100K | 19.70ms | 19.44ms | **1.3%** |
+| ~125MB | 500M | ~488K | 153.78ms | 148.73ms | **3.4%** |
+
+**Key insight**: L2 SIMD benefit scales with data size. At 500M nodes, L2 has ~488K entries
+(comparable to L1 at ~1M nodes). No regression at smaller sizes, kept for consistency.
+
+---
+
+### Low Confidence: Anchor Terminator Nibble Tables
+
+**Current State** ([src/yaml/simd/neon.rs](../../src/yaml/simd/neon.rs#L422-L498)):
+```rust
+// 10 separate CMEQ comparisons + 9 ORR operations
+let is_space = vceqq_u8(chunk, space);
+let is_tab = vceqq_u8(chunk, tab);
+let is_newline = vceqq_u8(chunk, newline);
+// ... 7 more comparisons
+let flow = vorrq_u8(is_lbracket, is_rbracket);
+// ... more ORRs
+```
+
+**Opportunity**: Replace 10 CMEQ + 9 ORR with 2 TBL + 1 AND (nibble table approach):
+```rust
+// Proposed: 2 table lookups + 1 AND (like JSON does)
+let lo_nibble = vandq_u8(chunk, vdupq_n_u8(0x0F));
+let hi_nibble = vshrq_n_u8::<4>(chunk);
+let lo_result = vqtbl1q_u8(anchor_lo_table, lo_nibble);
+let hi_result = vqtbl1q_u8(anchor_hi_table, hi_nibble);
+let terminators = vandq_u8(lo_result, hi_result);
+```
+
+**Expected Impact**: 5-10% on anchor-heavy workloads (if validated)
+
+**⚠️ WARNING**: This approach was **rejected** for YAML character classification:
+> "NEON nibble lookup for YAML: -12-15% penalty (only 2-3 chars searched)"
+
+**However**, anchor parsing searches for **10 characters** (space, tab, newline, CR, `[`, `]`, `{`, `}`, `,`, `:`), not 2-3. The crossover point where nibble tables win may be different.
+
+**Validation required before implementation**:
+1. Micro-benchmark 10-terminator nibble lookup vs 10-CMEQ approach
+2. Only implement if micro-benchmark shows **2x+ improvement**
+3. Run end-to-end `yq` benchmarks to validate (learned from P2.8, P3 failures)
+
+**Risk**: High - similar approach rejected for 2-3 character YAML classification
+
+**Files to modify (only if validated)**:
+- `src/yaml/simd/neon.rs` - Replace `parse_anchor_name_neon_impl` inner loop
+
+---
+
+### Reference: NEON Instructions for Indexing
+
+Based on research papers and production systems, these NEON instructions have proven utility for indexing:
+
+| Instruction | Use Case | Proven Performance |
+|-------------|----------|-------------------|
+| **CNT** (`vcntq_u8`) | Rank/popcount | 6.7x faster (Redis) |
+| **CMEQ** (`vceqq_*`) | Character classification | 4+ GB/s JSON parsing (simdjson) |
+| **TBL** (`vqtbl1q_u8`) | Byte classification | Replaces 13 comparisons with 6 ops |
+| **ADDV** (`vaddvq_*`) | Horizontal sum | Essential for popcount reduction |
+| **PMULL** (`vmull_p64`) | Prefix XOR | 25% faster DSV index (deployed) |
+| **CLZ** (scalar) | First set bit | Single cycle |
+| **EXT** (`vextq_*`) | Sliding window | Essential for text parsing |
+| **MINV** (`vminvq_s16`) | L1/L2 block minimum | ✅ **Deployed (L1: +2.8x, L2: +1-3% at scale)** |
+
+**Instructions NOT applicable to this codebase**:
+- **SDOT/UDOT**: No quantized embedding vectors
+- **SMMLA/UMMLA**: No matrix operations
+- **BFMMLA/BFDOT**: No neural network inference
+- **FCMLA/FCADD**: No complex number processing
+- **Gather/Scatter**: Not available on Apple Silicon (no SVE)
+
+---
+
+### Lessons from Failed NEON Optimizations
+
+The YAML optimization history (see [docs/parsing/yaml.md](../parsing/yaml.md)) documents 9 rejected optimizations with a common pattern:
+
+| Rejected Optimization | Penalty | Key Lesson |
+|----------------------|---------|------------|
+| P1: YFSM | N/A | YAML strings too simple for FSM |
+| P2.6: Software prefetch | **+30%** | Hardware prefetcher is better |
+| P2.8: SIMD threshold tuning | **+8-15%** | Modern CPUs handle branches well |
+| P3: Branchless char class | **+25-44%** | Branch predictors are 93-95% accurate |
+| P5: Flow collection fast path | N/A | Real flow collections too small (<30B) |
+| P6: BMI2 PDEP/PEXT | N/A | YAML grammar prevents DSV-style indexing |
+| P7: Newline index | N/A | CLI feature, not parsing optimization |
+| P8: AVX-512 | **+7%** | Memory bandwidth saturated at AVX2 |
+
+**Key lessons for future NEON optimization**:
+1. **Micro-benchmarks lie** - P2.6/P2.8/P3/P8 all showed micro-bench improvements but regressed end-to-end
+2. **Memory bandwidth saturates** - Sequential text parsing can't benefit from wider SIMD
+3. **Branch predictors are excellent** - Branchless code often loses (93-95% prediction accuracy)
+4. **SIMD only wins when**:
+   - Scanning long runs (30+ bytes average)
+   - Processing 3+ character types simultaneously
+   - Using specialized instructions (PMULL for prefix XOR, VMINV for reductions)
+   - Compute-bound operations (popcount, index building - not parsing)
+
+**Key lesson for SVE2**:
+5. **Inline assembly defeats optimization** - SVE2 via `core::arch::asm!` is ~50% slower than NEON intrinsics due to:
+   - Lost register allocation optimization
+   - Prevented instruction scheduling
+   - Blocked loop unrolling
+   - Extra predicate management overhead
+6. **Wait for stable intrinsics** - Only use SVE2 when Rust stabilizes `#![feature(stdarch_aarch64_sve)]`
+7. **SVE2 value is in specialized instructions** - BDEP/BEXT (via SVEBITPERM) provides wins; general ops lose to optimized NEON
+8. **BDEP wins for select_in_word** - 5-17x faster than CTZ loop for k > 0 (✅ implemented January 2026)
+
+### SVE2 BDEP select_in_word Implementation (January 2026)
+
+**Status**: ✅ **Implemented and deployed**
+
+Used SVE2 BDEP instruction to accelerate the `select_in_word` function which finds the k-th set bit in a 64-bit word.
+
+**Algorithm** (PDEP-style):
+```rust
+let mask = (1u64 << (k + 1)) - 1;  // k+1 low bits set
+let scattered = bdep(mask, x);     // Scatter to bit positions
+63 - scattered.leading_zeros()     // Find highest bit
+```
+
+**Benchmark Results** (AWS Graviton 4):
+
+| Scenario | CTZ Loop | BDEP | Speedup |
+|----------|----------|------|---------|
+| sparse (k=0) | 0.88 ns | 1.78 ns | 0.5x |
+| dense (all bits) | 20.4 ns | 1.7 ns | **12x** |
+| high_k (k=32-63) | 30.8 ns | 1.8 ns | **17x** |
+| mixed patterns | 9.6 ns | 1.8 ns | **5.4x** |
+
+**Key insight**: CTZ loop is O(k) while BDEP is O(1). For bitvectors with varied densities, BDEP wins decisively.
+
+**End-to-end benchmark results** (full select1 operations):
+
+| Benchmark | Change | Notes |
+|-----------|--------|-------|
+| select1/1M/90% | **-4.9%** | Dense bitvectors benefit most |
+| select1/10M/50% | **-1.8%** | Modest improvement |
+| select_in_word/alternating | **-2.6%** | Per-call improvement visible |
+
+End-to-end improvements are modest (2-5%) because:
+1. SelectIndex provides O(1) jump to approximate position
+2. Most selects only need 1-2 select_in_word calls
+3. Dense patterns (90%) show best improvement where k values are higher
+
+**Files modified**:
+- `src/util/simd/sve2.rs` - Added `select_in_word_bdep` function
+- `src/util/broadword.rs` - Added runtime dispatch to BDEP on supported CPUs
+
+**Future work**: Add x86 PDEP equivalent for cross-platform parity:
+```rust
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi2")]
+unsafe fn select_in_word_pdep(x: u64, k: u32) -> u32 {
+    if x == 0 { return 64; }
+    let pop = x.count_ones();
+    if k >= pop { return 64; }
+    let mask = if k >= 63 { u64::MAX } else { (1u64 << (k + 1)) - 1 };
+    let scattered = _pdep_u64(mask, x);
+    63 - scattered.leading_zeros()
+}
+```
+This would provide the same 5-17x speedup on Intel Haswell+ and AMD Zen 3+.

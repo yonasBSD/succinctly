@@ -123,11 +123,11 @@ name = "succinctly"
 path = "src/lib.rs"
 
 [[bench]]
-name = "pfsm_end_to_end"
+name = "pfsm_vs_simd"
 harness = false
 
 [[bench]]
-name = "json_standard"
+name = "pfsm_vs_scalar"
 harness = false
 
 [[bench]]
@@ -135,7 +135,7 @@ name = "jq_comparison"
 harness = false
 
 [[bench]]
-name = "dsv_profile"
+name = "dsv_bench"
 harness = false
 
 [[bench]]
