@@ -159,12 +159,16 @@ cargo test --test properties
 # Run all benchmarks
 cargo bench
 
-# Run specific benchmark
-cargo bench rank_select
-cargo bench json_simd
+# Run specific benchmark suites
+cargo bench --bench rank_select        # BitVec operations
+cargo bench --bench json_simd          # SIMD JSON parsing
+cargo bench --bench pfsm_vs_simd       # PFSM vs SIMD comparison
+cargo bench --bench pfsm_vs_scalar     # PFSM vs scalar comparison
+cargo bench --bench balanced_parens    # Tree navigation
 
 # Generate benchmark data first
 cargo run --release --features cli -- json generate-suite
+cargo run --release --features cli -- yaml generate-suite
 ```
 
 ### Profiling
