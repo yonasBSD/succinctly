@@ -909,6 +909,16 @@ pub enum Builtin {
     /// Input: load("config.yaml") -> {parsed content}
     /// Supports both YAML and JSON files (auto-detected by extension)
     Load(Box<Expr>),
+
+    // Phase 23: Position-based navigation (succinctly extension)
+    /// `at_offset(n)` - jump to node at byte offset n (0-indexed)
+    /// Returns the value at the specified byte offset in the document.
+    /// This is a succinctly-specific extension not available in standard jq.
+    AtOffset(Box<Expr>),
+    /// `at_position(line; col)` - jump to node at line/column (1-indexed)
+    /// Returns the value at the specified line and column in the document.
+    /// This is a succinctly-specific extension not available in standard jq.
+    AtPosition(Box<Expr>, Box<Expr>),
 }
 
 /// Arithmetic operators.

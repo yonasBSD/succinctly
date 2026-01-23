@@ -767,7 +767,27 @@ fn eval_builtin<V: DocumentValue>(
             }
         }
 
-        Builtin::Keys | Builtin::KeysUnsorted => {
+        Builtin::Keys => {
+            if let Some(fields) = value.as_object() {
+                let mut keys: Vec<String> = fields.keys();
+                keys.sort(); // Sort keys alphabetically for `keys` builtin
+                let owned_keys: Vec<OwnedValue> =
+                    keys.into_iter().map(OwnedValue::String).collect();
+                GenericResult::Owned(OwnedValue::Array(owned_keys))
+            } else if let Some(elements) = value.as_array() {
+                let len = elements.len();
+                let indices: Vec<OwnedValue> =
+                    (0..len).map(|i| OwnedValue::Int(i as i64)).collect();
+                GenericResult::Owned(OwnedValue::Array(indices))
+            } else {
+                GenericResult::Error(EvalError::new(format!(
+                    "keys requires object or array, got {}",
+                    value.type_name()
+                )))
+            }
+        }
+
+        Builtin::KeysUnsorted => {
             if let Some(fields) = value.as_object() {
                 let keys = fields.keys();
                 let owned_keys: Vec<OwnedValue> =
@@ -780,7 +800,7 @@ fn eval_builtin<V: DocumentValue>(
                 GenericResult::Owned(OwnedValue::Array(indices))
             } else {
                 GenericResult::Error(EvalError::new(format!(
-                    "keys requires object or array, got {}",
+                    "keys_unsorted requires object or array, got {}",
                     value.type_name()
                 )))
             }
@@ -922,6 +942,112 @@ fn eval_builtin<V: DocumentValue>(
                     "cannot convert {} to number",
                     value.type_name()
                 )))
+            }
+        }
+
+        // Phase 23: Position-based navigation (succinctly extension)
+        Builtin::AtOffset(offset_expr) => {
+            // Evaluate the offset expression
+            let offset_result = eval_single(offset_expr, value.clone(), false, cursor);
+            let offset = match offset_result {
+                GenericResult::Owned(OwnedValue::Int(i)) if i >= 0 => i as usize,
+                GenericResult::One(v) => match v.as_i64() {
+                    Some(i) if i >= 0 => i as usize,
+                    _ => {
+                        return GenericResult::Error(EvalError::new(
+                            "at_offset requires a non-negative integer".to_string(),
+                        ))
+                    }
+                },
+                _ => {
+                    return GenericResult::Error(EvalError::new(
+                        "at_offset requires a non-negative integer".to_string(),
+                    ))
+                }
+            };
+
+            // Need a cursor to navigate
+            let Some(c) = cursor else {
+                return GenericResult::Error(EvalError::new(
+                    "at_offset requires document cursor context".to_string(),
+                ));
+            };
+
+            // Navigate to the offset
+            match c.cursor_at_offset(offset) {
+                Some(new_cursor) => GenericResult::OneCursor(new_cursor),
+                None => {
+                    if optional {
+                        GenericResult::None
+                    } else {
+                        GenericResult::Error(EvalError::new(format!(
+                            "no node at offset {}",
+                            offset
+                        )))
+                    }
+                }
+            }
+        }
+
+        Builtin::AtPosition(line_expr, col_expr) => {
+            // Evaluate the line expression
+            let line_result = eval_single(line_expr, value.clone(), false, cursor);
+            let line = match line_result {
+                GenericResult::Owned(OwnedValue::Int(i)) if i > 0 => i as usize,
+                GenericResult::One(v) => match v.as_i64() {
+                    Some(i) if i > 0 => i as usize,
+                    _ => {
+                        return GenericResult::Error(EvalError::new(
+                            "at_position requires positive integers for line".to_string(),
+                        ))
+                    }
+                },
+                _ => {
+                    return GenericResult::Error(EvalError::new(
+                        "at_position requires positive integers for line".to_string(),
+                    ))
+                }
+            };
+
+            // Evaluate the column expression
+            let col_result = eval_single(col_expr, value.clone(), false, cursor);
+            let col = match col_result {
+                GenericResult::Owned(OwnedValue::Int(i)) if i > 0 => i as usize,
+                GenericResult::One(v) => match v.as_i64() {
+                    Some(i) if i > 0 => i as usize,
+                    _ => {
+                        return GenericResult::Error(EvalError::new(
+                            "at_position requires positive integers for column".to_string(),
+                        ))
+                    }
+                },
+                _ => {
+                    return GenericResult::Error(EvalError::new(
+                        "at_position requires positive integers for column".to_string(),
+                    ))
+                }
+            };
+
+            // Need a cursor to navigate
+            let Some(c) = cursor else {
+                return GenericResult::Error(EvalError::new(
+                    "at_position requires document cursor context".to_string(),
+                ));
+            };
+
+            // Navigate to the position
+            match c.cursor_at_position(line, col) {
+                Some(new_cursor) => GenericResult::OneCursor(new_cursor),
+                None => {
+                    if optional {
+                        GenericResult::None
+                    } else {
+                        GenericResult::Error(EvalError::new(format!(
+                            "no node at position line {} column {}",
+                            line, col
+                        )))
+                    }
+                }
             }
         }
 
@@ -1407,5 +1533,135 @@ mod tests {
 
         // Should match 2 documents (index 1 and 2)
         assert_eq!(count, 2);
+    }
+
+    // ========================================================================
+    // Phase 23: Position-based navigation tests
+    // ========================================================================
+
+    #[test]
+    fn test_json_at_offset() {
+        // Test at_offset(n) - jump to node at byte offset
+        let json = br#"{"name": "Alice", "age": 30}"#;
+        //           0123456789...
+        let index = JsonIndex::build(json);
+        let cursor = index.root(json);
+
+        // at_offset(0) should return the root object
+        let expr = crate::jq::parse("at_offset(0)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        let owned = result.into_owned().unwrap();
+        assert!(matches!(owned, OwnedValue::Object(_)));
+
+        // at_offset(10) should be inside the "Alice" string (offset 10 = 'l' in "Alice")
+        let expr = crate::jq::parse("at_offset(10)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        let owned = result.into_owned().unwrap();
+        assert!(matches!(owned, OwnedValue::String(ref s) if s == "Alice"));
+
+        // at_offset(27) should be the age number (30)
+        let expr = crate::jq::parse("at_offset(27)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        let owned = result.into_owned().unwrap();
+        assert!(matches!(owned, OwnedValue::Int(30)));
+    }
+
+    #[test]
+    fn test_json_at_position() {
+        // Test at_position(line; col) - jump to node at line/column (1-indexed)
+        let json = b"{\n  \"name\": \"Alice\"\n}";
+        //           Line 1: {
+        //           Line 2:   "name": "Alice"
+        //           Line 3: }
+        let index = JsonIndex::build(json);
+        let cursor = index.root(json);
+
+        // at_position(1; 1) should return the root object
+        let expr = crate::jq::parse("at_position(1; 1)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        let owned = result.into_owned().unwrap();
+        assert!(matches!(owned, OwnedValue::Object(_)));
+
+        // at_position(2; 3) should be the "name" key (line 2, col 3 = start of "name")
+        let expr = crate::jq::parse("at_position(2; 3)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        let owned = result.into_owned().unwrap();
+        assert!(matches!(owned, OwnedValue::String(ref s) if s == "name"));
+    }
+
+    #[test]
+    fn test_yaml_at_offset() {
+        use crate::yaml::YamlIndex;
+
+        // Test at_offset(n) with YAML
+        // YAML: name: Alice\nage: 30
+        //       0123456789...
+        // Note: YAML indexing is different from JSON - the root is the document sequence
+        let yaml = b"name: Alice\nage: 30";
+        let index = YamlIndex::build(yaml).unwrap();
+        let root = index.root(yaml);
+
+        // Navigate to the first document
+        let doc = root.first_child().unwrap();
+
+        // at_offset(0) with YAML typically returns the first structural node at that position
+        // For YAML, this is typically the mapping itself at offset 0
+        let expr = crate::jq::parse("at_offset(0)").unwrap();
+        let result = eval_with_cursor(&expr, doc);
+        // Just verify we get something without error
+        // YAML's structure is more complex than JSON, so we just check it doesn't fail
+        assert!(!matches!(result, GenericResult::Error(_)));
+    }
+
+    #[test]
+    fn test_at_offset_then_navigate() {
+        // Test at_offset combined with navigation
+        let json = br#"{"users": [{"name": "Alice"}, {"name": "Bob"}]}"#;
+        //           0123456789...
+        //           {"users": [{"name": "Alice"}, {"name": "Bob"}]}
+        //                    ^- offset 10 = '[' (array start)
+        let index = JsonIndex::build(json);
+        let cursor = index.root(json);
+
+        // Navigate to offset at "users" array, then get first element's name
+        // The "users" array starts at offset 10 (the '[' character)
+        let expr = crate::jq::parse("at_offset(10) | .[0].name").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        let owned = result.into_owned().unwrap();
+        assert!(matches!(owned, OwnedValue::String(ref s) if s == "Alice"));
+    }
+
+    #[test]
+    fn test_at_offset_invalid() {
+        let json = br#"{"a": 1}"#;
+        let index = JsonIndex::build(json);
+        let cursor = index.root(json);
+
+        // at_offset with too large offset should fail
+        let expr = crate::jq::parse("at_offset(1000)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        assert!(matches!(result, GenericResult::Error(_)));
+
+        // at_offset with negative number should fail
+        let expr = crate::jq::parse("at_offset(-1)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        assert!(matches!(result, GenericResult::Error(_)));
+    }
+
+    #[test]
+    fn test_at_position_invalid() {
+        let json = br#"{"a": 1}"#;
+        let index = JsonIndex::build(json);
+        let cursor = index.root(json);
+
+        // at_position(0; 1) should fail (line 0 is invalid)
+        let expr = crate::jq::parse("at_position(0; 1)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        assert!(matches!(result, GenericResult::Error(_)));
+
+        // at_position(1; 0) should fail (column 0 is invalid)
+        let expr = crate::jq::parse("at_position(1; 0)").unwrap();
+        let result = eval_with_cursor(&expr, cursor);
+        assert!(matches!(result, GenericResult::Error(_)));
     }
 }

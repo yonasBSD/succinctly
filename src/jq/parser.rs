@@ -3052,6 +3052,38 @@ impl<'a> Parser<'a> {
             return Ok(Some(Builtin::Load(Box::new(file_expr))));
         }
 
+        // Phase 23: Position-based navigation (succinctly extension)
+        // at_offset(n) - jump to node at byte offset n (0-indexed)
+        if self.matches_keyword("at_offset") {
+            self.consume_keyword("at_offset");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let offset_expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::AtOffset(Box::new(offset_expr))));
+        }
+
+        // at_position(line; col) - jump to node at line/column (1-indexed)
+        if self.matches_keyword("at_position") {
+            self.consume_keyword("at_position");
+            self.skip_ws();
+            self.expect('(')?;
+            self.skip_ws();
+            let line_expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(';')?;
+            self.skip_ws();
+            let col_expr = self.parse_pipe_expr()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(Some(Builtin::AtPosition(
+                Box::new(line_expr),
+                Box::new(col_expr),
+            )));
+        }
+
         Ok(None)
     }
 

@@ -1445,6 +1445,78 @@ impl<'a, W: AsRef<[u64]>> YamlCursor<'a, W> {
     pub fn text(&self) -> &'a [u8] {
         self.text
     }
+
+    /// Create a cursor at the specified byte offset (0-indexed).
+    ///
+    /// Returns `None` if:
+    /// - The offset is out of bounds
+    /// - The offset doesn't correspond to a valid node
+    ///
+    /// This enables position-based navigation in jq queries via `at_offset(n)`.
+    ///
+    /// Note: For consistency with how yq evaluates expressions, if the offset
+    /// lands on the document root sequence wrapper in a single-document file,
+    /// this returns the document content instead of the wrapper.
+    pub fn cursor_at_offset(&self, offset: usize) -> Option<YamlCursor<'a, W>> {
+        if offset >= self.text.len() {
+            return None;
+        }
+
+        // Get the rank at this position (count of IB bits in [0, offset))
+        let rank = self.index.ib_rank1(offset);
+
+        // Determine which structural element contains this offset
+        let struct_text_pos = if let Some(struct_pos) = self.index.ib_select1(rank) {
+            if struct_pos == offset {
+                // We're exactly at a structural position - use this one
+                struct_pos
+            } else if rank > 0 {
+                // We're inside a value - the containing node started at the previous IB bit
+                self.index.ib_select1(rank - 1)?
+            } else {
+                return None;
+            }
+        } else if rank > 0 {
+            self.index.ib_select1(rank - 1)?
+        } else {
+            return None;
+        };
+
+        // Find the BP position for this text position using binary search
+        let bp_pos = self.index.find_bp_at_text_pos(struct_text_pos)?;
+
+        let cursor = YamlCursor {
+            text: self.text,
+            index: self.index,
+            bp_pos,
+        };
+
+        // For consistency with yq evaluation: if we land on the document root
+        // sequence wrapper (bp_pos == 0, which is a sequence), navigate to
+        // the first document's content. This matches how yq '.' works.
+        if bp_pos == 0 && self.index.is_sequence_at_bp(0) {
+            // Navigate to first document content (skip sequence wrapper)
+            cursor.first_child()
+        } else {
+            Some(cursor)
+        }
+    }
+
+    /// Create a cursor at the specified line and column (1-indexed).
+    ///
+    /// Returns `None` if:
+    /// - Line or column is 0
+    /// - The position is out of bounds
+    /// - The position doesn't correspond to a valid node
+    ///
+    /// This enables position-based navigation in jq queries via `at_position(line; col)`.
+    pub fn cursor_at_position(&self, line: usize, col: usize) -> Option<YamlCursor<'a, W>> {
+        // Convert line/column to byte offset
+        let offset = self.index.to_offset(line, col)?;
+
+        // Use cursor_at_offset to find the node
+        self.cursor_at_offset(offset)
+    }
 }
 
 /// Write a YAML value as JSON (for sequence elements where we don't have a cursor).
@@ -3685,6 +3757,16 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for YamlCursor<'a, W> {
     #[inline]
     fn document_index(&self) -> Option<usize> {
         YamlCursor::document_index(self)
+    }
+
+    #[inline]
+    fn cursor_at_offset(&self, offset: usize) -> Option<Self> {
+        YamlCursor::cursor_at_offset(self, offset)
+    }
+
+    #[inline]
+    fn cursor_at_position(&self, line: usize, col: usize) -> Option<Self> {
+        YamlCursor::cursor_at_position(self, line, col)
     }
 }
 
