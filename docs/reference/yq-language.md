@@ -6,6 +6,8 @@
 
 The `yq` command provides YAML querying using jq-compatible syntax. It supports all features from the [jq Language Reference](jq-language.md) plus YAML-specific extensions.
 
+**YAML 1.2 Compliance**: See [YAML 1.2 Compliance](../compliance/yaml/1.2.md) for details on type handling, including the Norway problem, sexagesimal numbers, and boolean recognition.
+
 ## Implementation Status Summary
 
 | Category                  | Status            | Coverage |

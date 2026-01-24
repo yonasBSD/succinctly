@@ -2,6 +2,8 @@
 
 This document investigates whether succinctly's semi-indexing techniques can be applied to YAML parsing.
 
+**Related**: [YAML 1.2 Compliance](../compliance/yaml/1.2.md) - type handling, Norway problem, boolean recognition
+
 ## Executive Summary
 
 **Conclusion**: YAML semi-indexing is theoretically possible but significantly more complex than JSON due to context-sensitive grammar and character ambiguity.
