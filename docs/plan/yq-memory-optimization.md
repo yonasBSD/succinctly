@@ -157,14 +157,14 @@ YamlIndex::build()
 
 ## Code Locations
 
-| Location                                                             | Function                | Memory Impact                 |
-|----------------------------------------------------------------------|-------------------------|-------------------------------|
-| [yq_runner.rs:130-211](../src/bin/succinctly/yq_runner.rs#L130-L211) | `yaml_to_owned_value()` | Full DOM materialization      |
-| [eval_generic.rs:29-64](../src/jq/eval_generic.rs#L29-L64)           | `to_owned()`            | Query result materialization  |
-| [yq_runner.rs:1643](../src/bin/succinctly/yq_runner.rs#L1643)        | `all_results`           | Triple-nested buffer          |
-| [yq_runner.rs:1698](../src/bin/succinctly/yq_runner.rs#L1698)        | `last_output.clone()`   | Redundant cloning             |
-| [value.rs:194](../src/jq/value.rs#L194)                              | `to_json()`             | Intermediate strings          |
-| [yq_runner.rs:596-700](../src/bin/succinctly/yq_runner.rs#L596-L700) | `emit_yaml_value()`     | Output string building        |
+| Location                                                                 | Function                | Memory Impact                 |
+|--------------------------------------------------------------------------|-------------------------|-------------------------------|
+| [yq_runner.rs:130-211](../../src/bin/succinctly/yq_runner.rs#L130-L211)  | `yaml_to_owned_value()` | Full DOM materialization      |
+| [eval_generic.rs:29-64](../../src/jq/eval_generic.rs#L29-L64)            | `to_owned()`            | Query result materialization  |
+| [yq_runner.rs:1643](../../src/bin/succinctly/yq_runner.rs#L1643)         | `all_results`           | Triple-nested buffer          |
+| [yq_runner.rs:1698](../../src/bin/succinctly/yq_runner.rs#L1698)         | `last_output.clone()`   | Redundant cloning             |
+| [value.rs:194](../../src/jq/value.rs#L194)                               | `to_json()`             | Intermediate strings          |
+| [yq_runner.rs:596-700](../../src/bin/succinctly/yq_runner.rs#L596-L700)  | `emit_yaml_value()`     | Output string building        |
 
 ## Proposed Optimizations
 
@@ -212,42 +212,358 @@ for (bytes, format) in &input_sources {
 
 **Goal**: Avoid `to_owned()` for queries that just navigate to subtrees.
 
-For queries like `.users[0]` or `.config.database`, the result is a subtree of the input. Instead of materializing it as OwnedValue, return a cursor reference.
+For queries like `.users[0]` or `.config.database`, the result is a subtree of the input. Instead of materializing it as OwnedValue, stream directly from the cursor.
 
-**Current code:**
+#### The Core Problem: Lifetime Constraints
+
+The fundamental challenge is that cursors borrow from `YamlIndex`, which is created inside evaluation functions:
+
 ```rust
-fn evaluate_yaml_cursor(cursor, expr) -> Vec<OwnedValue> {
-    let result = eval_with_cursor(expr, cursor);
-    match result {
-        GenericResult::OneCursor(c) => vec![to_owned(&c.value())],  // Materializes!
-        ...
+fn evaluate_yaml_direct(bytes: &[u8], expr: &Expr) -> Result<Vec<OwnedValue>> {
+    let index = YamlIndex::build(bytes);    // Index lives here
+    let root = index.root(bytes);           // Cursor borrows from index
+
+    // ... evaluate ...
+
+    // index dropped here - cursors become invalid!
+}
+// Return type must OWN its data - can't return cursors
+```
+
+**Key insight**: We can't return cursors from functions that create the index. Instead, we must **stream results before the index is dropped**.
+
+#### Current Materialization Points
+
+In [eval_generic.rs](../../src/jq/eval_generic.rs), `into_owned()` is called at these locations:
+
+| Line    | Context                  | Can Avoid? |
+|---------|--------------------------|------------|
+| 233     | `into_owned()` One       | Yes        |
+| 234     | `into_owned()` OneCursor | Yes        |
+| 235     | `into_owned()` Many      | Yes        |
+| 247-249 | `collect_owned()`        | Yes        |
+| 389-392 | Pipe processing          | Partial    |
+
+In [yq_runner.rs](../../src/bin/succinctly/yq_runner.rs), `to_owned()` is called at these locations:
+
+| Line    | Function                   | Can Avoid?                     |
+|---------|----------------------------|--------------------------------|
+| 464     | `evaluate_yaml_cursor()`   | Yes - stream instead           |
+| 465     | `evaluate_yaml_cursor()`   | Yes - stream instead           |
+| 466     | `evaluate_yaml_cursor()`   | Yes - stream instead           |
+
+#### Implementation Sub-Phases
+
+##### M2.1: Streaming Evaluation API
+
+Create a new entry point that streams results directly instead of returning them:
+
+```rust
+/// Evaluate and stream results directly to output.
+///
+/// This keeps the YamlIndex alive during output, avoiding materialization.
+pub fn evaluate_yaml_streaming<W: core::fmt::Write>(
+    bytes: &[u8],
+    expr: &Expr,
+    output: &mut W,
+    config: &OutputConfig,
+) -> Result<OutputStats> {
+    let index = YamlIndex::build(bytes)?;
+    let root = index.root(bytes);
+
+    // Evaluate - results may be cursors or owned values
+    let result = eval_with_cursor(expr, root);
+
+    // Stream each result immediately (index still alive)
+    let stats = stream_generic_result(result, output, config)?;
+
+    // Index dropped here, AFTER streaming
+    Ok(stats)
+}
+
+pub struct OutputStats {
+    pub count: usize,
+    pub last_was_falsy: bool,  // For --exit-status
+}
+```
+
+##### M2.2: StreamableValue Trait
+
+Add a trait for values that can stream without allocation:
+
+```rust
+// In src/jq/document.rs or new src/jq/stream.rs
+pub trait StreamableValue {
+    /// Stream this value as JSON to the output.
+    fn stream_json<W: core::fmt::Write>(&self, out: &mut W) -> core::fmt::Result;
+
+    /// Stream this value as YAML to the output.
+    fn stream_yaml<W: core::fmt::Write>(
+        &self,
+        out: &mut W,
+        indent: usize
+    ) -> core::fmt::Result;
+
+    /// Check if value is falsy (null or false) without full materialization.
+    fn is_falsy(&self) -> bool;
+}
+
+// Implement for YamlCursor (already has stream_json)
+impl<'a, W: AsRef<[u64]>> StreamableValue for YamlCursor<'a, W> {
+    fn stream_json<Out: core::fmt::Write>(&self, out: &mut Out) -> core::fmt::Result {
+        self.stream_json_value(out)  // Existing method
+    }
+
+    fn stream_yaml<Out: core::fmt::Write>(
+        &self,
+        out: &mut Out,
+        indent: usize
+    ) -> core::fmt::Result {
+        // New: stream as YAML directly
+        stream_yaml_from_cursor(self, out, indent)
+    }
+
+    fn is_falsy(&self) -> bool {
+        matches!(self.value(), YamlValue::Null)
+    }
+}
+
+// Implement for OwnedValue (needs new streaming method)
+impl StreamableValue for OwnedValue {
+    fn stream_json<W: core::fmt::Write>(&self, out: &mut W) -> core::fmt::Result {
+        // Replace to_json() with direct streaming
+        stream_owned_value_json(self, out)
+    }
+
+    fn stream_yaml<W: core::fmt::Write>(
+        &self,
+        out: &mut W,
+        indent: usize
+    ) -> core::fmt::Result {
+        stream_owned_value_yaml(self, out, indent)
+    }
+
+    fn is_falsy(&self) -> bool {
+        matches!(self, OwnedValue::Null | OwnedValue::Bool(false))
     }
 }
 ```
 
-**Proposed:**
-```rust
-enum StreamableResult<'a, W> {
-    Cursor(YamlCursor<'a, W>),  // Can stream directly
-    Owned(OwnedValue),           // Must serialize from memory
-}
+##### M2.3: GenericResult Streaming Methods
 
-fn evaluate_yaml_cursor_lazy(cursor, expr) -> Vec<StreamableResult> {
-    let result = eval_with_cursor(expr, cursor);
-    match result {
-        GenericResult::OneCursor(c) => vec![StreamableResult::Cursor(c)],  // No copy!
-        GenericResult::Owned(v) => vec![StreamableResult::Owned(v)],
-        ...
+Add streaming capability to `GenericResult`:
+
+```rust
+impl<V: DocumentValue> GenericResult<V>
+where
+    V: StreamableValue,
+    V::Cursor: StreamableValue,
+{
+    /// Stream all results to output without intermediate allocation.
+    /// Returns (count, last_was_falsy) for exit status handling.
+    pub fn stream_all<W: core::fmt::Write>(
+        self,
+        out: &mut W,
+        separator: &str,
+    ) -> Result<(usize, bool), core::fmt::Error> {
+        let mut count = 0;
+        let mut last_falsy = false;
+
+        match self {
+            GenericResult::One(v) => {
+                last_falsy = v.is_falsy();
+                v.stream_json(out)?;
+                count = 1;
+            }
+            GenericResult::OneCursor(c) => {
+                last_falsy = c.is_falsy();
+                c.stream_json(out)?;
+                count = 1;
+            }
+            GenericResult::Many(vs) => {
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 { out.write_str(separator)?; }
+                    last_falsy = v.is_falsy();
+                    v.stream_json(out)?;
+                    count += 1;
+                }
+            }
+            GenericResult::Owned(o) => {
+                last_falsy = o.is_falsy();
+                o.stream_json(out)?;
+                count = 1;
+            }
+            GenericResult::ManyOwned(os) => {
+                for (i, o) in os.iter().enumerate() {
+                    if i > 0 { out.write_str(separator)?; }
+                    last_falsy = o.is_falsy();
+                    o.stream_json(out)?;
+                    count += 1;
+                }
+            }
+            GenericResult::None | GenericResult::Error(_) | GenericResult::Break(_) => {}
+        }
+
+        Ok((count, last_falsy))
     }
 }
 ```
 
-**Impact**: For navigation queries (majority of real-world usage), eliminates OwnedValue entirely.
+##### M2.4: Extend Fast Path in yq_runner
 
-**Complexity**: High. Requires:
-- New `StreamableResult` enum
-- Lifetime management for cursor references
-- Streaming serialization for cursor results
+Currently the fast path only handles identity queries. Extend to navigation:
+
+```rust
+// Queries that can stream without materialization
+fn can_stream_query(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identity => true,
+        Expr::Field(_) => true,
+        Expr::Index(_) => true,
+        Expr::Iterate => true,
+        Expr::Optional(inner) => can_stream_query(inner),
+        Expr::Pipe(exprs) => exprs.iter().all(can_stream_query),
+        // Computed values require materialization
+        Expr::Literal(_) => false,
+        Expr::ArrayConstruct(_) => false,
+        Expr::ObjectConstruct(_) => false,
+        // ... etc
+        _ => false,
+    }
+}
+
+// In run_yq():
+let can_stream = can_stream_query(&program.expr)
+    && output_config.output_format == OutputFormat::Json
+    && output_config.compact
+    && !args.null_input
+    && !args.slurp
+    && context.named.is_empty();
+
+if can_stream {
+    // Use streaming evaluation
+    for (bytes, format) in &input_sources {
+        let stats = evaluate_yaml_streaming(
+            bytes,
+            &program.expr,
+            &mut FmtWriter(&mut writer),
+            &output_config,
+        )?;
+        // ... handle stats for exit status
+    }
+} else {
+    // Fall back to OwnedValue path
+    // ... existing code
+}
+```
+
+##### M2.5: YAML Output Streaming
+
+Add streaming support for YAML output format (currently only JSON streams):
+
+```rust
+// In src/yaml/light.rs or new file
+pub fn stream_yaml_from_cursor<W: core::fmt::Write>(
+    cursor: &YamlCursor<'_, impl AsRef<[u64]>>,
+    out: &mut W,
+    indent: usize,
+) -> core::fmt::Result {
+    let indent_str = "  ".repeat(indent);
+
+    match cursor.value() {
+        YamlValue::Null => out.write_str("null"),
+        YamlValue::String(s) => {
+            // Smart quoting based on content
+            let str_val = s.as_str().map_err(|_| core::fmt::Error)?;
+            stream_yaml_string(out, &str_val)
+        }
+        YamlValue::Mapping(fields) => {
+            let mut first = true;
+            for field in fields {
+                if !first {
+                    out.write_char('\n')?;
+                    out.write_str(&indent_str)?;
+                }
+                first = false;
+
+                // Key
+                if let YamlValue::String(s) = field.key() {
+                    let key = s.as_str().map_err(|_| core::fmt::Error)?;
+                    stream_yaml_string(out, &key)?;
+                }
+                out.write_str(": ")?;
+
+                // Value (recursive)
+                stream_yaml_from_cursor(&field.value_cursor(), out, indent + 1)?;
+            }
+            Ok(())
+        }
+        YamlValue::Sequence(elements) => {
+            for elem in elements {
+                out.write_str(&indent_str)?;
+                out.write_str("- ")?;
+                stream_yaml_value(out, elem, indent + 1)?;
+                out.write_char('\n')?;
+            }
+            Ok(())
+        }
+        // ... handle other cases
+    }
+}
+```
+
+#### Which Queries Benefit from M2
+
+| Query Pattern              | Can Stream? | Notes                              |
+|----------------------------|-------------|------------------------------------|
+| `.`                        | ✅ Yes      | Already has fast path              |
+| `.field`                   | ✅ Yes      | Returns cursor to subtree          |
+| `.[0]`                     | ✅ Yes      | Returns cursor to element          |
+| `.[]`                      | ✅ Yes      | Returns Many(cursors)              |
+| `.users[].name`            | ✅ Yes      | Chained navigation                 |
+| `.users \| .[0]`           | ✅ Yes      | Pipe of navigations                |
+| `select(.age > 30)`        | ⚠️ Partial | Filter can stream, condition can't |
+| `.a + .b`                  | ❌ No       | Arithmetic requires values         |
+| `[.a, .b]`                 | ❌ No       | Array construction                 |
+| `{name: .n}`               | ❌ No       | Object construction                |
+| `group_by(.x)`             | ❌ No       | Requires full materialization      |
+
+#### Impact Estimate
+
+| Query Type            | Current Memory | M2 Memory  | Improvement |
+|-----------------------|----------------|------------|-------------|
+| Identity `.`          | ~2× (fast)     | ~2× (fast) | -           |
+| Navigation `.foo`     | 5-8×           | ~2.2×      | 2.5-3.5×    |
+| Iteration `.[]`       | 5-8×           | ~2.5×      | 2-3×        |
+| Filter `select()`     | 5-8×           | ~3-4×      | 1.5-2×      |
+| Computation           | 5-8×           | 5-8×       | None        |
+
+#### Implementation Order
+
+1. **M2.1** - Streaming API (~2-3 hours)
+   - New `evaluate_yaml_streaming()` function
+   - Wire into yq_runner for identity queries
+
+2. **M2.2** - StreamableValue trait (~2 hours)
+   - Define trait in document.rs
+   - Implement for YamlCursor (delegate to existing)
+   - Implement for OwnedValue (new streaming methods)
+
+3. **M2.3** - GenericResult streaming (~2 hours)
+   - Add `stream_all()` method
+   - Handle all result variants
+
+4. **M2.4** - Extend fast path (~3-4 hours)
+   - `can_stream_query()` analysis
+   - Wire streaming path for navigation queries
+   - Benchmarking and validation
+
+5. **M2.5** - YAML output streaming (~3-4 hours)
+   - `stream_yaml_from_cursor()`
+   - Smart quoting logic
+   - Multi-document handling
+
+**Total estimate**: 12-15 hours of implementation
 
 ---
 
@@ -425,6 +741,7 @@ The goal is to bring standard path closer to fast path performance.
 
 ## Changelog
 
-| Date       | Change                                |
-|------------|---------------------------------------|
-| 2026-01-24 | Initial analysis and optimization plan|
+| Date       | Change                                                     |
+|------------|------------------------------------------------------------|
+| 2026-01-24 | Added detailed M2 implementation plan with 5 sub-phases    |
+| 2026-01-24 | Initial analysis and optimization plan                     |
