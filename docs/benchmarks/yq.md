@@ -4,6 +4,32 @@ Benchmarks comparing `succinctly yq .` (identity filter) vs `yq .` (Mike Farah's
 
 **See also**: [YAML 1.2 Compliance](../compliance/yaml/1.2.md) for type handling details (Norway problem, booleans, etc.)
 
+## Architectural Differences
+
+Before reviewing the benchmarks, it's important to understand the fundamental differences between these tools:
+
+| Aspect               | succinctly                        | yq (mikefarah)                    |
+|----------------------|-----------------------------------|-----------------------------------|
+| **Architecture**     | Semi-indexer                      | Full validating parser            |
+| **Approach**         | Build structural index, lazy eval | Parse entire document into DOM    |
+| **Validation**       | Minimal (syntax only)             | Full YAML validation              |
+| **Tags**             | Not supported                     | Full support (`!custom`, `!!str`) |
+| **Anchors/Aliases**  | Parsed, not resolved              | Full resolution                   |
+| **Memory model**     | ~3-6% index overhead              | Full DOM in memory                |
+| **Best for**         | Fast queries on large files       | Full YAML manipulation            |
+
+**What this means for benchmarks**: The performance differences shown below come from two sources:
+
+1. **Architectural advantage**: Semi-indexing with lazy evaluation is inherently faster for query workloads because it only materializes values that are accessed.
+
+2. **Less validation work**: succinctly performs minimal validation compared to yq's full YAML validation. This is a deliberate trade-off for speed.
+
+**When to use succinctly**: You need fast queries on valid YAML and don't require full validation, tag support, or anchor resolution.
+
+**When to use yq**: You need complete YAML support including tags, anchor resolution, or want validation errors on malformed input.
+
+For detailed architectural documentation, see [Semi-Indexing Architecture](../architecture/semi-indexing.md).
+
 ## Platforms
 
 ### Platform 1: ARM (AWS Graviton 4 - Neoverse-V2)

@@ -4,6 +4,29 @@ Comprehensive benchmarks comparing `succinctly jq .` vs `jq .` for JSON formatti
 
 Results are provided for both ARM (Apple M1 Max) and x86_64 (AMD Zen 4) platforms.
 
+## Architectural Differences
+
+Before reviewing the benchmarks, it's important to understand the fundamental differences between these tools:
+
+| Aspect           | succinctly                        | jq                              |
+|------------------|-----------------------------------|---------------------------------|
+| **Architecture** | Semi-indexer                      | Full parser                     |
+| **Approach**     | Build structural index, lazy eval | Parse entire document into DOM  |
+| **Memory model** | ~3-6% index overhead              | Full DOM in memory (6-8x input) |
+| **Best for**     | Fast queries on large files       | Complex transformations         |
+
+**What this means for benchmarks**: The performance and memory differences shown below come from architectural choices:
+
+1. **Semi-indexing**: succinctly builds a lightweight structural index (balanced parentheses + interest bits) instead of a full DOM tree. This takes less time and memory.
+
+2. **Lazy evaluation**: Values are only materialized when accessed. For identity queries (`.`), this means streaming output without intermediate allocations.
+
+3. **Streaming output**: succinctly writes JSON directly to output without building intermediate String objects.
+
+**Trade-off**: jq supports more complex transformations and has a larger feature set. succinctly focuses on fast navigation and extraction queries.
+
+For detailed architectural documentation, see [Semi-Indexing Architecture](../architecture/semi-indexing.md).
+
 ## Methodology
 
 Benchmarks measure:
