@@ -29,6 +29,16 @@ mkdir -p .ai/scratch
 
 Succinctly is a high-performance Rust library implementing succinct data structures with fast rank and select operations, optimized for both x86_64 (POPCNT) and ARM (NEON) architectures.
 
+### Semi-Indexing Architecture
+
+Succinctly uses **semi-indexing** rather than traditional DOM parsing. Instead of building a complete in-memory tree, it creates a lightweight structural index (~3-6% overhead) and extracts values lazily. This enables:
+
+- **17-46x less memory** than DOM parsers
+- **Fast queries** because only accessed values are materialized
+- **Streaming output** without intermediate allocations
+
+**Trade-off**: Semi-indexing performs minimal validation compared to full parsers (jq, yq). The benchmark comparisons to jq/yq reflect both architectural advantages and reduced validation work. See [docs/architecture/semi-indexing.md](docs/architecture/semi-indexing.md) for details.
+
 ## Common Commands
 
 ### Building and Testing

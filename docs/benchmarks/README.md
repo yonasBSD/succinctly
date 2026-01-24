@@ -4,6 +4,17 @@
 
 Performance comparisons between succinctly and other tools.
 
+## Understanding the Comparisons
+
+Succinctly uses **semi-indexing** rather than traditional DOM parsing. This architectural difference is important context for interpreting benchmarks:
+
+| Approach        | How it works                           | Memory         | Speed                       |
+|-----------------|----------------------------------------|----------------|-----------------------------|
+| **Semi-index**  | Build structural index, extract lazily | ~3-6% overhead | Fast for queries            |
+| **DOM parsing** | Parse entire document into memory tree | 6-21x input    | Required for all operations |
+
+The benchmarks below compare succinctly against DOM-based tools (jq, yq, serde_json, etc.). Performance advantages come from both the semi-index architecture and doing less validation work. See individual benchmark pages for detailed architectural comparisons.
+
 ## Benchmark Results
 
 | Benchmark                        | Description                          | Key Finding                                      |

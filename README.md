@@ -20,6 +20,16 @@ Succinctly provides space-efficient data structures with fast rank and select op
 - **`no_std` compatible** - Works in embedded and WASM environments
 - **Cross-platform SIMD** - Runtime detection for AVX2, AVX-512, SSE4.2, and ARM NEON
 
+### What is Semi-Indexing?
+
+Unlike traditional parsers that build a complete in-memory representation (DOM) of documents, succinctly uses **semi-indexing**: it builds a lightweight structural index (~3-6% overhead) and extracts values lazily on demand. This approach offers:
+
+- **17-46x less memory** than DOM parsers (index is ~24% of input vs 600-800% for DOM)
+- **Faster queries** because only accessed values are materialized
+- **Streaming output** without intermediate allocations
+
+**Trade-off**: Semi-indexing is optimized for navigation and extraction queries on valid input. For complex transformations or when you need full validation, traditional parsers (jq, yq, serde_json) may be more appropriate. See [Architecture](docs/architecture/semi-indexing.md) for details.
+
 ## Installation
 
 Add to your `Cargo.toml`:

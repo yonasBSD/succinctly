@@ -2,6 +2,19 @@
 
 Comprehensive benchmarks comparing **succinctly** against other Rust JSON parsers across different input patterns and sizes.
 
+## Architectural Context
+
+These benchmarks compare fundamentally different parsing approaches:
+
+| Parser         | Architecture        | Memory Model                     |
+|----------------|---------------------|----------------------------------|
+| **succinctly** | Semi-index          | ~24% overhead (structural index) |
+| **sonic-rs**   | DOM (arena-based)   | 2.5-4x input size                |
+| **serde_json** | DOM (allocations)   | 6-8x input size                  |
+| **simd-json**  | DOM (simdjson port) | 6-8x input size                  |
+
+Semi-indexing builds a lightweight structural index and extracts values lazily, while DOM parsers materialize all values upfront. This explains the dramatic memory efficiency difference (24% vs 600-800%) and affects performance characteristics for different workloads.
+
 ## Test Environment
 
 ### x86_64 (AMD Zen 4)
