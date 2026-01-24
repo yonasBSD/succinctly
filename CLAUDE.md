@@ -277,11 +277,13 @@ To regenerate: `cargo bench --bench jq_comparison`
 
 ### yq Query Performance (Apple M1 Max)
 
-| Size      | succinctly            | yq                    | Speedup    |
-|-----------|-----------------------|-----------------------|------------|
-| **10KB**  |  4.2 ms  (2.3 MiB/s)  |  8.4 ms  (1.2 MiB/s)  | **2.0x**   |
-| **100KB** |  5.5 ms (16.8 MiB/s)  | 20.6 ms  (4.5 MiB/s)  | **3.8x**   |
-| **1MB**   | 15.3 ms (60.2 MiB/s)  |120.7 ms  (7.6 MiB/s)  | **7.9x**   |
+| Size       | succinctly             | yq                     | Speedup     | Mem Ratio  |
+|------------|------------------------|------------------------|-------------|------------|
+| **10KB**   |   5.9 ms  (1.7 MiB/s)  |  10.3 ms  (1.0 MiB/s)  | **1.7x**    | **0.50x**  |
+| **100KB**  |   7.5 ms (12.3 MiB/s)  |  22.9 ms  (4.0 MiB/s)  | **3.0x**    | **0.35x**  |
+| **1MB**    |  16.2 ms (56.8 MiB/s)  | 117.4 ms  (7.8 MiB/s)  | **7.2x**    | **0.16x**  |
+| **10MB**   | 112.3 ms (82.0 MiB/s)  |   1.07 s  (8.6 MiB/s)  | **9.5x**    | **0.10x**  |
+| **100MB**  |   1.06 s (86.8 MiB/s)  |  10.34 s  (8.9 MiB/s)  | **9.7x**    | **0.09x**  |
 
 ### yq Query Performance (ARM Neoverse-V2)
 
@@ -309,7 +311,7 @@ Note: System `yq` not installed; showing succinctly-only performance.
 | **100KB** | 2.78 ms (33.1 MiB/s)    | 79.6 ms (1.2 MiB/s)   | **29x**    |
 | **1MB**   | 13.2 ms (69.7 MiB/s)    |210.5 ms (4.4 MiB/s)   | **16x**    |
 
-To regenerate: `cargo bench --bench yq_comparison`
+To regenerate: `succinctly dev bench yq` (includes memory) or `cargo bench --bench yq_comparison` (time only)
 
 ### Optimization Techniques
 
