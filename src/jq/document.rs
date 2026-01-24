@@ -56,6 +56,26 @@ pub trait DocumentCursor: Sized + Copy + Clone {
     fn document_index(&self) -> Option<usize> {
         None
     }
+
+    /// Create a cursor at the specified byte offset (0-indexed).
+    ///
+    /// Returns None if:
+    /// - The offset is out of bounds
+    /// - The offset doesn't correspond to a valid node
+    /// - Position-based navigation is not supported
+    fn cursor_at_offset(&self, _offset: usize) -> Option<Self> {
+        None
+    }
+
+    /// Create a cursor at the specified line and column (1-indexed).
+    ///
+    /// Returns None if:
+    /// - The position is out of bounds
+    /// - The position doesn't correspond to a valid node
+    /// - Position-based navigation is not supported
+    fn cursor_at_position(&self, _line: usize, _col: usize) -> Option<Self> {
+        None
+    }
 }
 
 /// A value from a document (JSON value or YAML value).

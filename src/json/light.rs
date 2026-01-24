@@ -771,6 +771,91 @@ impl<'a, W: AsRef<[u64]>> JsonCursor<'a, W> {
         let (start, end) = self.text_range()?;
         Some(&self.text[start..end])
     }
+
+    /// Create a cursor at the specified byte offset (0-indexed).
+    ///
+    /// Returns `None` if:
+    /// - The offset is out of bounds
+    /// - The offset doesn't correspond to a valid node
+    ///
+    /// This enables position-based navigation in jq queries via `at_offset(n)`.
+    pub fn cursor_at_offset(&self, offset: usize) -> Option<JsonCursor<'a, W>> {
+        if offset >= self.text.len() {
+            return None;
+        }
+
+        // Get the rank at this position (count of structural bits before offset)
+        let rank = self.index.ib_rank1(offset);
+
+        // Determine which IB index contains this offset
+        let ib_idx = if let Some(struct_pos) = self.index.ib_select1(rank) {
+            if struct_pos == offset {
+                // We're exactly at a structural position
+                rank
+            } else {
+                // We're inside a value - the containing node started at rank-1
+                if rank > 0 {
+                    rank - 1
+                } else {
+                    return None;
+                }
+            }
+        } else if rank > 0 {
+            rank - 1
+        } else {
+            return None;
+        };
+
+        // Convert IB index to BP position using binary search
+        // Find the BP position where the ib_idx-th open paren is located
+        let bp = self.index.bp();
+        let bp_len = bp.len();
+
+        if bp_len == 0 {
+            return None;
+        }
+
+        // Binary search for the smallest bp_pos where rank1(bp_pos + 1) > ib_idx
+        let mut lo = 0;
+        let mut hi = bp_len;
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let count = bp.rank1(mid + 1);
+            if count <= ib_idx {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        // Verify the position is valid
+        if lo < bp_len && bp.rank1(lo + 1) == ib_idx + 1 {
+            Some(JsonCursor {
+                text: self.text,
+                index: self.index,
+                bp_pos: lo,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Create a cursor at the specified line and column (1-indexed).
+    ///
+    /// Returns `None` if:
+    /// - Line or column is 0
+    /// - The position is out of bounds
+    /// - The position doesn't correspond to a valid node
+    ///
+    /// This enables position-based navigation in jq queries via `at_position(line; col)`.
+    pub fn cursor_at_position(&self, line: usize, col: usize) -> Option<JsonCursor<'a, W>> {
+        // Convert line/column to byte offset
+        let offset = self.index.to_offset(line, col)?;
+
+        // Use cursor_at_offset to find the node
+        self.cursor_at_offset(offset)
+    }
 }
 
 // ============================================================================
@@ -1425,6 +1510,16 @@ impl<'a, W: AsRef<[u64]> + Clone> DocumentCursor for JsonCursor<'a, W> {
     #[inline]
     fn text_position(&self) -> Option<usize> {
         JsonCursor::text_position(self)
+    }
+
+    #[inline]
+    fn cursor_at_offset(&self, offset: usize) -> Option<Self> {
+        JsonCursor::cursor_at_offset(self, offset)
+    }
+
+    #[inline]
+    fn cursor_at_position(&self, line: usize, col: usize) -> Option<Self> {
+        JsonCursor::cursor_at_position(self, line, col)
     }
 }
 

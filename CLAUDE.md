@@ -167,6 +167,54 @@ echo '{"a": 1, "b": 2}' | succinctly jq 'del(.a)'   # {"b": 2}
 echo '[1, 2, 3]' | succinctly jq '.[] |= . * 2'     # [2, 4, 6]
 ```
 
+### jq Position-Based Navigation (succinctly extension)
+
+Succinctly extends jq with position-based navigation builtins that allow jumping directly to a node at a specific byte offset or line/column position. This is unique to succinctly and not available in standard jq or yq.
+
+| Builtin                    | Description                                           | Example                |
+|----------------------------|-------------------------------------------------------|------------------------|
+| **at_offset(n)**           | Jump to node at byte offset `n` (0-indexed)           | `at_offset(10)`        |
+| **at_position(line; col)** | Jump to node at line/column (1-indexed, semicolon-separated) | `at_position(2; 3)` |
+
+**Use cases:**
+- IDE integration: Jump to node under cursor position
+- Error investigation: Navigate to specific byte offset from error message
+- Programmatic navigation: Build tools that work with document positions
+
+```bash
+# Jump to node at byte offset 10 (inside "Alice" string)
+echo '{"name": "Alice", "age": 30}' | succinctly jq 'at_offset(10)'
+# Output: "Alice"
+
+# Jump to node at line 1, column 1 (the root object)
+echo '{"name": "Alice"}' | succinctly jq 'at_position(1; 1)'
+# Output: {"name": "Alice"}
+
+# Navigate from offset position - get array at offset 10, then access element
+echo '{"users": [{"name": "Alice"}, {"name": "Bob"}]}' | succinctly jq 'at_offset(10) | .[1].name'
+# Output: "Bob"
+
+# Works with multiline JSON - line 2, column 3 is the "name" key
+echo '{
+  "name": "Alice",
+  "age": 30
+}' | succinctly jq 'at_position(2; 3)'
+# Output: "name"
+
+# Works with YAML via yq
+succinctly yq 'at_offset(6)' config.yaml
+
+# Combine with other jq operations
+echo '{"data": {"nested": {"value": 42}}}' | succinctly jq 'at_offset(9) | .nested.value'
+# Output: 42
+```
+
+**Notes:**
+- `at_offset(n)` uses 0-indexed byte offset (same as `jq-locate --offset`)
+- `at_position(line; col)` uses 1-indexed line and column (same as `jq-locate --line --column`)
+- Returns error if offset/position is out of bounds or doesn't correspond to a valid node
+- Use `at_offset(n)?` or `at_position(l; c)?` for optional (returns empty on invalid position)
+
 ## Feature Flags
 
 | Feature             | Description                    |

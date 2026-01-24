@@ -1456,6 +1456,15 @@ fn eval_builtin<'a, W: Clone + AsRef<[u64]>>(
 
         // Phase 22: File operations (yq)
         Builtin::Load(file_expr) => builtin_load(file_expr, value, optional),
+
+        // Phase 23: Position-based navigation (succinctly extension)
+        // These require cursor context - handled in eval_generic.rs
+        Builtin::AtOffset(_) => QueryResult::Error(EvalError::new(
+            "at_offset requires document cursor context".to_string(),
+        )),
+        Builtin::AtPosition(_, _) => QueryResult::Error(EvalError::new(
+            "at_position requires document cursor context".to_string(),
+        )),
     }
 }
 
@@ -6267,6 +6276,15 @@ fn substitute_var_in_builtin(
 
         // Phase 22: File operations (yq)
         Builtin::Load(e) => Builtin::Load(Box::new(substitute_var(e, var_name, replacement))),
+
+        // Phase 23: Position-based navigation (succinctly extension)
+        Builtin::AtOffset(e) => {
+            Builtin::AtOffset(Box::new(substitute_var(e, var_name, replacement)))
+        }
+        Builtin::AtPosition(line, col) => Builtin::AtPosition(
+            Box::new(substitute_var(line, var_name, replacement)),
+            Box::new(substitute_var(col, var_name, replacement)),
+        ),
     }
 }
 
@@ -12718,6 +12736,15 @@ fn expand_func_calls_in_builtin(
 
         // Phase 22: File operations (yq)
         Builtin::Load(e) => Builtin::Load(Box::new(expand_func_calls(e, func_name, params, body))),
+
+        // Phase 23: Position-based navigation (succinctly extension)
+        Builtin::AtOffset(e) => {
+            Builtin::AtOffset(Box::new(expand_func_calls(e, func_name, params, body)))
+        }
+        Builtin::AtPosition(line, col) => Builtin::AtPosition(
+            Box::new(expand_func_calls(line, func_name, params, body)),
+            Box::new(expand_func_calls(col, func_name, params, body)),
+        ),
     }
 }
 
@@ -13006,6 +13033,13 @@ fn substitute_func_param_in_builtin(builtin: &Builtin, param: &str, arg: &Expr) 
 
         // Phase 22: File operations (yq)
         Builtin::Load(e) => Builtin::Load(Box::new(substitute_func_param(e, param, arg))),
+
+        // Phase 23: Position-based navigation (succinctly extension)
+        Builtin::AtOffset(e) => Builtin::AtOffset(Box::new(substitute_func_param(e, param, arg))),
+        Builtin::AtPosition(line, col) => Builtin::AtPosition(
+            Box::new(substitute_func_param(line, param, arg)),
+            Box::new(substitute_func_param(col, param, arg)),
+        ),
     }
 }
 

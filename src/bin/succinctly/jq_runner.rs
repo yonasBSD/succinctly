@@ -10,7 +10,8 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use succinctly::dsv::{build_index as build_dsv_index, DsvConfig, DsvRows};
-use succinctly::jq::{self, Expr, JqValue, OwnedValue, Program, QueryResult};
+use succinctly::jq::eval_generic::{eval_with_cursor, to_owned as generic_to_owned, GenericResult};
+use succinctly::jq::{self, Expr, JqValue, OwnedValue, Program};
 use succinctly::json::light::{JsonCursor, StandardJson};
 use succinctly::json::JsonIndex;
 
@@ -1288,23 +1289,23 @@ fn evaluate_input(
     let index = JsonIndex::build(json_bytes);
     let cursor = index.root(json_bytes);
 
-    // TODO: Pass context to evaluator for variable resolution
-    // For now, we use the basic eval which doesn't support external variables
-    let result = jq::eval(expr, cursor);
+    // Use eval_with_cursor to preserve cursor context for position-based navigation
+    // (at_offset, at_position builtins)
+    let result = eval_with_cursor(expr, cursor);
 
     // Convert result to Vec<OwnedValue>
     match result {
-        QueryResult::One(v) => Ok(vec![standard_json_to_owned(&v)]),
-        QueryResult::OneCursor(c) => Ok(vec![standard_json_to_owned(&c.value())]),
-        QueryResult::Many(vs) => Ok(vs.iter().map(standard_json_to_owned).collect()),
-        QueryResult::None => Ok(vec![]),
-        QueryResult::Error(e) => {
+        GenericResult::One(v) => Ok(vec![generic_to_owned(&v)]),
+        GenericResult::OneCursor(c) => Ok(vec![generic_to_owned(&c.value())]),
+        GenericResult::Many(vs) => Ok(vs.iter().map(generic_to_owned).collect()),
+        GenericResult::None => Ok(vec![]),
+        GenericResult::Error(e) => {
             eprintln!("jq: error: {}", e);
             Ok(vec![])
         }
-        QueryResult::Owned(v) => Ok(vec![v]),
-        QueryResult::ManyOwned(vs) => Ok(vs),
-        QueryResult::Break(label) => {
+        GenericResult::Owned(v) => Ok(vec![v]),
+        GenericResult::ManyOwned(vs) => Ok(vs),
+        GenericResult::Break(label) => {
             eprintln!("jq: error: break ${} not in label", label);
             Ok(vec![])
         }
@@ -1321,69 +1322,35 @@ fn evaluate_bytes_lazy<'a>(
     index: &'a JsonIndex,
 ) -> Vec<JqValue<'a, Vec<u64>>> {
     let cursor = index.root(json_bytes);
-    let result = jq::eval(expr, cursor);
-    query_result_to_jq_values(result, cursor)
+    // Use eval_with_cursor to preserve cursor context for position-based navigation
+    let result = eval_with_cursor(expr, cursor);
+    generic_result_to_jq_values(result, cursor)
 }
 
-/// Convert StandardJson to OwnedValue.
-fn standard_json_to_owned<W: Clone + AsRef<[u64]>>(value: &StandardJson<'_, W>) -> OwnedValue {
-    match value {
-        StandardJson::Null => OwnedValue::Null,
-        StandardJson::Bool(b) => OwnedValue::Bool(*b),
-        StandardJson::Number(n) => {
-            if let Ok(i) = n.as_i64() {
-                OwnedValue::Int(i)
-            } else if let Ok(f) = n.as_f64() {
-                OwnedValue::Float(f)
-            } else {
-                OwnedValue::Null
-            }
-        }
-        StandardJson::String(s) => {
-            OwnedValue::String(s.as_str().map(|c| c.to_string()).unwrap_or_default())
-        }
-        StandardJson::Array(elements) => {
-            OwnedValue::Array((*elements).map(|e| standard_json_to_owned(&e)).collect())
-        }
-        StandardJson::Object(fields) => OwnedValue::Object(
-            (*fields)
-                .map(|f| {
-                    let key = match f.key() {
-                        StandardJson::String(s) => s.as_str().unwrap_or_default().to_string(),
-                        _ => String::new(),
-                    };
-                    (key, standard_json_to_owned(&f.value()))
-                })
-                .collect(),
-        ),
-        StandardJson::Error(_) => OwnedValue::Null,
-    }
-}
-
-/// Convert QueryResult to Vec<JqValue> for lazy output.
+/// Convert GenericResult to JqValue, preserving lazy cursor references.
 ///
-/// This preserves cursor references where possible, allowing lazy output
-/// that preserves original number formatting (e.g., `4e4` stays as `4e4`).
-fn query_result_to_jq_values<'a, W: Clone + AsRef<[u64]>>(
-    result: QueryResult<'a, W>,
+/// This is similar to query_result_to_jq_values but works with the
+/// cursor-aware GenericResult type from eval_generic.
+fn generic_result_to_jq_values<'a, W: Clone + AsRef<[u64]>>(
+    result: GenericResult<StandardJson<'a, W>>,
     cursor: JsonCursor<'a, W>,
 ) -> Vec<JqValue<'a, W>> {
     match result {
-        QueryResult::One(v) => vec![standard_json_to_jq_value(v, &cursor)],
+        GenericResult::One(v) => vec![standard_json_to_jq_value(v, &cursor)],
         // OneCursor: directly use the cursor - most memory efficient for unchanged values
-        QueryResult::OneCursor(c) => vec![JqValue::Cursor(c)],
-        QueryResult::Many(vs) => vs
+        GenericResult::OneCursor(c) => vec![JqValue::Cursor(c)],
+        GenericResult::Many(vs) => vs
             .into_iter()
             .map(|v| standard_json_to_jq_value(v, &cursor))
             .collect(),
-        QueryResult::None => vec![],
-        QueryResult::Error(e) => {
+        GenericResult::None => vec![],
+        GenericResult::Error(e) => {
             eprintln!("jq: error: {}", e);
             vec![]
         }
-        QueryResult::Owned(v) => vec![JqValue::from_owned(v)],
-        QueryResult::ManyOwned(vs) => vs.into_iter().map(JqValue::from_owned).collect(),
-        QueryResult::Break(label) => {
+        GenericResult::Owned(v) => vec![JqValue::from_owned(v)],
+        GenericResult::ManyOwned(vs) => vs.into_iter().map(JqValue::from_owned).collect(),
+        GenericResult::Break(label) => {
             eprintln!("jq: error: break ${} not in label", label);
             vec![]
         }
