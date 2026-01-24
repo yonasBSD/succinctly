@@ -218,7 +218,7 @@ Each section tests specific parsing features:
 
 ## yq Command
 
-Query YAML files using a yq-compatible interface (mikefarah/yq).
+Query YAML files using a yq-compatible interface (mikefarah/yq). Implements YAML 1.2 Core Schema - see [YAML 1.2 Compliance](../compliance/yaml/1.2.md) for details on type handling.
 
 ```bash
 succinctly yq [OPTIONS] <FILTER> [FILES...]
