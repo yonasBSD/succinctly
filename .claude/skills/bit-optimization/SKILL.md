@@ -186,6 +186,71 @@ group.bench_function("production", |b| b.iter(|| pfsm_optimized::process(json)))
 - [ ] Multiple patterns tested (if applicable)
 - [ ] End-to-end benchmark confirms improvement carries through
 
+## Memory-Efficient Construction
+
+### Peak vs Steady-State Memory
+
+**Key insight**: Optimizing construction reduces **peak** memory but may not affect **steady-state** memory (what benchmarks measure).
+
+```rust
+// BAD: Double allocation during construction
+fn from_vec(data: Vec<u128>) -> Self {
+    let layout = Layout::from_size_align(len * 16, 64).unwrap();
+    let ptr = alloc::alloc(layout);  // New allocation
+    copy_nonoverlapping(data.as_ptr(), ptr, len);  // Copy
+    // data dropped here - peak was 2x
+}
+
+// GOOD: Builder pattern - single allocation
+struct CacheAlignedBuilder {
+    ptr: NonNull<u128>,
+    len: usize,
+    capacity: usize,
+}
+
+impl CacheAlignedBuilder {
+    fn with_capacity(cap: usize) -> Self {
+        let layout = Layout::from_size_align(cap * 16, 64).unwrap();
+        let ptr = alloc::alloc(layout);  // Allocate aligned immediately
+        Self { ptr, len: 0, capacity: cap }
+    }
+
+    fn push(&mut self, value: u128) {
+        self.ptr.as_ptr().add(self.len).write(value);
+        self.len += 1;
+    }
+
+    fn build(self) -> CacheAligned {
+        // Transfer ownership, no copy needed
+        let result = CacheAligned { ptr: self.ptr, len: self.len };
+        mem::forget(self);  // Prevent Drop
+        result
+    }
+}
+```
+
+**Benefits**:
+- Single allocation (not Vec + aligned copy)
+- 50% peak memory reduction during construction
+- Cache-aligned from the start
+
+### "Succinct" Doesn't Mean Everything Is Compact
+
+In this codebase:
+- **Succinct operations**: rank/select are O(1) with o(n) auxiliary space
+- **Non-succinct storage**: `bp_to_text: Vec<u32>` uses 4 bytes per node (not compressed)
+
+**Memory breakdown for YamlIndex (~5x input)**:
+
+| Component                       | Size (100MB input) | Notes                                        |
+|---------------------------------|--------------------|----------------------------------------------|
+| `bp_to_text` + `bp_to_text_end` | ~80 MB             | 4 bytes × 2 × 10M nodes - **biggest target** |
+| BP bitvector + rank/select      | ~20 MB             | Actually succinct                            |
+| Input text                      | 100 MB             | Retained for value extraction                |
+| Other metadata                  | ~30 MB             | Type info, containers bitvec                 |
+
+**Optimization opportunity**: Position arrays are monotonic for scalars. Elias-Fano encoding could reduce 80 MB → ~6.6 MB (12× reduction). See [compact-index-investigation.md](../../../docs/plan/compact-index-investigation.md).
+
 ## See Also
 
 - [docs/optimizations/bit-manipulation.md](../../../docs/optimizations/bit-manipulation.md) - Bit manipulation techniques
@@ -193,3 +258,4 @@ group.bench_function("production", |b| b.iter(|| pfsm_optimized::process(json)))
 - [docs/optimizations/hierarchical-structures.md](../../../docs/optimizations/hierarchical-structures.md) - Rank/select structures
 - [docs/optimizations/access-patterns.md](../../../docs/optimizations/access-patterns.md) - Sequential vs random access
 - [docs/optimizations/history.md](../../../docs/optimizations/history.md) - Historical optimization record
+- [docs/plan/compact-index-investigation.md](../../../docs/plan/compact-index-investigation.md) - Elias-Fano for position arrays
