@@ -475,3 +475,15 @@ For detailed documentation on optimization techniques used in this project, see 
   - **Zero-cost for JSON**: Uses `NoSelect` (ZST) - no memory or runtime overhead
   - **Fixes GitHub issue #26**: YAML `at_offset` and `yq-locate` now return correct nodes
   - See [docs/parsing/yaml.md#p11-bp-select1-for-yq-locate---accepted-](docs/parsing/yaml.md#p11-bp-select1-for-yq-locate---accepted-) for full analysis
+- ✅ P12 (Advance Index for bp_to_text): **20-25% faster** yq identity queries on 1MB files, fixes issue #62
+  - Replaced `Vec<u32>` with memory-efficient `BpToTextPositions` enum (IB + Advance bitmaps)
+  - **~1.5× memory compression** for bp_to_text structure (measured with 33% duplicates)
+  - **Automatic fallback** to `Vec<u32>` for non-monotonic positions (explicit keys)
+  - **End-to-end yq benchmarks**:
+    - users/1mb: **-24.6%** time (+32.7% throughput)
+    - sequences/1mb: **-24.8%** time (+33.0% throughput)
+    - nested/1mb: **-21.5%** time (+27.4% throughput)
+  - **yaml_bench improvements**: sequences/1000 -5.0%, large/1mb -3.2%, block_scalars -3.5%
+  - **Minor regression**: ~1.5-2% on tiny (10-element) quoted string benchmarks
+  - Better cache locality from compact bitmap representation
+  - See [docs/parsing/yaml.md#p12-advance-index-for-memory-efficient-bp_to_text---accepted-](docs/parsing/yaml.md#p12-advance-index-for-memory-efficient-bp_to_text---accepted-) for full analysis
