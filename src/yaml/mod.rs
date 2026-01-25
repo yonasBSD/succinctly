@@ -47,6 +47,7 @@
 //! The oracle handles block style (indentation-based), flow style
 //! (bracket-based like JSON), anchors, aliases, and block scalars uniformly.
 
+mod advance_positions;
 mod error;
 mod index;
 mod light;

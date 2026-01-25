@@ -368,6 +368,7 @@ The YAML parser uses platform-specific SIMD for hot paths:
 - **P4**: Anchor/Alias SIMD - AVX2 scans for anchor name terminators (6-17% improvement on anchor-heavy workloads)
 - **P9**: Direct YAML-to-JSON streaming - eliminated intermediate DOM for identity queries (8-22% improvement, 2.3x on yq benchmarks)
 - **P11**: BP Select1 for yq-locate - zero-cost generic select support for O(1) offset-to-BP lookups (2.5-5.9x faster select1, fixes issue #26)
+- **P12**: Advance Index for bp_to_text - memory-efficient bitmap encoding (~1.5× measured, 20-25% faster yq identity queries on 1MB files)
 - **M2**: Navigation streaming - cursor-based streaming for navigation queries, supports both JSON and YAML output
 
 **Rejected Optimizations:**

@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use crate::trees::{BalancedParens, WithSelect};
 use crate::util::broadword::select_in_word;
 
+use super::advance_positions::OpenPositions;
 use super::error::YamlError;
 use super::light::YamlCursor;
 use super::parser::build_semi_index;
@@ -45,9 +46,10 @@ pub struct YamlIndex<W = Vec<u64>> {
     /// Number of valid bits in TY
     #[allow(dead_code)]
     ty_len: usize,
-    /// Direct BP open index to text position mapping.
-    /// Entry i = text byte offset for the i-th BP open.
-    bp_to_text: Vec<u32>,
+    /// Memory-efficient BP open index to text position mapping.
+    /// Uses Advance Index encoding for ~1.5× compression when positions are monotonic,
+    /// otherwise falls back to `Vec<u32>` for non-monotonic cases (explicit keys, etc.).
+    open_positions: OpenPositions,
     /// End positions for scalars. For each BP open, stores the end byte offset.
     /// For containers, stores 0 (containers don't have a text end position).
     bp_to_text_end: Vec<u32>,
@@ -160,6 +162,9 @@ impl YamlIndex<Vec<u64>> {
             .map(|(name, &bp_pos)| (bp_pos, name.clone()))
             .collect();
 
+        // Convert bp_to_text to compact storage when positions are monotonic
+        let open_positions = OpenPositions::build(&semi.bp_to_text, ib_len);
+
         Ok(Self {
             ib: semi.ib,
             ib_len,
@@ -167,7 +172,7 @@ impl YamlIndex<Vec<u64>> {
             bp: BalancedParens::new_with_select(semi.bp, semi.bp_len),
             ty: semi.ty,
             ty_len: semi.ty_len,
-            bp_to_text: semi.bp_to_text,
+            open_positions,
             bp_to_text_end: semi.bp_to_text_end,
             seq_items: semi.seq_items,
             containers: semi.containers,
@@ -208,6 +213,9 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             .map(|(name, &bp_pos)| (bp_pos, name.clone()))
             .collect();
 
+        // Convert bp_to_text to compact storage when positions are monotonic
+        let open_positions = OpenPositions::build(&bp_to_text, ib_len);
+
         Self {
             ib,
             ib_len,
@@ -215,7 +223,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             bp: BalancedParens::from_words_with_select(bp, bp_len),
             ty,
             ty_len,
-            bp_to_text,
+            open_positions,
             bp_to_text_end,
             seq_items,
             containers,
@@ -255,6 +263,9 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             .map(|(name, &bp_pos)| (bp_pos, name.clone()))
             .collect();
 
+        // Convert bp_to_text to compact storage when positions are monotonic
+        let open_positions = OpenPositions::build(&bp_to_text, ib_len);
+
         Self {
             ib,
             ib_len,
@@ -262,7 +273,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
             bp: BalancedParens::from_words_with_select(bp, bp_len),
             ty,
             ty_len,
-            bp_to_text,
+            open_positions,
             bp_to_text_end,
             seq_items,
             containers,
@@ -286,7 +297,7 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         // Actually it's simpler: rank1(bp_pos) gives count before,
         // so the index is rank1(bp_pos) if the bit is 1
         let open_idx = self.bp.rank1(bp_pos);
-        self.bp_to_text.get(open_idx).map(|&pos| pos as usize)
+        self.open_positions.get(open_idx).map(|pos| pos as usize)
     }
 
     /// Get the text end byte offset for a BP position.
@@ -462,55 +473,37 @@ impl<W: AsRef<[u64]>> YamlIndex<W> {
         count
     }
 
-    /// Debug helper to get bp_to_text array.
+    /// Debug helper to get open position for a given open index.
     #[cfg(test)]
-    pub fn debug_bp_to_text(&self) -> &[u32] {
-        &self.bp_to_text
+    pub fn debug_open_position_at(&self, open_idx: usize) -> Option<u32> {
+        self.open_positions.get(open_idx)
     }
 
-    /// Get a reference to the bp_to_text array.
+    /// Get a reference to the OpenPositions structure.
     ///
-    /// This array maps BP open index to text byte offset. It is sorted in
-    /// non-decreasing order (multiple opens can have the same text position
-    /// when containers share position with their first child).
+    /// This maps BP open index to text byte offset using memory-efficient
+    /// Advance Index encoding when positions are monotonic.
     #[inline]
-    pub fn bp_to_text(&self) -> &[u32] {
-        &self.bp_to_text
+    pub fn open_positions(&self) -> &OpenPositions {
+        &self.open_positions
     }
 
     /// Find the BP position for the deepest node starting at a given text position.
     ///
-    /// Uses binary search on bp_to_text to find the last open_idx with matching
-    /// text position, then O(1) select1 to convert to BP position.
+    /// Uses the Advance Index to find the last open_idx with matching text position,
+    /// then O(1) select1 to convert to BP position.
     /// Returns None if no match found.
     pub fn find_bp_at_text_pos(&self, text_pos: usize) -> Option<usize> {
-        let bp_to_text = &self.bp_to_text;
-        if bp_to_text.is_empty() {
+        if self.open_positions.is_empty() {
             return None;
         }
 
-        let text_pos_u32 = text_pos as u32;
-
-        // Binary search to find any matching position
-        let search_result = bp_to_text.binary_search(&text_pos_u32);
-
-        // Find the last (rightmost) index with this text position
-        // (deepest node when multiple nodes share the same text position)
-        let last_match_idx = match search_result {
-            Ok(idx) => {
-                // Found a match, scan right to find the last one
-                let mut last = idx;
-                while last + 1 < bp_to_text.len() && bp_to_text[last + 1] == text_pos_u32 {
-                    last += 1;
-                }
-                last
-            }
-            Err(_) => return None, // No match found
-        };
+        // Use AdvancePositions reverse lookup to find the last open at this position
+        let last_open_idx = self.open_positions.find_last_open_at_text_pos(text_pos)?;
 
         // Convert open_idx to bp_pos using O(1) select1
         // select1(k) returns the position of the k-th 1-bit (0-indexed)
-        self.bp.select1(last_match_idx)
+        self.bp.select1(last_open_idx)
     }
 
     /// Get the target BP position for an alias at the given BP position.
