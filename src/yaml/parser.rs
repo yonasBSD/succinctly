@@ -3280,13 +3280,13 @@ impl<'a> Parser<'a> {
         self.write_bp_close();
 
         Ok(SemiIndex {
-            ib: self.ib_words.clone(),
-            bp: self.bp_words.clone(),
-            ty: self.ty_words.clone(),
-            bp_to_text: self.bp_to_text.clone(),
-            bp_to_text_end: self.bp_to_text_end.clone(),
-            seq_items: self.seq_item_words.clone(),
-            containers: self.container_words.clone(),
+            ib: core::mem::take(&mut self.ib_words),
+            bp: core::mem::take(&mut self.bp_words),
+            ty: core::mem::take(&mut self.ty_words),
+            bp_to_text: core::mem::take(&mut self.bp_to_text),
+            bp_to_text_end: core::mem::take(&mut self.bp_to_text_end),
+            seq_items: core::mem::take(&mut self.seq_item_words),
+            containers: core::mem::take(&mut self.container_words),
             ib_len: self.input.len(),
             bp_len: self.bp_pos,
             ty_len: self.ty_pos,
