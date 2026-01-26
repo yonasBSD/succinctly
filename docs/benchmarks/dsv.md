@@ -6,11 +6,11 @@ Performance benchmarks for DSV parsing via `succinctly jq --input-dsv`.
 
 ## Summary
 
-| Metric             | ARM (M1 Max) | x86_64 (Ryzen 9) |
-|--------------------|--------------|------------------|
-| **CLI Throughput** | 6-29 MiB/s   | 9-40 MiB/s       |
-| **API Iteration**  | -            | 85-1676 MiB/s    |
-| **Parse Speed**    | ~0.8 GB/s    | 1.3-3.7 GB/s     |
+| Metric             | ARM (M1 Max) | x86_64 (Ryzen 9)  | ARM (Graviton 4) |
+|--------------------|--------------|-------------------|------------------|
+| **CLI Throughput** | 6-29 MiB/s   | 10-103 MiB/s      | 7-89 MiB/s       |
+| **API Iteration**  | -            | 85-1676 MiB/s     | ~1000 MiB/s      |
+| **Parse Speed**    | ~0.8 GB/s    | 1.3-3.7 GB/s      | ~3.8 GB/s        |
 
 ## Platforms
 
@@ -23,6 +23,11 @@ Performance benchmarks for DSV parsing via `succinctly jq --input-dsv`.
 - **CPU**: AMD Ryzen 9 7950X (Zen 4)
 - **SIMD**: AVX2 + BMI2 (64 bytes/iter)
 - **Build**: `RUSTFLAGS="-C target-cpu=native" cargo build --release --features cli`
+
+### Platform 3: ARM Neoverse-V2 (AWS Graviton 4)
+- **CPU**: ARM Neoverse-V2 (AWS Graviton 4)
+- **SIMD**: NEON (16 bytes/iter), SVE2 with SVEBITPERM
+- **Build**: `cargo build --release --features cli`
 
 ## CLI Throughput (End-to-End)
 
@@ -45,18 +50,33 @@ Full jq pipeline including DSV parsing, iteration, and JSON output.
 
 ### x86_64 (Ryzen 9) - 10MB Files
 
+| Pattern      | Time   | Throughput  |
+|--------------|--------|-------------|
+| strings      |  97ms  | 102.8 MiB/s |
+| quoted       | 184ms  |  54.4 MiB/s |
+| pathological | 220ms  |  45.4 MiB/s |
+| wide         | 241ms  |  41.5 MiB/s |
+| multiline    | 306ms  |  32.6 MiB/s |
+| users        | 544ms  |  18.4 MiB/s |
+| numeric      | 568ms  |  17.6 MiB/s |
+| mixed        | 606ms  |  16.5 MiB/s |
+| tabular      | 607ms  |  16.5 MiB/s |
+| long         | 1.03s  |   9.7 MiB/s |
+
+### ARM Neoverse-V2 (Graviton 4) - 10MB Files
+
 | Pattern      | Time  | Throughput |
 |--------------|-------|------------|
-| strings      | 254ms | 39.4 MiB/s |
-| multiline    | 336ms | 29.7 MiB/s |
-| quoted       | 369ms | 27.1 MiB/s |
-| tabular      | 548ms | 18.2 MiB/s |
-| users        | 587ms | 17.0 MiB/s |
-| numeric      | 585ms | 17.1 MiB/s |
-| mixed        | 549ms | 18.2 MiB/s |
-| pathological | 544ms | 18.4 MiB/s |
-| wide         | 1.09s | 9.1 MiB/s  |
-| long         | 918ms | 10.9 MiB/s |
+| strings      | 113ms | 88.7 MiB/s |
+| quoted       | 221ms | 45.3 MiB/s |
+| pathological | 265ms | 37.7 MiB/s |
+| wide         | 321ms | 31.1 MiB/s |
+| multiline    | 412ms | 24.3 MiB/s |
+| users        | 681ms | 14.7 MiB/s |
+| numeric      | 731ms | 13.7 MiB/s |
+| tabular      | 756ms | 13.2 MiB/s |
+| mixed        | 751ms | 13.3 MiB/s |
+| long         | 1.35s | 7.4 MiB/s  |
 
 ## Query Comparison
 
@@ -80,22 +100,22 @@ Direct API usage without JSON serialization overhead.
 | Pattern | Throughput |
 |---------|------------|
 | strings | 1676 MiB/s |
-| quoted | 1331 MiB/s |
-| mixed | 792 MiB/s |
+| quoted  | 1331 MiB/s |
+| mixed   | 792 MiB/s  |
 
 ### Random Access
 
 | Pattern | Ops/sec | ns/field |
 |---------|---------|----------|
-| strings | 10.7M | 93 ns |
-| mixed | 5.8M | 173 ns |
+| strings | 10.7M   | 93 ns    |
+| mixed   | 5.8M    | 173 ns   |
 
 ### Parse Speed (Index Build Only)
 
 | Pattern | Throughput |
 |---------|------------|
-| strings | 3.7 GB/s |
-| mixed | 1.3 GB/s |
+| strings | 3.7 GB/s   |
+| mixed   | 1.3 GB/s   |
 
 ## Memory Usage
 

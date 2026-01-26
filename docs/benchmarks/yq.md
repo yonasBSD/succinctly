@@ -85,16 +85,16 @@ cargo bench --bench yq_comparison
 
 | Size      | succinctly             | yq                     | Speedup    |
 |-----------|------------------------|------------------------|------------|
-| **10KB**  | 0.99 ms (9.9 MiB/s)    | 4.46 ms (2.2 MiB/s)    | **4.5x**   |
-| **100KB** | 2.20 ms (41.8 MiB/s)   | 20.1 ms (4.6 MiB/s)    | **9.1x**   |
-| **1MB**   | 13.6 ms (68.0 MiB/s)   | 154 ms (6.0 MiB/s)     | **11.4x**  |
+| **10KB**  | 2.0 ms (4.9 MiB/s)     | 5.5 ms (1.8 MiB/s)     | **2.7x**   |
+| **100KB** | 3.7 ms (24.9 MiB/s)    | 21.6 ms (4.3 MiB/s)    | **5.8x**   |
+| **1MB**   | 19.5 ms (47.3 MiB/s)   | 154.6 ms (6.0 MiB/s)   | **7.9x**   |
 
 **Key metrics:**
 - ✅ NEON SIMD optimizations active (block scalar + anchor parsing)
 - ✅ SVE2 with SVEBITPERM support (BDEP/BEXT for DSV)
-- ✅ **11.4x faster** than yq on 1MB files
-- ✅ 68 MiB/s throughput vs yq's 6 MiB/s
-- ✅ ~20% faster than Neoverse-V1 due to improved microarchitecture
+- ✅ **7.9x faster** than yq on 1MB files
+- ✅ 47 MiB/s throughput vs yq's 6 MiB/s
+- ✅ Up to **11.2x faster** on nested structures (100MB)
 
 ### ARM (Neoverse-V1 / Graviton 3) - succinctly yq Performance
 
@@ -134,16 +134,16 @@ Note: System `yq` was not installed for comparison. Results show succinctly perf
 
 | Size      | succinctly             | yq                     | Speedup    |
 |-----------|------------------------|------------------------|------------|
-| **10KB**  | 1.63 ms (6.0 MiB/s)    | 64.6 ms (155 KiB/s)    | **40x**    |
-| **100KB** | 2.78 ms (33.1 MiB/s)   | 79.6 ms (1.2 MiB/s)    | **29x**    |
-| **1MB**   | 13.2 ms (69.7 MiB/s)   | 210.5 ms (4.4 MiB/s)   | **16x**    |
+| **10KB**  | 2.9 ms (3.4 MiB/s)     | 68.9 ms (145 KiB/s)    | **24x**    |
+| **100KB** | 4.4 ms (21.4 MiB/s)    | 85.2 ms (1.1 MiB/s)    | **19x**    |
+| **1MB**   | 20.6 ms (45.9 MiB/s)   | 216.5 ms (4.4 MiB/s)   | **11x**    |
 
 ### x86_64 (AMD Ryzen 9 7950X) - Key Achievements
 
 **Key Achievements:**
 - ✅ **Full yq CLI compatibility** - quoted strings preserved as strings
-- ✅ **40x faster than yq** on 10KB files (end-to-end CLI comparison)
-- ✅ **16x faster than yq** on 1MB files
+- ✅ **24x faster than yq** on 10KB files (end-to-end CLI comparison)
+- ✅ **11x faster than yq** on 1MB files
 - ✅ **Comprehensive test suite** - 32 tests including 8 direct byte-for-byte comparisons
 
 **See also:** [docs/parsing/yaml.md](../parsing/yaml.md) for optimization details.
@@ -356,9 +356,9 @@ The YAML parser uses platform-specific SIMD for hot paths:
 - large/1mb: **-17% faster** (2.18ms → 1.82ms)
 
 **End-to-end yq comparison (x86_64):**
-- 10KB files: **40x faster** than yq (1.6ms vs 64.6ms)
-- 100KB files: **29x faster** than yq (2.8ms vs 79.6ms)
-- 1MB files: **16x faster** than yq (13.2ms vs 210.5ms)
+- 10KB files: **24x faster** than yq (2.9ms vs 68.9ms)
+- 100KB files: **19x faster** than yq (4.4ms vs 85.2ms)
+- 1MB files: **11x faster** than yq (20.6ms vs 216.5ms)
 
 **Optimizations (cumulative):**
 - **P0**: Multi-character classification infrastructure (8 types in parallel)
@@ -493,9 +493,9 @@ $ echo 'id: "001"' | succinctly yq -o json '.'
 - **7.2x faster** on 1MB files
 
 **Speed (AMD Ryzen 9 7950X):**
-- **40x faster** on 10KB files
-- **29x faster** on 100KB files
-- **16x faster** on 1MB files
+- **24x faster** on 10KB files
+- **19x faster** on 100KB files
+- **11x faster** on 1MB files
 
 **Memory (Apple M1 Max, 100MB files):**
 - **7-14x less memory** (271-662 MB vs 3-9 GB)
@@ -525,10 +525,10 @@ The `bp_select_micro` benchmark measures the performance of select1 queries on b
 
 | BP Size    | select1 (new) | binary_search_rank1 (old) | Speedup   |
 |------------|---------------|---------------------------|-----------|
-| 1K opens   | 191 µs        | 780 µs                    | **4.1x**  |
-| 10K opens  | 160 µs        | 1.15 ms                   | **7.2x**  |
-| 100K opens | 185 µs        | 1.45 ms                   | **7.8x**  |
-| 1M opens   | 196 µs        | 1.75 ms                   | **8.9x**  |
+| 1K opens   | 182 µs        | 759 µs                    | **4.2x**  |
+| 10K opens  | 162 µs        | 1.12 ms                   | **6.9x**  |
+| 100K opens | 156 µs        | 1.42 ms                   | **9.1x**  |
+| 1M opens   | 173 µs        | 1.73 ms                   | **10.0x** |
 
 ### Key Observations
 

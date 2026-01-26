@@ -278,6 +278,14 @@ cargo test
 
 To regenerate: `cargo bench --bench jq_comparison`
 
+### jq Query Performance (ARM Neoverse-V2)
+
+| Size      | succinctly            | jq                    | Speedup    |
+|-----------|-----------------------|-----------------------|------------|
+| **10KB**  |  2.2 ms (4.3 MiB/s)   |  2.7 ms  (3.5 MiB/s)  | **1.2x**   |
+| **100KB** |  4.7 ms (17.1 MiB/s)  |  6.8 ms (12.5 MiB/s)  | **1.5x**   |
+| **1MB**   | 28.4 ms (28.4 MiB/s)  | 47.3 ms (17.1 MiB/s)  | **1.7x**   |
+
 ### jq Query Performance (ARM Neoverse-V1)
 
 | Size      | succinctly            | jq                    | Speedup    |
@@ -300,9 +308,9 @@ To regenerate: `cargo bench --bench jq_comparison`
 
 | Size      | succinctly              | yq                    | Speedup    |
 |-----------|-------------------------|-----------------------|------------|
-| **10KB**  | 0.99 ms  (9.9 MiB/s)    | 4.46 ms (2.2 MiB/s)   | **4.5x**   |
-| **100KB** | 2.20 ms (41.8 MiB/s)    | 20.1 ms (4.6 MiB/s)   | **9.1x**   |
-| **1MB**   | 13.6 ms (68.0 MiB/s)    | 154 ms (6.0 MiB/s)    | **11.4x**  |
+| **10KB**  | 2.0 ms  (4.9 MiB/s)     | 5.5 ms (1.8 MiB/s)    | **2.7x**   |
+| **100KB** | 3.7 ms (24.9 MiB/s)     | 21.6 ms (4.3 MiB/s)   | **5.8x**   |
+| **1MB**   | 19.5 ms (47.3 MiB/s)    | 154.6 ms (6.0 MiB/s)  | **7.9x**   |
 
 ### yq Query Performance (ARM Neoverse-V1)
 
@@ -318,9 +326,9 @@ Note: System `yq` not installed; showing succinctly-only performance.
 
 | Size      | succinctly              | yq                    | Speedup    |
 |-----------|-------------------------|-----------------------|------------|
-| **10KB**  | 1.63 ms  (6.0 MiB/s)    | 64.6 ms (155 KiB/s)   | **40x**    |
-| **100KB** | 2.78 ms (33.1 MiB/s)    | 79.6 ms (1.2 MiB/s)   | **29x**    |
-| **1MB**   | 13.2 ms (69.7 MiB/s)    |210.5 ms (4.4 MiB/s)   | **16x**    |
+| **10KB**  | 2.9 ms   (3.4 MiB/s)    | 68.9 ms (145 KiB/s)   | **24x**    |
+| **100KB** | 4.4 ms  (21.4 MiB/s)    | 85.2 ms (1.1 MiB/s)   | **19x**    |
+| **1MB**   | 20.6 ms (45.9 MiB/s)    |216.5 ms (4.4 MiB/s)   | **11x**    |
 
 To regenerate: `succinctly dev bench yq` (includes memory) or `cargo bench --bench yq_comparison` (time only)
 
