@@ -155,20 +155,19 @@ cargo test --test properties
 
 ### Benchmarking
 
+For comprehensive benchmarking instructions, see [benchmarking.md](benchmarking.md).
+
+Quick reference:
 ```bash
+# Generate test data
+cargo run --release --features cli -- json generate-suite
+cargo run --release --features cli -- yaml generate-suite
+
 # Run all benchmarks
 cargo bench
 
-# Run specific benchmark suites
-cargo bench --bench rank_select        # BitVec operations
-cargo bench --bench json_simd          # SIMD JSON parsing
-cargo bench --bench pfsm_vs_simd       # PFSM vs SIMD comparison
-cargo bench --bench pfsm_vs_scalar     # PFSM vs scalar comparison
-cargo bench --bench balanced_parens    # Tree navigation
-
-# Generate benchmark data first
-cargo run --release --features cli -- json generate-suite
-cargo run --release --features cli -- yaml generate-suite
+# Run specific benchmark
+cargo bench --bench rank_select
 ```
 
 ### Profiling

@@ -1,4 +1,4 @@
-# Benchmark Directory
+# Benchmark Inventory
 
 This document provides a comprehensive index of all benchmark reports in the project.
 
