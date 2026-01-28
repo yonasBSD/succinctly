@@ -13,40 +13,26 @@ By keeping these benchmarks in a separate crate, we avoid adding `simd-json`, `s
 
 ## Running Benchmarks
 
-First, generate test data from the parent directory:
+For detailed instructions, see [../docs/guides/benchmarking.md](../docs/guides/benchmarking.md).
+
+Quick start:
 
 ```bash
+# Generate test data from parent directory
 cd ..
-cargo run --release --features cli -- json generate 10mb -o data/bench/generated/comprehensive/10mb.json
-cargo run --release --features cli -- json generate 100mb -o data/bench/generated/comprehensive/100mb.json
-```
+cargo run --release --features cli -- json generate-suite
 
-Then run benchmarks:
-
-```bash
-# All benchmarks
+# Run benchmarks
+cd bench-compare
 cargo bench --bench json_parsers
-
-# Specific benchmark groups
-cargo bench --bench json_parsers -- "parse_only"
-cargo bench --bench json_parsers -- "parse_traverse"
-cargo bench --bench json_parsers -- "traverse_only"
-cargo bench --bench json_parsers -- "memory_overhead"
 ```
 
 ## Benchmark Groups
 
-### parse_only
-Measures parse/index time only (no traversal). Tests how fast each parser can build its internal representation.
-
-### parse_traverse
-Measures full pipeline: parse + traverse all nodes. Tests end-to-end performance for reading entire documents.
-
-### traverse_only
-Measures traversal of pre-parsed data. Isolates the cost of navigating the data structure.
-
-### memory_overhead
-Prints memory usage estimates for each parser's internal representation.
+- **parse_only**: Parse/index time only (no traversal)
+- **parse_traverse**: Full pipeline (parse + traverse all nodes)
+- **traverse_only**: Traversal of pre-parsed data
+- **peak_memory**: Actual peak memory allocation during parsing
 
 ## Benchmark Results
 

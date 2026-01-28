@@ -33,7 +33,12 @@ git pull origin main
 
 # Run the complete test suite
 cargo test --all-features
+
+# Run benchmarks (see docs/guides/benchmarking.md for details)
+cargo bench
 ```
+
+**Note**: For major releases, run full benchmark suite on all platforms. See [benchmarking.md](benchmarking.md#when-to-run-benchmarks) for details.
 
 ### 2. Update Version
 

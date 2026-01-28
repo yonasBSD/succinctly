@@ -7,6 +7,10 @@ description: Manages benchmark documentation across multiple platforms. Use when
 
 This skill ensures proper handling of benchmark documentation across multiple platforms (ARM/Apple Silicon and x86_64/Intel/AMD).
 
+**For comprehensive benchmarking instructions**, see [docs/guides/benchmarking.md](../../../docs/guides/benchmarking.md).
+
+This skill focuses on **documentation-specific rules** and multi-platform considerations.
+
 ## Critical Rules
 
 **NEVER replace platform-specific benchmarks with each other.**
@@ -20,48 +24,26 @@ When adding new benchmark data:
 
 ## Benchmark File Locations
 
-| Location                       | Purpose                        | Git Status   |
-|--------------------------------|--------------------------------|--------------|
-| `data/bench/generated/`        | Input JSON files               | git-ignored  |
-| `data/bench/results/`          | Benchmark output (JSONL, MD)   | git-ignored  |
-| `docs/benchmarks/jq.md`        | Curated benchmark documentation| tracked      |
-| `docs/benchmarks/yq.md`        | yq comparison benchmarks       | tracked      |
-| `docs/benchmarks/dsv.md`       | DSV performance benchmarks     | tracked      |
-| `README.md`                    | Summary benchmarks             | tracked      |
+For complete inventory, see [docs/benchmarks/inventory.md](../../../docs/benchmarks/inventory.md).
+
+Key locations:
+- `data/bench/generated/` - Input files (git-ignored)
+- `data/bench/results/` - Output (git-ignored)
+- `docs/benchmarks/*.md` - Documentation (tracked)
+- `README.md` - Summary (tracked)
 
 ## Updating Benchmark Documentation
 
-### Step 1: Run Benchmarks
+For complete documentation update workflow, see [docs/guides/benchmarking.md](../../../docs/guides/benchmarking.md#updating-documentation).
 
-```bash
-# Build release binary
-cargo build --release --features cli
+### Quick Workflow
 
-# Run full benchmark suite
-./target/release/succinctly dev bench jq
-
-# Or run specific patterns/sizes
-./target/release/succinctly dev bench jq --patterns nested,strings --sizes 1kb,10kb,100kb,1mb
-```
-
-### Step 2: Review Output
-
-Check `data/bench/results/jq-bench.md` for the generated markdown tables.
-
-### Step 3: Update Documentation
-
-Update in **two places**:
-
-1. **`docs/benchmarks/jq.md`** - Full benchmark results with all patterns and sizes
-2. **`README.md`** - Highlights only (summary table with key patterns/sizes)
-   - Link to `docs/benchmarks/jq.md` for detailed results
-
-### Step 4: Guidelines for Curating Results
-
-- Keep platform-specific sections (ARM vs x86_64)
-- Don't replace one platform's data with another
-- README should highlight best-case speedups and representative patterns
-- `docs/benchmarks/jq.md` should have comprehensive results
+1. Run benchmarks: `./target/release/succinctly dev bench jq`
+2. Review output: `data/bench/results/jq-bench.md`
+3. Update documentation:
+   - `docs/benchmarks/jq.md` - Full results with all patterns/sizes
+   - `README.md` - Summary highlights only
+4. Follow platform parity rules (see below)
 
 ## README Table Requirements
 
@@ -109,42 +91,21 @@ See the markdown-tables skill for complete table formatting rules.
 
 ## Before Running Benchmarks
 
-Always check for heavy CPU activity that could skew results:
+See [docs/guides/benchmarking.md](../../../docs/guides/benchmarking.md#troubleshooting) for environment setup and troubleshooting.
 
-```bash
-# Check CPU activity (macOS)
-top -l 1 -n 5 | head -20
-
-# Check CPU activity (Linux)
-top -bn1 | head -20
-
-# Alternative: check load average
-uptime
-```
-
-Wait for CPU load to settle (ideally below 1.0) before running benchmarks.
+Quick check: Ensure CPU load is low (`uptime`) to avoid skewed results.
 
 ## Benchmark Commands Reference
 
+For complete command reference, see [docs/guides/benchmarking.md](../../../docs/guides/benchmarking.md#how-to-run-benchmarks).
+
+Quick commands:
 ```bash
-# Generate benchmark data
-./target/release/succinctly json generate-suite
-./target/release/succinctly json generate-suite --max-size 10mb
-./target/release/succinctly yaml generate-suite  # Includes navigation pattern for M2
-
-# Run jq comparison benchmarks (recommended)
+# Generate data and run benchmarks
+cargo run --release --features cli -- json generate-suite
+cargo run --release --features cli -- yaml generate-suite
 ./target/release/succinctly dev bench jq
-
-# Run yq comparison benchmarks (includes M2 streaming by default)
 ./target/release/succinctly dev bench yq
-
-# Run criterion benchmarks
-cargo bench --bench json_simd
-cargo bench --bench balanced_parens
-cargo bench --bench jq_comparison
-
-# JSON parser comparison (in bench-compare/)
-cd bench-compare && cargo bench --bench json_parsers
 ```
 
 ## yq Benchmark Query Types
@@ -195,39 +156,12 @@ Multiple aliases are accepted for each query type:
 
 ## Running bench-compare Benchmarks
 
-The `bench-compare/` subproject requires test data to be generated first.
+For complete instructions, see [docs/guides/benchmarking.md](../../../docs/guides/benchmarking.md#5-cross-parser-benchmarks).
 
-### Step 1: Generate Test Data
-
-```bash
-# From project root, generate all sizes
-cargo run --release --features cli -- json generate 1kb -o data/bench/generated/comprehensive/1kb.json
-cargo run --release --features cli -- json generate 10kb -o data/bench/generated/comprehensive/10kb.json
-cargo run --release --features cli -- json generate 100kb -o data/bench/generated/comprehensive/100kb.json
-cargo run --release --features cli -- json generate 1mb -o data/bench/generated/comprehensive/1mb.json
-cargo run --release --features cli -- json generate 10mb -o data/bench/generated/comprehensive/10mb.json
-cargo run --release --features cli -- json generate 100mb -o data/bench/generated/comprehensive/100mb.json
-```
-
-### Step 2: Run Benchmarks
-
-```bash
-cd bench-compare
-cargo bench --bench json_parsers
-```
-
-### Step 3: Update Documentation
-
-After running, manually extract results from criterion output and update:
-- `bench-compare/README.md` - Full results with all sizes
-- `.claude/skills/benchmark-docs/SKILL.md` - Summary table
-
-### Key Points
-
-- Benchmarks compare: serde_json, simd-json, sonic-rs, succinctly
-- Test files must exist in `data/bench/generated/comprehensive/`
-- 1GB file is excluded (too large for criterion's sample requirements)
-- Memory measurements use a custom peak-tracking allocator
+Quick steps:
+1. Generate data: `cargo run --release --features cli -- json generate-suite`
+2. Run: `cd bench-compare && cargo bench --bench json_parsers`
+3. Update documentation (see "Updating Documentation" section below)
 
 ## Rust JSON Parser Comparison
 
