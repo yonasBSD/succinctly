@@ -1890,6 +1890,9 @@ fn write_yaml_value_as_json<W: AsRef<[u64]>>(output: &mut String, value: YamlVal
 
 /// Write a string with JSON escaping.
 ///
+/// Uses a fast path for ASCII-only strings without special characters,
+/// which is the common case for YAML data.
+///
 /// Uses SIMD (NEON on ARM64) to scan for escapable characters in 16-byte chunks,
 /// with automatic scalar fallback for short strings and remainders.
 fn write_json_string(output: &mut String, s: &str) {

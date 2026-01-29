@@ -207,9 +207,9 @@ echo '[1, 2, 3]' | succinctly jq '.[] |= . * 2'     # [2, 4, 6]
 
 Succinctly extends jq with position-based navigation builtins that allow jumping directly to a node at a specific byte offset or line/column position. This is unique to succinctly and not available in standard jq or yq.
 
-| Builtin                    | Description                                           | Example                |
-|----------------------------|-------------------------------------------------------|------------------------|
-| **at_offset(n)**           | Jump to node at byte offset `n` (0-indexed)           | `at_offset(10)`        |
+| Builtin                    | Description                                                  | Example             |
+|----------------------------|--------------------------------------------------------------|---------------------|
+| **at_offset(n)**           | Jump to node at byte offset `n` (0-indexed)                  | `at_offset(10)`     |
 | **at_position(line; col)** | Jump to node at line/column (1-indexed, semicolon-separated) | `at_position(2; 3)` |
 
 **Use cases:**
@@ -333,9 +333,9 @@ To regenerate: `cargo bench --bench jq_comparison`
 
 | Size      | succinctly              | yq                    | Speedup    |
 |-----------|-------------------------|-----------------------|------------|
-| **10KB**  | 2.0 ms  (5.0 MiB/s)     | 5.7 ms (1.7 MiB/s)    | **2.9x**   |
-| **100KB** | 3.7 ms (25.1 MiB/s)     | 21.4 ms (4.3 MiB/s)   | **5.8x**   |
-| **1MB**   | 19.7 ms (46.7 MiB/s)    | 156.4 ms (5.9 MiB/s)  | **7.9x**   |
+| **10KB**  | 1.8 ms  (5.4 MiB/s)     | 5.1 ms (1.9 MiB/s)    | **2.9x**   |
+| **100KB** | 3.1 ms (29.7 MiB/s)     | 20.0 ms (4.6 MiB/s)   | **6.5x**   |
+| **1MB**   | 14.7 ms (62.6 MiB/s)    | 152.2 ms (6.1 MiB/s)  | **10.3x**  |
 
 ### yq Query Performance (ARM Neoverse-V1)
 
