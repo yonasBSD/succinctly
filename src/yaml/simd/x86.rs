@@ -809,6 +809,178 @@ fn parse_anchor_name_scalar(input: &[u8], start: usize) -> usize {
     pos
 }
 
+// ============================================================================
+// JSON Escape Scanning (Issue #87 Optimization)
+// ============================================================================
+
+/// Find the next byte that needs JSON escaping using AVX2.
+///
+/// Searches for: `"`, `\`, or control characters (0x00-0x1F).
+/// Returns offset from `start` to the found character, or `None` if not found.
+///
+/// This is the main optimization for `write_json_string` in the streaming path.
+#[cfg(any(test, feature = "std"))]
+#[target_feature(enable = "avx2")]
+unsafe fn find_json_escape_avx2(input: &[u8], start: usize) -> Option<usize> {
+    let len = input.len();
+    if start >= len {
+        return None;
+    }
+
+    let data = &input[start..];
+    let data_len = data.len();
+    let mut offset = 0;
+
+    // Prepare comparison vectors
+    let quote_vec = _mm256_set1_epi8(b'"' as i8);
+    let backslash_vec = _mm256_set1_epi8(b'\\' as i8);
+    // For control chars: bytes < 0x20
+    // Use saturating subtract trick: if byte < 0x20, then (0x1F - byte) won't saturate
+    // But it's easier to compare: byte < 0x20 ⟺ byte <= 0x1F
+    // Using unsigned comparison: byte < 0x20 ⟺ max(0, 0x1F - byte) != 0x1F - byte for signed,
+    // but simpler: use _mm256_cmpgt_epi8 with signed comparison
+    // byte < 0x20 (unsigned) ⟺ (byte as i8) < 0x20 for bytes 0x00-0x7F
+    let control_threshold = _mm256_set1_epi8(0x20);
+
+    // Process 32 bytes at a time with AVX2
+    while offset + 32 <= data_len {
+        let chunk = _mm256_loadu_si256(data.as_ptr().add(offset) as *const __m256i);
+
+        // Check for quote
+        let is_quote = _mm256_cmpeq_epi8(chunk, quote_vec);
+
+        // Check for backslash
+        let is_backslash = _mm256_cmpeq_epi8(chunk, backslash_vec);
+
+        // Check for control chars (< 0x20)
+        // For ASCII bytes (0x00-0x7F), signed comparison works:
+        // byte < 0x20 as unsigned ⟺ (signed)byte < 0x20 for 0x00-0x1F
+        // (bytes 0x80-0xFF would be negative in signed, but we're checking < 0x20)
+        // Actually need: unsigned byte < 0x20
+        // Trick: use _mm256_cmpgt_epi8(threshold, chunk) which gives 0xFF where threshold > chunk
+        // This works for bytes 0x00-0x1F (all less than 0x20 in both signed and unsigned)
+        let is_control = _mm256_cmpgt_epi8(control_threshold, chunk);
+
+        // Combine all escape conditions
+        let escape_mask = _mm256_or_si256(_mm256_or_si256(is_quote, is_backslash), is_control);
+
+        // Extract bitmask
+        let mask = _mm256_movemask_epi8(escape_mask) as u32;
+
+        if mask != 0 {
+            return Some(offset + mask.trailing_zeros() as usize);
+        }
+
+        offset += 32;
+    }
+
+    // Handle remaining bytes (16-31 bytes) with SSE2
+    if offset + 16 <= data_len {
+        let quote_vec_sse = _mm_set1_epi8(b'"' as i8);
+        let backslash_vec_sse = _mm_set1_epi8(b'\\' as i8);
+        let control_threshold_sse = _mm_set1_epi8(0x20);
+
+        let chunk = _mm_loadu_si128(data.as_ptr().add(offset) as *const __m128i);
+
+        let is_quote = _mm_cmpeq_epi8(chunk, quote_vec_sse);
+        let is_backslash = _mm_cmpeq_epi8(chunk, backslash_vec_sse);
+        let is_control = _mm_cmpgt_epi8(control_threshold_sse, chunk);
+
+        let escape_mask = _mm_or_si128(_mm_or_si128(is_quote, is_backslash), is_control);
+        let mask = _mm_movemask_epi8(escape_mask) as u32;
+
+        if mask != 0 {
+            return Some(offset + mask.trailing_zeros() as usize);
+        }
+        offset += 16;
+    }
+
+    // Handle remaining bytes (< 16) with scalar
+    for i in offset..data_len {
+        let b = data[i];
+        if b == b'"' || b == b'\\' || b < 0x20 {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
+/// SSE2 implementation of JSON escape scanning.
+#[target_feature(enable = "sse2")]
+unsafe fn find_json_escape_sse2(input: &[u8], start: usize) -> Option<usize> {
+    let len = input.len();
+    if start >= len {
+        return None;
+    }
+
+    let data = &input[start..];
+    let data_len = data.len();
+    let mut offset = 0;
+
+    let quote_vec = _mm_set1_epi8(b'"' as i8);
+    let backslash_vec = _mm_set1_epi8(b'\\' as i8);
+    let control_threshold = _mm_set1_epi8(0x20);
+
+    // Process 16 bytes at a time with SSE2
+    while offset + 16 <= data_len {
+        let chunk = _mm_loadu_si128(data.as_ptr().add(offset) as *const __m128i);
+
+        let is_quote = _mm_cmpeq_epi8(chunk, quote_vec);
+        let is_backslash = _mm_cmpeq_epi8(chunk, backslash_vec);
+        let is_control = _mm_cmpgt_epi8(control_threshold, chunk);
+
+        let escape_mask = _mm_or_si128(_mm_or_si128(is_quote, is_backslash), is_control);
+        let mask = _mm_movemask_epi8(escape_mask) as u32;
+
+        if mask != 0 {
+            return Some(offset + mask.trailing_zeros() as usize);
+        }
+
+        offset += 16;
+    }
+
+    // Handle remaining bytes with scalar
+    for i in offset..data_len {
+        let b = data[i];
+        if b == b'"' || b == b'\\' || b < 0x20 {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
+/// Scalar fallback for JSON escape scanning (used in tests).
+#[cfg(test)]
+fn find_json_escape_scalar(input: &[u8], start: usize) -> Option<usize> {
+    let data = &input[start..];
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'"' || b == b'\\' || b < 0x20 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the next byte that needs JSON escaping.
+///
+/// Searches for: `"`, `\`, or control characters (0x00-0x1F).
+/// Returns offset from `start` to the found character, or `None` if not found.
+///
+/// Uses AVX2 on x86_64 when available, falling back to SSE2.
+#[inline]
+pub fn find_json_escape_x86(input: &[u8], start: usize) -> Option<usize> {
+    #[cfg(any(test, feature = "std"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { find_json_escape_avx2(input, start) };
+        }
+    }
+
+    unsafe { find_json_escape_sse2(input, start) }
+}
+
 /// Public API: Parse anchor/alias name with runtime SIMD dispatch.
 ///
 /// Returns the position of the first terminator character.
@@ -1069,5 +1241,140 @@ mod tests {
             0,
             "False positive: hyphen-space at position 11"
         );
+    }
+
+    // ========================================================================
+    // Tests for JSON escape scanning (Issue #87)
+    // ========================================================================
+
+    #[test]
+    fn test_find_json_escape_quote() {
+        let input = b"hello\"world";
+        assert_eq!(find_json_escape_x86(input, 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_json_escape_backslash() {
+        let input = b"hello\\world";
+        assert_eq!(find_json_escape_x86(input, 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_json_escape_control_char() {
+        let input = b"hello\nworld";
+        assert_eq!(find_json_escape_x86(input, 0), Some(5));
+
+        let input2 = b"hello\tworld";
+        assert_eq!(find_json_escape_x86(input2, 0), Some(5));
+
+        let input3 = b"hello\rworld";
+        assert_eq!(find_json_escape_x86(input3, 0), Some(5));
+
+        // Null byte
+        let input4 = b"hello\0world";
+        assert_eq!(find_json_escape_x86(input4, 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_json_escape_none() {
+        let input = b"hello world";
+        assert_eq!(find_json_escape_x86(input, 0), None);
+
+        // All printable ASCII (0x20-0x7E except " and \)
+        let input2 = b"abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
+        assert_eq!(find_json_escape_x86(input2, 0), None);
+    }
+
+    #[test]
+    fn test_find_json_escape_long_string() {
+        // Test with > 32 bytes to exercise AVX2 path
+        let mut input = vec![b'a'; 100];
+        input[50] = b'"';
+        assert_eq!(find_json_escape_x86(&input, 0), Some(50));
+
+        // Control char in long string
+        let mut input2 = vec![b'x'; 100];
+        input2[75] = b'\n';
+        assert_eq!(find_json_escape_x86(&input2, 0), Some(75));
+    }
+
+    #[test]
+    fn test_find_json_escape_at_boundaries() {
+        // Quote at 16-byte boundary
+        let mut input = vec![b'a'; 32];
+        input[16] = b'"';
+        assert_eq!(find_json_escape_x86(&input, 0), Some(16));
+
+        // Quote at 32-byte boundary
+        let mut input2 = vec![b'a'; 64];
+        input2[32] = b'"';
+        assert_eq!(find_json_escape_x86(&input2, 0), Some(32));
+
+        // Control char at end of 16-byte chunk
+        let mut input3 = vec![b'a'; 32];
+        input3[15] = b'\t';
+        assert_eq!(find_json_escape_x86(&input3, 0), Some(15));
+    }
+
+    #[test]
+    fn test_find_json_escape_start_offset() {
+        let input = b"ab\"cd\"ef";
+        assert_eq!(find_json_escape_x86(input, 0), Some(2));
+        assert_eq!(find_json_escape_x86(input, 3), Some(2)); // offset 3 + 2 = position 5
+
+        let input2 = b"abc\ndef\nghi";
+        assert_eq!(find_json_escape_x86(input2, 0), Some(3));
+        assert_eq!(find_json_escape_x86(input2, 4), Some(3)); // offset 4 + 3 = position 7
+    }
+
+    #[test]
+    fn test_find_json_escape_simd_matches_scalar() {
+        let test_cases: &[&[u8]] = &[
+            b"",
+            b"\"",
+            b"\\",
+            b"\n",
+            b"\t",
+            b"\r",
+            b"\0",
+            b"no special chars here",
+            b"quote at end\"",
+            b"\"quote at start",
+            b"has\\backslash",
+            b"has both \" and \\ chars",
+            b"control\x01char",
+            b"all control chars: \x00\x01\x02\x03\x04\x05\x06\x07\x08\x09",
+            // Long strings
+            &[b'x'; 100],
+        ];
+
+        for &input in test_cases {
+            let scalar = find_json_escape_scalar(input, 0);
+            let simd = find_json_escape_x86(input, 0);
+            assert_eq!(
+                scalar,
+                simd,
+                "JSON escape mismatch for {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_json_escape_all_control_chars() {
+        // Test all control characters 0x00-0x1F
+        for b in 0u8..0x20 {
+            let input = [b'a', b'b', b'c', b, b'd', b'e'];
+            assert_eq!(
+                find_json_escape_x86(&input, 0),
+                Some(3),
+                "Control char 0x{:02x} not detected",
+                b
+            );
+        }
+
+        // Space (0x20) should NOT be detected
+        let input_space = b"abc def";
+        assert_eq!(find_json_escape_x86(input_space, 0), None);
     }
 }

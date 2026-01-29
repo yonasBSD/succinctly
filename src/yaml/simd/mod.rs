@@ -511,6 +511,68 @@ fn count_leading_spaces_scalar(input: &[u8], start: usize) -> usize {
     input[start..].iter().take_while(|&&b| b == b' ').count()
 }
 
+// ============================================================================
+// JSON Escape Scanning (Issue #87 Optimization)
+// ============================================================================
+
+/// Find the next byte that needs JSON escaping.
+///
+/// Searches for: `"`, `\`, or control characters (0x00-0x1F).
+/// Returns offset from `start` to the found character, or `None` if not found.
+///
+/// This is the main optimization for the `write_json_string` streaming path.
+/// Uses SIMD on supported platforms for 16-32x faster scanning.
+#[inline]
+pub fn find_json_escape(input: &[u8], start: usize) -> Option<usize> {
+    if start >= input.len() {
+        return None;
+    }
+
+    // Scalar fallback: when scalar-yaml feature is enabled
+    #[cfg(feature = "scalar-yaml")]
+    {
+        find_json_escape_scalar(input, start)
+    }
+
+    // x86_64 uses native SIMD (when not scalar)
+    #[cfg(all(target_arch = "x86_64", not(feature = "scalar-yaml")))]
+    {
+        x86::find_json_escape_x86(input, start)
+    }
+
+    // ARM64 with NEON - use scalar for now (can add NEON later)
+    #[cfg(all(
+        target_arch = "aarch64",
+        not(feature = "broadword-yaml"),
+        not(feature = "scalar-yaml")
+    ))]
+    {
+        find_json_escape_scalar(input, start)
+    }
+
+    // Broadword/other platforms - use scalar
+    #[cfg(all(
+        not(feature = "scalar-yaml"),
+        not(target_arch = "x86_64"),
+        not(all(target_arch = "aarch64", not(feature = "broadword-yaml")))
+    ))]
+    {
+        find_json_escape_scalar(input, start)
+    }
+}
+
+/// Scalar implementation of find_json_escape.
+#[allow(dead_code)]
+fn find_json_escape_scalar(input: &[u8], start: usize) -> Option<usize> {
+    let data = &input[start..];
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'"' || b == b'\\' || b < 0x20 {
+            return Some(i);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +642,67 @@ mod tests {
         let mut input = vec![b'a'; 32];
         input[16] = b'"';
         assert_eq!(find_quote_or_escape(&input, 0, input.len()), Some(16));
+    }
+
+    // ========================================================================
+    // JSON escape scanning tests (Issue #87)
+    // ========================================================================
+
+    #[test]
+    fn test_find_json_escape_basic() {
+        let input = b"hello\"world";
+        assert_eq!(find_json_escape(input, 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_json_escape_backslash() {
+        let input = b"hello\\world";
+        assert_eq!(find_json_escape(input, 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_json_escape_control() {
+        let input = b"hello\nworld";
+        assert_eq!(find_json_escape(input, 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_json_escape_none() {
+        let input = b"hello world";
+        assert_eq!(find_json_escape(input, 0), None);
+    }
+
+    #[test]
+    fn test_find_json_escape_long() {
+        let mut input = vec![b'a'; 100];
+        input[50] = b'"';
+        assert_eq!(find_json_escape(&input, 0), Some(50));
+    }
+
+    #[test]
+    fn test_find_json_escape_simd_matches_scalar() {
+        let test_cases: &[&[u8]] = &[
+            b"",
+            b"\"",
+            b"\\",
+            b"\n",
+            b"\t",
+            b"no special chars",
+            b"quote\"here",
+            b"newline\nhere",
+            &[b'x'; 100],
+        ];
+
+        for &input in test_cases {
+            let scalar = find_json_escape_scalar(input, 0);
+            let simd = find_json_escape(input, 0);
+            assert_eq!(
+                scalar,
+                simd,
+                "JSON escape mismatch for {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 
     // Compare SIMD vs scalar for correctness

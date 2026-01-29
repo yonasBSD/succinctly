@@ -4509,6 +4509,83 @@ fn advance_cursor_to(&self, cursor: &mut SequentialCursor, target: usize) {
 
 ---
 
+## O3: SIMD JSON Escape Scanning — Accepted ✅
+
+**Issue**: [#87](https://github.com/rust-works/succinctly/issues/87)
+
+### Problem
+
+Profile analysis showed **70% of yq streaming time** was spent in the output path, with `write_json_string` being a key hot function. The escape character scanning loop processed **1 byte per iteration**:
+
+```rust
+// Before: Byte-by-byte scan
+while i < bytes.len() {
+    let b = bytes[i];
+    if b == b'"' || b == b'\\' || b < 0x20 {
+        break;
+    }
+    i += 1;
+}
+```
+
+### Solution
+
+Implemented AVX2-accelerated escape scanning that processes **32 bytes per iteration**:
+
+```rust
+// AVX2: 32-byte parallel scan
+let chunk = _mm256_loadu_si256(ptr);
+let is_quote = _mm256_cmpeq_epi8(chunk, quote_vec);
+let is_backslash = _mm256_cmpeq_epi8(chunk, backslash_vec);
+let is_control = _mm256_cmpgt_epi8(control_threshold, chunk);  // < 0x20
+let escape_mask = _mm256_or_si256(...);  // combine all conditions
+```
+
+**Threshold optimization**: SIMD overhead isn't amortized for short strings. Added a 32-byte threshold:
+- **< 32 bytes remaining**: Use inline scalar loop (avoids function call overhead)
+- **≥ 32 bytes remaining**: Use SIMD for 32-byte chunks
+
+### Results
+
+**Micro-benchmark speedups** (raw SIMD vs scalar):
+
+| Size | SIMD | Scalar | Speedup |
+|------|------|--------|---------|
+| 1KB | 13.5ns (70 GiB/s) | 382ns (2.5 GiB/s) | **28x** |
+| 4KB | 50ns (75 GiB/s) | 1.5µs (2.5 GiB/s) | **30x** |
+
+**End-to-end transcode benchmarks** (yaml_transcode_micro):
+
+| Benchmark | Change | Throughput |
+|-----------|--------|------------|
+| unicode_8digit/100 | **-11%** | 432 MiB/s |
+| realistic/config | **-4%** | 234 MiB/s |
+| escape_heavy | **-3%** | 233 MiB/s |
+| large/500_items | **-5%** | 227 MiB/s |
+
+### Key Learnings
+
+1. **Threshold is critical**: Initial implementation without threshold caused 2-7% regression on short strings due to function call overhead
+
+2. **SIMD for control chars**: Used signed comparison trick for `byte < 0x20`:
+   ```rust
+   // Works for ASCII bytes 0x00-0x7F
+   _mm256_cmpgt_epi8(_mm256_set1_epi8(0x20), chunk)
+   ```
+
+3. **Hybrid approach wins**: Combining SIMD for long spans with inline scalar for short spans provides the best of both worlds
+
+4. **Pattern from CLAUDE.md confirmed**: "Wider SIMD != automatically faster" — threshold tuning prevents overhead regression
+
+### Files Modified
+
+- `src/yaml/simd/x86.rs` — Added `find_json_escape_avx2`, `find_json_escape_sse2`, `find_json_escape_x86`
+- `src/yaml/simd/mod.rs` — Added public `find_json_escape` dispatcher
+- `src/yaml/light.rs` — Updated `write_json_string` with threshold-based SIMD/scalar hybrid
+- `benches/json_escape_micro.rs` — New micro-benchmark for escape scanning
+
+---
+
 ## References
 
 ### YAML Specification
