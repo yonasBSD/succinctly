@@ -14,6 +14,7 @@ use std::borrow::Cow;
 use std::string::ToString;
 
 use super::index::YamlIndex;
+use super::simd::find_json_escape;
 
 // ============================================================================
 // YamlCursor: Position in the YAML structure
@@ -1889,56 +1890,90 @@ fn write_yaml_value_as_json<W: AsRef<[u64]>>(output: &mut String, value: YamlVal
 
 /// Write a string with JSON escaping.
 ///
-/// Uses a fast path for ASCII-only strings without special characters,
-/// which is the common case for YAML data.
+/// Uses SIMD-accelerated scanning to find bytes that need escaping
+/// for longer spans (32+ bytes remaining). For short strings or spans
+/// after escapes, uses an inline scalar loop to avoid function call overhead.
 fn write_json_string(output: &mut String, s: &str) {
     output.push('"');
 
     let bytes = s.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
-    while i < bytes.len() {
-        // Find the next byte that needs escaping
-        let start = i;
-        while i < bytes.len() {
-            let b = bytes[i];
-            // Check for bytes that need escaping: ", \, control chars (0x00-0x1F)
-            if b == b'"' || b == b'\\' || b < 0x20 {
+    // SIMD threshold: only use SIMD when 32+ bytes remain.
+    // Below this, scalar is faster due to function call and SIMD dispatch overhead.
+    // Without this threshold, benchmarks showed 2-7% regression on escape-heavy
+    // workloads where strings have frequent escapes (Issue #87).
+    const SIMD_THRESHOLD: usize = 32;
+
+    while i < len {
+        let remaining = len - i;
+
+        if remaining >= SIMD_THRESHOLD {
+            // Use SIMD for longer spans
+            if let Some(offset) = find_json_escape(bytes, i) {
+                // Copy the safe span before the escape character
+                if offset > 0 {
+                    output.push_str(&s[i..i + offset]);
+                }
+                i += offset;
+
+                // Handle the escape character
+                let b = bytes[i];
+                write_escape_char(output, b);
+                i += 1;
+            } else {
+                // No more escapes - copy the rest directly
+                output.push_str(&s[i..]);
                 break;
             }
-            i += 1;
-        }
-
-        // Copy the safe span directly
-        if start < i {
-            // SAFETY: We're copying valid UTF-8 bytes that don't contain
-            // any multi-byte sequence starters that would be split
-            output.push_str(&s[start..i]);
-        }
-
-        // Handle the escape character if any
-        if i < bytes.len() {
-            let b = bytes[i];
-            match b {
-                b'"' => output.push_str("\\\""),
-                b'\\' => output.push_str("\\\\"),
-                b'\n' => output.push_str("\\n"),
-                b'\r' => output.push_str("\\r"),
-                b'\t' => output.push_str("\\t"),
-                b if b < 0x20 => {
-                    // Control character - use \uXXXX
-                    output.push_str("\\u00");
-                    const HEX: &[u8; 16] = b"0123456789abcdef";
-                    output.push(HEX[(b >> 4) as usize] as char);
-                    output.push(HEX[(b & 0xf) as usize] as char);
+        } else {
+            // Scalar path for short remaining spans
+            // Find next escape inline to avoid function call overhead
+            let start = i;
+            while i < len {
+                let b = bytes[i];
+                if b == b'"' || b == b'\\' || b < 0x20 {
+                    break;
                 }
-                _ => unreachable!(),
+                i += 1;
             }
-            i += 1;
+
+            // Copy safe span
+            if start < i {
+                output.push_str(&s[start..i]);
+            }
+
+            // Handle escape if found
+            if i < len {
+                let b = bytes[i];
+                write_escape_char(output, b);
+                i += 1;
+            }
         }
     }
 
     output.push('"');
+}
+
+/// Write a JSON escape sequence for a byte that needs escaping.
+#[inline(always)]
+fn write_escape_char(output: &mut String, b: u8) {
+    match b {
+        b'"' => output.push_str("\\\""),
+        b'\\' => output.push_str("\\\\"),
+        b'\n' => output.push_str("\\n"),
+        b'\r' => output.push_str("\\r"),
+        b'\t' => output.push_str("\\t"),
+        b if b < 0x20 => {
+            // Control character - use \uXXXX
+            output.push_str("\\u00");
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            output.push(HEX[(b >> 4) as usize] as char);
+            output.push(HEX[(b & 0xf) as usize] as char);
+        }
+        _ => unreachable!(),
+    }
 }
 
 // ============================================================================

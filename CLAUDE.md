@@ -550,3 +550,13 @@ For detailed documentation on optimization techniques used in this project, see 
   - **yaml_bench**: No regression (query-path only optimization)
   - Results are noisy because the forward-gap path is infrequently hit during typical streaming
   - See [docs/parsing/yaml.md#o2-gap-skipping-via-advance_rank1---accepted-](docs/parsing/yaml.md#o2-gap-skipping-via-advance_rank1---accepted-) for full analysis
+- ✅ O3 (SIMD JSON Escape Scanning): **3-11% faster** JSON output in streaming path, issue #87
+  - AVX2 scans 32-byte chunks for escapable characters (`"`, `\`, control chars < 0x20)
+  - Threshold-based hybrid: SIMD for ≥32 bytes, inline scalar for short spans
+  - **Micro-benchmark**: 28-30x faster raw escape scanning (70 GiB/s vs 2.5 GiB/s)
+  - **End-to-end transcode benchmarks**:
+    - unicode_8digit/100: **-11%** (432 MiB/s)
+    - realistic/config: **-4%** (234 MiB/s)
+    - large/500_items: **-5%** (227 MiB/s)
+  - **Key insight**: Threshold prevents regression on short strings (initial impl was 2-7% slower without)
+  - See [docs/parsing/yaml.md#o3-simd-json-escape-scanning---accepted-](docs/parsing/yaml.md#o3-simd-json-escape-scanning---accepted-) for full analysis

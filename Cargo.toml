@@ -173,3 +173,7 @@ harness = false
 [[bench]]
 name = "elias_fano"
 harness = false
+
+[[bench]]
+name = "json_escape_micro"
+harness = false
