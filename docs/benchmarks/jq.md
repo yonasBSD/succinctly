@@ -35,7 +35,8 @@ Benchmarks measure:
 
 Run with:
 ```bash
-./target/release/succinctly dev bench jq
+cargo build --release --features bench-runner
+./target/release/succinctly bench run jq_bench
 ```
 
 ---
@@ -553,12 +554,12 @@ Run with:
 ## Reproducing Benchmarks
 
 ```bash
-# Build release binary
-cargo build --release --features cli
+# Build release binary with benchmark runner
+cargo build --release --features bench-runner
 
 # Generate benchmark data
 ./target/release/succinctly json generate-suite
 
 # Run comparison
-./target/release/succinctly dev bench jq
+./target/release/succinctly bench run jq_bench
 ```

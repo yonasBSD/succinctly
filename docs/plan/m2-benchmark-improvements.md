@@ -4,7 +4,7 @@ This document proposes enhancements to the yq benchmark suite to properly measur
 
 ## Problem Statement
 
-The current yq benchmark (`succinctly dev bench yq`) only tests identity queries (`.`), which use the original P9 streaming fast path. This doesn't exercise the **M2 streaming path** for navigation queries.
+The current yq benchmark (`succinctly bench run yq_bench`) only tests identity queries (`.`), which use the original P9 streaming fast path. This doesn't exercise the **M2 streaming path** for navigation queries.
 
 **Current benchmark query:**
 ```bash
@@ -77,7 +77,7 @@ config:
 Add a `--memory` flag to run benchmarks focused on memory comparison:
 
 ```bash
-succinctly dev bench yq --memory
+succinctly bench run yq_bench --memory
 ```
 
 This would:

@@ -155,8 +155,8 @@ pub fn run_benchmarks(args: RunArgs) -> Result<()> {
                 }
                 BenchmarkType::CliBench => {
                     println!(
-                        "    Command: ./target/release/succinctly dev bench {}",
-                        b.cli_subcommand.unwrap_or("?")
+                        "    Command: ./target/release/succinctly bench run {}",
+                        b.name
                     );
                 }
                 BenchmarkType::CrossParser => {

@@ -82,11 +82,11 @@ sjq --input-dsv ',' '.[] | select(.[0] == "Alice")' data.csv
 # Data generation
 ./target/release/succinctly json generate 10mb -o benchmark.json
 
-# Benchmarks
-./target/release/succinctly dev bench jq
-./target/release/succinctly dev bench yq
-./target/release/succinctly dev bench yq --queries all --memory  # M2 streaming comparison
-./target/release/succinctly dev bench dsv
+# Benchmarks (requires: cargo build --release --features bench-runner)
+./target/release/succinctly bench run jq_bench
+./target/release/succinctly bench run yq_bench
+./target/release/succinctly bench run yq_bench --queries all --memory  # M2 streaming comparison
+./target/release/succinctly bench run dsv_bench
 ```
 
 ### Multi-call Aliases
@@ -355,7 +355,7 @@ Note: System `yq` not installed; showing succinctly-only performance.
 | **100KB** | 4.0 ms  (23.0 MiB/s)    | 74.6 ms (1.2 MiB/s)   | **19x**    |
 | **1MB**   | 17.3 ms (53.3 MiB/s)    |195.3 ms (4.7 MiB/s)   | **11x**    |
 
-To regenerate: `succinctly dev bench yq` (includes memory) or `cargo bench --bench yq_comparison` (time only)
+To regenerate: `succinctly bench run yq_bench` (includes memory) or `cargo bench --bench yq_comparison` (time only)
 
 ### M2 Streaming Navigation Performance (Apple M1 Max, 100MB navigation file)
 
@@ -368,7 +368,7 @@ To regenerate: `succinctly dev bench yq` (includes memory) or `cargo bench --ben
 
 M2 streaming (`.[0]`) is **2.9x faster** than identity (`.`), with **3-4% of yq's memory**.
 
-To benchmark: `succinctly dev bench yq --queries all --memory`
+To benchmark: `succinctly bench run yq_bench --queries all --memory`
 
 ### Optimization Techniques
 
