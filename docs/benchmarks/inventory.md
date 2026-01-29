@@ -547,10 +547,13 @@ cargo run --release --features cli -- dsv generate-suite
 
 ### Run Benchmarks
 ```bash
-# CLI benchmarks
-./target/release/succinctly dev bench jq
-./target/release/succinctly dev bench yq
-./target/release/succinctly dev bench dsv
+# Build with benchmark runner
+cargo build --release --features bench-runner
+
+# CLI benchmarks (unified runner)
+./target/release/succinctly bench run jq_bench
+./target/release/succinctly bench run yq_bench
+./target/release/succinctly bench run dsv_bench
 
 # Criterion benchmarks
 cargo bench --bench jq_comparison

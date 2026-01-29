@@ -287,11 +287,14 @@ Replaced full BitVec with simple cumulative rank arrays:
 ## Running Benchmarks
 
 ```bash
+# Build with benchmark runner
+cargo build --release --features bench-runner
+
 # CLI benchmarks
-./target/release/succinctly dev bench dsv
+./target/release/succinctly bench run dsv_bench
 
 # Single column
-./target/release/succinctly dev bench dsv --query '.[0]'
+./target/release/succinctly bench run dsv_bench --query '.[0]'
 
 # Library benchmarks
 RUSTFLAGS="-C target-cpu=native" cargo build --release --examples

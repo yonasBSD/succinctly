@@ -52,7 +52,7 @@ impl std::str::FromStr for BenchmarkCategory {
 pub enum BenchmarkType {
     /// Criterion benchmark (cargo bench --bench <name>)
     Criterion,
-    /// CLI benchmark (succinctly dev bench <type>)
+    /// CLI benchmark (succinctly bench run <name>)
     CliBench,
     /// Cross-parser comparison (requires bench-compare subproject)
     CrossParser,

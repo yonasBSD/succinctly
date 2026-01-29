@@ -122,7 +122,7 @@ fn container_start(&self, bp_open_idx: usize) -> usize {
 
 ```bash
 # Proposed instrumentation command
-./target/release/succinctly dev analyze-index data/bench/generated/yaml/*/1mb.yaml
+./target/release/succinctly analyze-index data/bench/generated/yaml/*/1mb.yaml
 ```
 
 ### Phase 2: Elias-Fano Prototype

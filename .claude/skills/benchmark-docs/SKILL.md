@@ -164,16 +164,15 @@ The yq benchmark supports multiple query types to exercise different execution p
 # Run yq CLI benchmark (recommended - includes memory tracking)
 ./target/release/succinctly bench run yq_bench
 
-# For advanced options, use dev bench yq (after running unified runner)
 # Run specific query types
-./target/release/succinctly dev bench yq --queries identity
-./target/release/succinctly dev bench yq --queries identity,first_element
+./target/release/succinctly bench run yq_bench --queries identity
+./target/release/succinctly bench run yq_bench --queries identity,first_element
 
 # Focus on M2 streaming with the navigation pattern
-./target/release/succinctly dev bench yq --patterns navigation --sizes 10mb,100mb
+./target/release/succinctly bench run yq_bench --patterns navigation --sizes 10mb,100mb
 
 # Memory-focused comparison
-./target/release/succinctly dev bench yq --memory
+./target/release/succinctly bench run yq_bench --memory
 ```
 
 ### Query Type Aliases

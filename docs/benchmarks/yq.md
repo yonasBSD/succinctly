@@ -72,8 +72,11 @@ Benchmarks measure:
 
 Run with:
 ```bash
+# Build with benchmark runner feature
+cargo build --release --features bench-runner
+
 # CLI benchmark tool (recommended - includes memory measurement)
-succinctly dev bench yq
+./target/release/succinctly bench run yq_bench
 
 # Criterion benchmark (wall time only)
 cargo bench --bench yq_comparison
@@ -1142,14 +1145,17 @@ M2 avoids OwnedValue DOM construction for navigation queries, streaming directly
 ### Running M2-Focused Benchmarks
 
 ```bash
+# Build with benchmark runner feature
+cargo build --release --features bench-runner
+
 # Benchmark all query types on the navigation pattern
-./target/release/succinctly dev bench yq --patterns navigation --queries all
+./target/release/succinctly bench run yq_bench --patterns navigation --queries all
 
 # Compare identity vs navigation queries
-./target/release/succinctly dev bench yq --queries identity,first_element --sizes 10mb,100mb
+./target/release/succinctly bench run yq_bench --queries identity,first_element --sizes 10mb,100mb
 
 # Memory-focused comparison
-./target/release/succinctly dev bench yq --memory --queries all --sizes 100mb
+./target/release/succinctly bench run yq_bench --memory --queries all --sizes 100mb
 
 # Available query types: identity, first_element, iteration, length
 ```
@@ -1177,23 +1183,23 @@ Some operations require the full DOM (OwnedValue path):
 ## Reproducing Benchmarks
 
 ```bash
-# Build release binary
-cargo build --release --features cli
+# Build release binary with benchmark runner
+cargo build --release --features bench-runner
 
 # Generate benchmark files (includes navigation pattern for M2 testing)
-cargo run --release --features cli -- yaml generate-suite
+./target/release/succinctly yaml generate-suite
 
 # Run CLI benchmark tool (recommended - includes memory measurement)
-./target/release/succinctly dev bench yq
+./target/release/succinctly bench run yq_bench
 
 # Run with specific patterns/sizes
-./target/release/succinctly dev bench yq --patterns comprehensive,nested --sizes 1mb,10mb
+./target/release/succinctly bench run yq_bench --patterns comprehensive,nested --sizes 1mb,10mb
 
 # Run navigation-focused benchmarks (M2 streaming)
-./target/release/succinctly dev bench yq --patterns navigation --queries all --sizes 10mb,100mb
+./target/release/succinctly bench run yq_bench --patterns navigation --queries all --sizes 10mb,100mb
 
 # Run memory-focused comparison
-./target/release/succinctly dev bench yq --memory --queries identity,first_element,length
+./target/release/succinctly bench run yq_bench --memory --queries identity,first_element,length
 
 # Run Criterion benchmarks (wall time only)
 cargo bench --bench yq_comparison
