@@ -550,13 +550,13 @@ For detailed documentation on optimization techniques used in this project, see 
   - **yaml_bench**: No regression (query-path only optimization)
   - Results are noisy because the forward-gap path is infrequently hit during typical streaming
   - See [docs/parsing/yaml.md#o2-gap-skipping-via-advance_rank1---accepted-](docs/parsing/yaml.md#o2-gap-skipping-via-advance_rank1---accepted-) for full analysis
-- ✅ O3 (SIMD JSON Escape Scanning): **3-11% faster** JSON output in streaming path, issue #87
-  - AVX2 scans 32-byte chunks for escapable characters (`"`, `\`, control chars < 0x20)
-  - Threshold-based hybrid: SIMD for ≥32 bytes, inline scalar for short spans
-  - **Micro-benchmark**: 28-30x faster raw escape scanning (70 GiB/s vs 2.5 GiB/s)
-  - **End-to-end transcode benchmarks**:
-    - unicode_8digit/100: **-11%** (432 MiB/s)
-    - realistic/config: **-4%** (234 MiB/s)
-    - large/500_items: **-5%** (227 MiB/s)
-  - **Key insight**: Threshold prevents regression on short strings (initial impl was 2-7% slower without)
-  - See [docs/parsing/yaml.md#o3-simd-json-escape-scanning---accepted-](docs/parsing/yaml.md#o3-simd-json-escape-scanning---accepted-) for full analysis
+- ✅ O3 (SIMD Escape Scanning): **4-12x faster** micro-benchmark escape scanning on ARM64 NEON, issue #87
+  - Added `find_json_escape_neon()` using NEON SIMD to scan for JSON escape characters (`"`, `\`, `< 0x20`)
+  - Processes 16 bytes per iteration vs 1 byte scalar
+  - **Micro-benchmark speedups** (Apple M1 Max, no-escape strings):
+    - 16B: **4.1x** faster, 64B: **6.3x** faster, 256B: **11.8x** faster, 1024B: **12x** faster
+  - **Realistic patterns** (escape every ~20 chars): 1.3-2.5x speedup
+  - **End-to-end transcode**: 180-420 MiB/s throughput maintained
+  - **16-byte threshold + `#[inline(always)]`**: Both required to prevent regression (threshold alone still caused 3-5% regression)
+  - Best for: YAML with long string values (logs, templates, embedded content)
+  - See [docs/parsing/yaml.md#o3-simd-escape-scanning-for-json-output--accepted-](docs/parsing/yaml.md#o3-simd-escape-scanning-for-json-output--accepted-) for full analysis
