@@ -1789,7 +1789,13 @@ impl<'a> Parser<'a> {
         }
         if self.matches_keyword("keys") {
             self.consume_keyword("keys");
-            return Ok(Some(Builtin::Keys));
+            // In Yq mode, `keys` returns document order (like yq) instead of sorted (like jq)
+            // Use `keys_unsorted` in jq mode to get document order
+            return Ok(Some(if self.mode == ParserMode::Yq {
+                Builtin::KeysUnsorted
+            } else {
+                Builtin::Keys
+            }));
         }
 
         // has(expr) - takes an argument
