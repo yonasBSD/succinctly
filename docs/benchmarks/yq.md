@@ -1147,13 +1147,13 @@ M2 avoids OwnedValue DOM construction for navigation queries, streaming directly
 
 | Query       | Path          | succinctly | yq       | Speedup      | succ Mem | yq Mem   | Mem Ratio |
 |-------------|---------------|------------|----------|--------------|----------|----------|-----------|
-| `.`         | P9 streaming  | 1.78s      | 11.54s   | **6.5x**     | 254 MB   | 7 GB     | **0.03x** |
+| `.`         | P9 streaming  | 1.21s      | 11.31s   | **9.4x**     | 275 MB   | 7 GB     | **0.04x** |
 | `.[0]`      | M2 streaming  | 444ms      | 5.84s    | **13.2x**    | 254 MB   | 5 GB     | **0.05x** |
 | `.[]`       | M2 streaming  | 2.53s      | 13.30s   | **5.3x**     | 269 MB   | 8 GB     | **0.03x** |
 | `length`    | OwnedValue    | 445ms      | 5.84s    | **13.1x**    | 254 MB   | 5 GB     | **0.05x** |
 
 **Key insights**:
-- **M2 streaming (`.[0]`) is 3.7-4.0x faster than identity (`.`)** on the same file - navigates to first element without streaming entire document
+- **M2 streaming (`.[0]`) is 2.7x faster than identity (`.`)** on the same file - navigates to first element without streaming entire document
 - **succinctly uses 3-7% of yq's memory** across all query types
 - **All paths use similar base memory** because the YAML index dominates (~3x input size)
 - Navigation queries benefit from M2's lazy evaluation - only accessed elements are materialized
