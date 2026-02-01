@@ -447,11 +447,12 @@ fn eval_single<V: DocumentValue>(
             if let Some(fields) = value.as_object() {
                 match fields.find(name) {
                     Some(v) => GenericResult::One(v),
-                    None if optional => GenericResult::None,
-                    None => {
-                        GenericResult::Error(EvalError::new(format!("field '{}' not found", name)))
-                    }
+                    // jq returns null for missing fields on objects (not an error)
+                    None => GenericResult::Owned(OwnedValue::Null),
                 }
+            } else if value.is_null() {
+                // jq returns null for field access on null
+                GenericResult::Owned(OwnedValue::Null)
             } else if optional {
                 GenericResult::None
             } else {

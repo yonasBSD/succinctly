@@ -602,9 +602,16 @@ fn test_conditional() -> Result<()> {
 
 #[test]
 fn test_try_catch() -> Result<()> {
+    // jq returns null for .foo.bar when .foo is null (not an error)
     let (output, code) = run_jq_stdin(r#"try .foo.bar catch "error""#, r#"{"foo":null}"#, &["-r"])?;
     assert_eq!(code, 0);
+    assert_eq!(output.trim(), "null");
+
+    // Actual error case: .foo.bar when .foo is a number triggers catch
+    let (output, code) = run_jq_stdin(r#"try .foo.bar catch "error""#, r#"{"foo":123}"#, &["-r"])?;
+    assert_eq!(code, 0);
     assert_eq!(output.trim(), "error");
+
     Ok(())
 }
 
