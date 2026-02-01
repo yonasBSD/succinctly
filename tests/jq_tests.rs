@@ -115,11 +115,10 @@ fn test_field_nested_object() {
 }
 
 #[test]
-fn test_field_missing_error() {
+fn test_field_missing_returns_null() {
+    // jq returns null for missing fields on objects (not an error)
     query!(br#"{"a": 1}"#, ".missing",
-        QueryResult::Error(e) => {
-            assert!(e.message.contains("not found"), "expected 'not found' error");
-        }
+        QueryResult::One(StandardJson::Null) => {}
     );
 }
 
@@ -317,8 +316,9 @@ fn test_slice_empty_result() {
 
 #[test]
 fn test_optional_field_missing() {
+    // jq returns null for missing fields on objects (even with optional syntax)
     query!(br#"{"a": 1}"#, ".missing?",
-        QueryResult::None => {}
+        QueryResult::One(StandardJson::Null) => {}
     );
 }
 
@@ -420,13 +420,15 @@ fn test_lenient_success() {
 }
 
 #[test]
-fn test_lenient_error_returns_empty() {
-    query_lenient!(br#"{"name": "test"}"#, ".missing", is_empty);
+fn test_lenient_missing_field_returns_null() {
+    // jq returns null for missing fields - eval_lenient collects this as one result
+    query_lenient!(br#"{"name": "test"}"#, ".missing", len == 1);
 }
 
 #[test]
-fn test_lenient_none_returns_empty() {
-    query_lenient!(br#"{"name": "test"}"#, ".missing?", is_empty);
+fn test_lenient_missing_field_optional_returns_null() {
+    // jq returns null for missing fields even with optional syntax
+    query_lenient!(br#"{"name": "test"}"#, ".missing?", len == 1);
 }
 
 #[test]

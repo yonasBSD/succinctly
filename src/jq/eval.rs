@@ -198,9 +198,11 @@ fn eval_single<'a, W: Clone + AsRef<[u64]>>(
         Expr::Field(name) => match value {
             StandardJson::Object(fields) => match find_field(fields, name) {
                 Some(v) => QueryResult::One(v),
-                None if optional => QueryResult::None,
-                None => QueryResult::Error(EvalError::field_not_found(name)),
+                // jq returns null for missing fields on objects (not an error)
+                None => QueryResult::One(StandardJson::Null),
             },
+            // jq returns null for field access on null
+            StandardJson::Null => QueryResult::One(StandardJson::Null),
             _ if optional => QueryResult::None,
             _ => QueryResult::Error(EvalError::type_error("object", type_name(&value))),
         },
@@ -7238,11 +7240,18 @@ fn eval_pipe_with_path_context_internal<'a, W: Clone + AsRef<[u64]>>(
                         rest, v, root, &new_path, optional,
                     );
                 }
+                // jq returns null for missing fields on objects (not an error)
+                return QueryResult::Owned(OwnedValue::Null);
             }
+            // jq returns null for field access on null
+            if matches!(value, OwnedValue::Null) {
+                return QueryResult::Owned(OwnedValue::Null);
+            }
+            // Non-object/null: error (or None if optional)
             if optional {
                 QueryResult::None
             } else {
-                QueryResult::Error(EvalError::field_not_found(name))
+                QueryResult::Error(EvalError::type_error("object", owned_type_name(value)))
             }
         }
         Expr::Index(idx) => {
@@ -13097,15 +13106,72 @@ mod tests {
 
     #[test]
     fn test_missing_field() {
+        // jq returns null for missing fields on objects (not an error)
         query!(br#"{"name": "Alice"}"#, ".missing",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // Optional also returns null for missing fields on objects
+        query!(br#"{"name": "Alice"}"#, ".missing?",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+    }
+
+    #[test]
+    fn test_missing_field_iteration() {
+        // Issue #61: When iterating over objects, missing fields should return null
+        // This matches jq behavior: [.[].status_code] returns [404, null, null] not [404]
+        query!(
+            br#"[{"status_code": 404}, {"msg": "no status"}, {"msg": "also none"}]"#,
+            "[.[].status_code]",
+            QueryResult::Owned(OwnedValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], OwnedValue::Int(404));
+                assert_eq!(arr[1], OwnedValue::Null);
+                assert_eq!(arr[2], OwnedValue::Null);
+            }
+        );
+    }
+
+    #[test]
+    fn test_field_on_non_object() {
+        // Accessing .field on non-object is an error (unlike missing field on object)
+        query!(br#"123"#, ".field",
             QueryResult::Error(e) => {
-                assert!(e.message.contains("not found"));
+                assert!(e.message.contains("expected object"));
             }
         );
 
-        // Optional should return None
-        query!(br#"{"name": "Alice"}"#, ".missing?",
+        // But with optional, it returns nothing (not null)
+        query!(br#"123"#, ".field?",
             QueryResult::None => {}
+        );
+
+        // For null input, jq returns null (not error)
+        query!(br#"null"#, ".field",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        query!(br#"null"#, ".field?",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+    }
+
+    #[test]
+    fn test_nested_missing_field() {
+        // Nested field access where intermediate field exists but final doesn't
+        query!(br#"{"a": {"b": 1}}"#, ".a.missing",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // Nested field where intermediate exists but is null - jq returns null
+        query!(br#"{"a": null}"#, ".a.missing",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // With optional on null, also returns null
+        query!(br#"{"a": null}"#, ".a.missing?",
+            QueryResult::One(StandardJson::Null) => {}
         );
     }
 
@@ -13584,26 +13650,42 @@ mod tests {
 
     #[test]
     fn test_try_catch_error() {
-        // try with catch - error is caught
+        // try with catch on missing field - no error to catch, returns null
+        // (jq returns null for missing fields on objects, not an error)
         query!(br#"{}"#, "try .missing catch \"default\"",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // try without catch on missing field - returns null
+        query!(br#"{}"#, "try .missing",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // try with catch on actual error (field access on number) - catch is triggered
+        query!(br#"123"#, "try .foo catch \"default\"",
             QueryResult::Owned(OwnedValue::String(s)) if s == "default" => {}
         );
 
-        // try without catch - error is suppressed (returns None)
-        query!(br#"{}"#, "try .missing",
+        // try without catch on actual error - error is suppressed (returns None)
+        query!(br#"123"#, "try .foo",
             QueryResult::None => {}
         );
 
-        // try with null catch
-        query!(br#"{}"#, "try .missing catch null",
+        // try with null catch on actual error
+        query!(br#"123"#, "try .foo catch null",
             QueryResult::Owned(OwnedValue::Null) => {}
         );
     }
 
     #[test]
     fn test_try_catch_optional() {
-        // Optional inside try - optional suppresses the error first
+        // Optional on missing field returns null, not None
         query!(br#"{}"#, "try .missing? catch \"default\"",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // Optional on actual error (field on number) - optional suppresses error
+        query!(br#"123"#, "try .foo? catch \"default\"",
             QueryResult::None => {}
         );
     }
@@ -13657,13 +13739,23 @@ mod tests {
 
     #[test]
     fn test_control_flow_combinations() {
-        // if inside try
+        // if inside try - missing field returns null (no error to catch)
         query!(br#"{"a": true}"#, "try (if .a then .missing else .a end) catch \"error\"",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // if inside try with actual error (field access on number)
+        query!(br#"{"a": 123}"#, "try (if true then .a.foo else 0 end) catch \"error\"",
             QueryResult::Owned(OwnedValue::String(s)) if s == "error" => {}
         );
 
-        // try inside if
+        // try inside if - missing field returns null (no error to catch)
         query!(br#"{"a": true}"#, "if .a then try .missing catch 0 else 1 end",
+            QueryResult::One(StandardJson::Null) => {}
+        );
+
+        // try inside if with actual error
+        query!(br#"{"a": 123}"#, "if true then try .a.foo catch 0 else 1 end",
             QueryResult::Owned(OwnedValue::Int(0)) => {}
         );
 
@@ -15103,8 +15195,13 @@ mod tests {
             QueryResult::Owned(OwnedValue::Bool(true)) => {}
         );
 
-        // isvalid returns false for error-producing expressions
+        // isvalid returns true for missing field (returns null, not error)
         query!(br#"{"a": 1}"#, r#"isvalid(.b)"#,
+            QueryResult::Owned(OwnedValue::Bool(true)) => {}
+        );
+
+        // isvalid returns false for actual error-producing expressions
+        query!(br#"123"#, r#"isvalid(.foo)"#,
             QueryResult::Owned(OwnedValue::Bool(false)) => {}
         );
     }
@@ -15596,9 +15693,12 @@ mod tests {
 
     #[test]
     fn test_dollar_env_missing_var() {
-        // $ENV.NONEXISTENT_VAR_12345 returns null with optional syntax
-        // Note: jq returns null for missing fields, but our implementation returns error
-        // Using optional syntax to get null instead
+        // $ENV.NONEXISTENT_VAR_12345 returns null (jq-compatible behavior)
+        query!(b"null", "$ENV.NONEXISTENT_VAR_12345",
+            QueryResult::Owned(OwnedValue::Null) => {}
+        );
+
+        // Optional syntax also returns null
         query!(b"null", "$ENV.NONEXISTENT_VAR_12345?",
             QueryResult::Owned(OwnedValue::Null) => {}
         );
