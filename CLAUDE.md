@@ -301,6 +301,14 @@ cargo test
 | **100KB** |  8.2 ms (11.9 MiB/s)  | 12.0 ms  (8.1 MiB/s)  | **1.5x**   |
 | **1MB**   | 38.9 ms (25.7 MiB/s)  | 70.9 ms (14.1 MiB/s)  | **1.8x**   |
 
+### jq Query Performance (Apple M4 Pro)
+
+| Size      | succinctly            | jq                    | Speedup    |
+|-----------|-----------------------|-----------------------|------------|
+| **10KB**  |  3.4 ms  (2.9 MiB/s)  |  3.4 ms  (2.9 MiB/s)  | **1.0x**   |
+| **100KB** |  5.3 ms (18.4 MiB/s)  |  8.5 ms (11.5 MiB/s)  | **1.6x**   |
+| **1MB**   | 24.5 ms (40.8 MiB/s)  | 54.4 ms (18.4 MiB/s)  | **2.2x**   |
+
 To regenerate: `succinctly bench run jq_bench`
 
 ### jq Query Performance (ARM Neoverse-V2)
@@ -328,6 +336,16 @@ To regenerate: `succinctly bench run jq_bench`
 | **1MB**    |  18.6 ms (53.8 MiB/s)  | 113.7 ms  (8.8 MiB/s)  | **6.1x**    | **0.12x**  |
 | **10MB**   | 119.8 ms (83.5 MiB/s)  |   1.02 s  (9.8 MiB/s)  | **8.5x**    | **0.05x**  |
 | **100MB**  |   1.09 s (91.7 MiB/s)  |   9.74 s (10.3 MiB/s)  | **8.9x**    | **0.04x**  |
+
+### yq Query Performance (Apple M4 Pro)
+
+| Size       | succinctly             | yq                     | Speedup     | Mem Ratio  |
+|------------|------------------------|------------------------|-------------|------------|
+| **10KB**   |   3.1 ms  (3.2 MiB/s)  |   5.8 ms  (1.7 MiB/s)  | **1.9x**    | **0.33x**  |
+| **100KB**  |   4.0 ms (24.4 MiB/s)  |  13.6 ms  (7.2 MiB/s)  | **3.4x**    | **0.22x**  |
+| **1MB**    |  12.0 ms (83.3 MiB/s)  |  78.0 ms (12.8 MiB/s)  | **6.5x**    | **0.09x**  |
+| **10MB**   |  87.0 ms (114.9 MiB/s) | 694.7 ms (14.4 MiB/s)  | **8.0x**    | **0.05x**  |
+| **100MB**  | 815.3 ms (122.7 MiB/s) |   6.77 s (14.8 MiB/s)  | **8.3x**    | **0.04x**  |
 
 ### yq Query Performance (ARM Neoverse-V2)
 
