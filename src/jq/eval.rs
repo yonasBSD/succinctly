@@ -13,7 +13,38 @@ use alloc::vec;
 #[cfg(not(test))]
 use alloc::vec::Vec;
 
+use core::cell::Cell;
 use indexmap::IndexMap;
+
+/// Evaluation mode - determines semantics for edge cases.
+///
+/// jq and yq (mikefarah/yq) have different behaviors for some edge cases:
+/// - Division by zero: jq returns error, yq returns infinity
+/// - Integer overflow: jq converts to float, yq wraps
+/// - has(-1) on arrays: jq returns false, yq returns true
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvalMode {
+    /// jq-compatible mode (default for sjq command)
+    #[default]
+    Jq,
+    /// yq-compatible mode (for syq command)
+    Yq,
+}
+
+// Thread-local evaluation mode
+thread_local! {
+    static EVAL_MODE: Cell<EvalMode> = const { Cell::new(EvalMode::Jq) };
+}
+
+/// Set the evaluation mode for the current thread.
+pub fn set_eval_mode(mode: EvalMode) {
+    EVAL_MODE.with(|m| m.set(mode));
+}
+
+/// Get the current evaluation mode.
+pub fn get_eval_mode() -> EvalMode {
+    EVAL_MODE.with(|m| m.get())
+}
 
 use crate::json::light::{JsonCursor, JsonElements, JsonFields, StandardJson};
 
@@ -657,11 +688,19 @@ fn eval_arithmetic<'a, W: Clone + AsRef<[u64]>>(
 /// Add two values (numbers, strings, arrays, objects).
 fn arith_add(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalError> {
     match (left, right) {
-        // Number addition - convert to float on overflow (jq behavior)
-        (OwnedValue::Int(a), OwnedValue::Int(b)) => match a.checked_add(b) {
-            Some(result) => Ok(OwnedValue::Int(result)),
-            None => Ok(OwnedValue::Float(a as f64 + b as f64)),
-        },
+        // Number addition - jq converts to float on overflow, yq wraps
+        (OwnedValue::Int(a), OwnedValue::Int(b)) => {
+            if get_eval_mode() == EvalMode::Yq {
+                // yq behavior: wrapping add
+                Ok(OwnedValue::Int(a.wrapping_add(b)))
+            } else {
+                // jq behavior: convert to float on overflow
+                match a.checked_add(b) {
+                    Some(result) => Ok(OwnedValue::Int(result)),
+                    None => Ok(OwnedValue::Float(a as f64 + b as f64)),
+                }
+            }
+        }
         (OwnedValue::Int(a), OwnedValue::Float(b)) => Ok(OwnedValue::Float(a as f64 + b)),
         (OwnedValue::Float(a), OwnedValue::Int(b)) => Ok(OwnedValue::Float(a + b as f64)),
         (OwnedValue::Float(a), OwnedValue::Float(b)) => Ok(OwnedValue::Float(a + b)),
@@ -693,11 +732,19 @@ fn arith_add(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalErro
 /// Subtract two values.
 fn arith_sub(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalError> {
     match (left, right) {
-        // Convert to float on overflow (jq behavior)
-        (OwnedValue::Int(a), OwnedValue::Int(b)) => match a.checked_sub(b) {
-            Some(result) => Ok(OwnedValue::Int(result)),
-            None => Ok(OwnedValue::Float(a as f64 - b as f64)),
-        },
+        // jq converts to float on overflow, yq wraps
+        (OwnedValue::Int(a), OwnedValue::Int(b)) => {
+            if get_eval_mode() == EvalMode::Yq {
+                // yq behavior: wrapping sub
+                Ok(OwnedValue::Int(a.wrapping_sub(b)))
+            } else {
+                // jq behavior: convert to float on overflow
+                match a.checked_sub(b) {
+                    Some(result) => Ok(OwnedValue::Int(result)),
+                    None => Ok(OwnedValue::Float(a as f64 - b as f64)),
+                }
+            }
+        }
         (OwnedValue::Int(a), OwnedValue::Float(b)) => Ok(OwnedValue::Float(a as f64 - b)),
         (OwnedValue::Float(a), OwnedValue::Int(b)) => Ok(OwnedValue::Float(a - b as f64)),
         (OwnedValue::Float(a), OwnedValue::Float(b)) => Ok(OwnedValue::Float(a - b)),
@@ -717,11 +764,19 @@ fn arith_sub(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalErro
 /// Multiply two values.
 fn arith_mul(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalError> {
     match (left, right) {
-        // Convert to float on overflow (jq behavior)
-        (OwnedValue::Int(a), OwnedValue::Int(b)) => match a.checked_mul(b) {
-            Some(result) => Ok(OwnedValue::Int(result)),
-            None => Ok(OwnedValue::Float(a as f64 * b as f64)),
-        },
+        // jq converts to float on overflow, yq wraps
+        (OwnedValue::Int(a), OwnedValue::Int(b)) => {
+            if get_eval_mode() == EvalMode::Yq {
+                // yq behavior: wrapping mul
+                Ok(OwnedValue::Int(a.wrapping_mul(b)))
+            } else {
+                // jq behavior: convert to float on overflow
+                match a.checked_mul(b) {
+                    Some(result) => Ok(OwnedValue::Int(result)),
+                    None => Ok(OwnedValue::Float(a as f64 * b as f64)),
+                }
+            }
+        }
         (OwnedValue::Int(a), OwnedValue::Float(b)) => Ok(OwnedValue::Float(a as f64 * b)),
         (OwnedValue::Float(a), OwnedValue::Int(b)) => Ok(OwnedValue::Float(a * b as f64)),
         (OwnedValue::Float(a), OwnedValue::Float(b)) => Ok(OwnedValue::Float(a * b)),
@@ -771,27 +826,34 @@ fn arith_div(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalErro
     match (left, right) {
         (OwnedValue::Int(a), OwnedValue::Int(b)) => {
             if b == 0 {
-                Err(EvalError::new("division by zero"))
+                if get_eval_mode() == EvalMode::Yq {
+                    // yq behavior: return infinity
+                    Ok(OwnedValue::Float(a as f64 / b as f64))
+                } else {
+                    // jq behavior: error
+                    Err(EvalError::new("division by zero"))
+                }
             } else {
                 Ok(OwnedValue::Float(a as f64 / b as f64))
             }
         }
         (OwnedValue::Int(a), OwnedValue::Float(b)) => {
-            if b == 0.0 {
+            if b == 0.0 && get_eval_mode() == EvalMode::Jq {
                 Err(EvalError::new("division by zero"))
             } else {
+                // yq allows, jq errors (handled above)
                 Ok(OwnedValue::Float(a as f64 / b))
             }
         }
         (OwnedValue::Float(a), OwnedValue::Int(b)) => {
-            if b == 0 {
+            if b == 0 && get_eval_mode() == EvalMode::Jq {
                 Err(EvalError::new("division by zero"))
             } else {
                 Ok(OwnedValue::Float(a / b as f64))
             }
         }
         (OwnedValue::Float(a), OwnedValue::Float(b)) => {
-            if b == 0.0 {
+            if b == 0.0 && get_eval_mode() == EvalMode::Jq {
                 Err(EvalError::new("division by zero"))
             } else {
                 Ok(OwnedValue::Float(a / b))
@@ -818,27 +880,33 @@ fn arith_mod(left: OwnedValue, right: OwnedValue) -> Result<OwnedValue, EvalErro
     match (left, right) {
         (OwnedValue::Int(a), OwnedValue::Int(b)) => {
             if b == 0 {
-                Err(EvalError::new("modulo by zero"))
+                if get_eval_mode() == EvalMode::Yq {
+                    // yq behavior: return NaN (will be serialized as null)
+                    Ok(OwnedValue::Float(f64::NAN))
+                } else {
+                    // jq behavior: error
+                    Err(EvalError::new("modulo by zero"))
+                }
             } else {
                 Ok(OwnedValue::Int(a % b))
             }
         }
         (OwnedValue::Float(a), OwnedValue::Float(b)) => {
-            if b == 0.0 {
+            if b == 0.0 && get_eval_mode() == EvalMode::Jq {
                 Err(EvalError::new("modulo by zero"))
             } else {
                 Ok(OwnedValue::Float(a % b))
             }
         }
         (OwnedValue::Int(a), OwnedValue::Float(b)) => {
-            if b == 0.0 {
+            if b == 0.0 && get_eval_mode() == EvalMode::Jq {
                 Err(EvalError::new("modulo by zero"))
             } else {
                 Ok(OwnedValue::Float(a as f64 % b))
             }
         }
         (OwnedValue::Float(a), OwnedValue::Int(b)) => {
-            if b == 0 {
+            if b == 0 && get_eval_mode() == EvalMode::Jq {
                 Err(EvalError::new("modulo by zero"))
             } else {
                 Ok(OwnedValue::Float(a % b as f64))
@@ -1667,11 +1735,20 @@ fn builtin_has<'a, W: Clone + AsRef<[u64]>>(
             });
             QueryResult::Owned(OwnedValue::Bool(found))
         }
-        // Array has index - jq's has() only accepts non-negative indices
+        // Array has index - jq returns false for negative, yq returns true if in range
         (StandardJson::Array(elements), OwnedValue::Int(idx)) => {
             let len = (*elements).count() as i64;
-            // jq: has() returns false for negative indices
-            let in_bounds = *idx >= 0 && *idx < len;
+            let in_bounds = if get_eval_mode() == EvalMode::Yq {
+                // yq behavior: negative indices are valid if abs(idx) <= len
+                if *idx >= 0 {
+                    *idx < len
+                } else {
+                    idx.abs() <= len
+                }
+            } else {
+                // jq behavior: only non-negative indices
+                *idx >= 0 && *idx < len
+            };
             QueryResult::Owned(OwnedValue::Bool(in_bounds))
         }
         _ if optional => QueryResult::None,
@@ -1718,11 +1795,20 @@ fn builtin_in<'a, W: Clone + AsRef<[u64]>>(
             let found = fields.keys().any(|k| k == key);
             QueryResult::Owned(OwnedValue::Bool(found))
         }
-        // jq's in() only accepts non-negative indices for arrays
+        // jq returns false for negative indices, yq returns true if in range
         (OwnedValue::Int(idx), OwnedValue::Array(elements)) => {
             let len = elements.len() as i64;
-            // jq: in() returns false for negative indices
-            let in_bounds = *idx >= 0 && *idx < len;
+            let in_bounds = if get_eval_mode() == EvalMode::Yq {
+                // yq behavior: negative indices are valid if abs(idx) <= len
+                if *idx >= 0 {
+                    *idx < len
+                } else {
+                    idx.abs() <= len
+                }
+            } else {
+                // jq behavior: only non-negative indices
+                *idx >= 0 && *idx < len
+            };
             QueryResult::Owned(OwnedValue::Bool(in_bounds))
         }
         _ if optional => QueryResult::None,

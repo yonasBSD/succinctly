@@ -77,7 +77,10 @@ mod parser;
 pub mod stream;
 mod value;
 
-pub use eval::{eval, eval_lenient, substitute_vars, EvalError, QueryResult};
+pub use eval::{
+    eval, eval_lenient, get_eval_mode, set_eval_mode, substitute_vars, EvalError, EvalMode,
+    QueryResult,
+};
 pub use expr::{
     ArithOp, AssignOp, Builtin, CompareOp, Expr, FormatType, Import, Include, Literal, MetaValue,
     ModuleMeta, ObjectEntry, ObjectKey, Pattern, PatternEntry, Program, StringPart,

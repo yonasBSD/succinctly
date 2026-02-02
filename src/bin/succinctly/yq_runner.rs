@@ -10,7 +10,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
 use succinctly::jq::eval_generic::{eval_with_cursor, to_owned, GenericResult};
-use succinctly::jq::{self, Builtin, Expr, OwnedValue, QueryResult};
+use succinctly::jq::{self, set_eval_mode, Builtin, EvalMode, Expr, OwnedValue, QueryResult};
 use succinctly::json::light::StandardJson;
 use succinctly::json::JsonIndex;
 use succinctly::yaml::{YamlCursor, YamlIndex, YamlValue};
@@ -1356,6 +1356,9 @@ pub fn run_yq(args: YqCommand) -> Result<i32> {
         print_build_configuration();
         return Ok(exit_codes::SUCCESS);
     }
+
+    // Set yq evaluation mode (different semantics from jq for some edge cases)
+    set_eval_mode(EvalMode::Yq);
 
     // Get the filter expression
     let filter_str = if let Some(ref path) = args.from_file {
