@@ -1613,7 +1613,16 @@ where
                     out.write_all(formatter.format_raw_number(n.raw_bytes()).as_bytes())?;
                 }
                 StandardJson::String(s) => {
-                    if let Ok(decoded) = s.as_str() {
+                    let raw = s.raw_bytes();
+                    // Zero-copy optimization: if no escapes (backslash) and not ASCII mode,
+                    // output raw bytes directly without decode/encode roundtrip.
+                    // This is valid because JSON strings without backslashes need no normalization.
+                    let content = &raw[1..raw.len().saturating_sub(1)]; // Content between quotes
+                    if !config.ascii_output && !content.contains(&b'\\') {
+                        // Zero-copy: output raw bytes directly (includes quotes)
+                        out.write_all(raw)?;
+                    } else if let Ok(decoded) = s.as_str() {
+                        // Has escapes or ASCII mode - decode and re-encode for normalization
                         out.write_all(b"\"")?;
                         let escaped = if config.ascii_output {
                             escape_json_string_ascii(&decoded)
@@ -1623,7 +1632,8 @@ where
                         out.write_all(escaped.as_bytes())?;
                         out.write_all(b"\"")?;
                     } else {
-                        out.write_all(s.raw_bytes())?;
+                        // Decode failed - output raw bytes as fallback
+                        out.write_all(raw)?;
                     }
                 }
                 StandardJson::Array(elements) => {
@@ -1669,16 +1679,25 @@ where
                             }
                             is_first = false;
                             if let SJ::String(k) = field.key() {
-                                out.write_all(b"\"")?;
-                                if let Ok(decoded) = k.as_str() {
+                                // Zero-copy for keys without escapes
+                                let raw = k.raw_bytes();
+                                let content = &raw[1..raw.len().saturating_sub(1)];
+                                if !config.ascii_output && !content.contains(&b'\\') {
+                                    out.write_all(raw)?;
+                                    out.write_all(b":")?;
+                                } else if let Ok(decoded) = k.as_str() {
+                                    out.write_all(b"\"")?;
                                     let escaped = if config.ascii_output {
                                         escape_json_string_ascii(&decoded)
                                     } else {
                                         escape_json_string(&decoded)
                                     };
                                     out.write_all(escaped.as_bytes())?;
+                                    out.write_all(b"\":")?;
+                                } else {
+                                    out.write_all(raw)?;
+                                    out.write_all(b":")?;
                                 }
-                                out.write_all(b"\":")?;
                             }
                             let child_value = JqValue::Cursor(field.value_cursor());
                             print_json(out, &child_value, formatter, config, level + 1)?;
@@ -1695,17 +1714,28 @@ where
                             is_first = false;
                             out.write_all(next_indent.as_bytes())?;
                             if let SJ::String(k) = field.key() {
-                                out.write_all(b"\"")?;
-                                if let Ok(decoded) = k.as_str() {
+                                // Zero-copy for keys without escapes
+                                let raw = k.raw_bytes();
+                                let content = &raw[1..raw.len().saturating_sub(1)];
+                                if !config.ascii_output && !content.contains(&b'\\') {
+                                    out.write_all(raw)?;
+                                    out.write_all(b":")?;
+                                    out.write_all(space_after_colon.as_bytes())?;
+                                } else if let Ok(decoded) = k.as_str() {
+                                    out.write_all(b"\"")?;
                                     let escaped = if config.ascii_output {
                                         escape_json_string_ascii(&decoded)
                                     } else {
                                         escape_json_string(&decoded)
                                     };
                                     out.write_all(escaped.as_bytes())?;
+                                    out.write_all(b"\":")?;
+                                    out.write_all(space_after_colon.as_bytes())?;
+                                } else {
+                                    out.write_all(raw)?;
+                                    out.write_all(b":")?;
+                                    out.write_all(space_after_colon.as_bytes())?;
                                 }
-                                out.write_all(b"\":")?;
-                                out.write_all(space_after_colon.as_bytes())?;
                             }
                             let child_value = JqValue::Cursor(field.value_cursor());
                             print_json(out, &child_value, formatter, config, level + 1)?;
