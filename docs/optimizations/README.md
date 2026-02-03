@@ -44,6 +44,7 @@ This directory documents optimization techniques used in the succinctly library,
 | P12-A Build Mitigation         | **11-85%** (build) | Compact encoding | [end-positions.md](end-positions.md)                     |
 | O1 Sequential Cursor           | **3-13%** (query)  | Compact encoding | [end-positions.md](end-positions.md)                     |
 | O2 Gap-Skip rank1              | **2-6%** (query)   | Compact encoding | [end-positions.md](end-positions.md)                     |
+| jq Lazy String Slicing         | **8.5%** (vs regression), **2%** (vs baseline) | Control flow | src/jq/eval.rs |
 
 ### Notable Failures (Instructive)
 
@@ -56,6 +57,9 @@ This directory documents optimization techniques used in the succinctly library,
 | AVX-512 JSON Parser         | **-10%**       | Memory-bound, not compute-bound              | [simd.md](simd.md)                            |
 | AVX-512 YAML Parser         | **-7%**        | Memory bandwidth bottleneck + benchmark flaw | [simd.md](simd.md)                            |
 | SIMD Lookahead Quote Skip   | **-2 to -6%** | Short strings, SIMD overhead dominates       | [state-machines.md](state-machines.md)         |
+| jq `#[inline(always)]` on generics | **Hangs tests** (60s vs 2s) | Code explosion in 18K-line generic-heavy file | src/jq/eval.rs |
+| jq `#[cold]` on error paths | **-0.3%**      | Compiler already optimizes cold paths         | src/jq/eval.rs |
+| jq `#[inline]` hint         | **-1.3%**      | Compiler's decisions were already optimal      | src/jq/eval.rs |
 
 ---
 
@@ -127,6 +131,27 @@ Micro-benchmarks must reflect real usage patterns, not just measure primitive op
 **YAML P8 lesson**: Benchmark measured loop iterations (AVX-512: 4 iterations for 256B, AVX2: 8 iterations) and showed "2x speedup" - but real parsing does the same total work for both. The apparent win was measuring *fewer function calls*, not *more work per call*.
 
 **Pattern to avoid**: Comparing different loop structures instead of comparing equivalent work.
+
+### 7. Fast Paths Beat Micro-Optimizations
+
+Simple fast-path checks that avoid work entirely beat trying to make work faster.
+
+**jq lazy slicing example**: Three simple `if` checks to detect identity slices (`[:]`, `[0:]`, full slice after resolution) gave **8.5% speedup** by avoiding Unicode character counting. This beat all attempts at micro-optimization via compiler hints.
+
+**Pattern**: Check for common cases (identity, empty, full) before doing expensive work.
+
+### 8. Trust the Compiler on Generic Code
+
+Rust's default inlining is excellent, especially for generic-heavy code. Forcing inlining with `#[inline(always)]` on generic functions can cause code explosion.
+
+**jq inline(always) failure**: Adding `#[inline(always)]` to 3 generic helper functions in an 18K-line file with 227 generic functions caused tests to hang (60+ seconds instead of 2 seconds). The exponential monomorphization × inlining created pathologically large functions that LLVM struggled to optimize.
+
+**Evidence from attempts**:
+- `#[inline(always)]`: 0.9% gain but **hangs tests** ✗
+- `#[cold]` only: 0.3% **regression** ✗
+- `#[inline]` hint: 1.3% **regression** ✗
+
+**Pattern**: Prefer `#[inline]` (hint) over `#[inline(always)]` (force). Better yet, let the compiler decide. Override only with strong profiling evidence showing the compiler is wrong.
 
 ---
 
