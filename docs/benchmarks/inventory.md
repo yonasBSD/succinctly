@@ -4,17 +4,18 @@ This document provides a comprehensive index of all benchmark reports in the pro
 
 ## Overview
 
-The project contains **7 main benchmark documentation files** with approximately **150+ distinct benchmark report sections**, plus **6 core/internal benchmark suites**.
+The project contains **8 main benchmark documentation files** with approximately **160+ distinct benchmark report sections**, plus **6 core/internal benchmark suites**.
 
-| File | Description | Sections |
-|------|-------------|----------|
-| [jq.md](jq.md) | JSON query performance vs system jq | ~40 |
-| [yq.md](yq.md) | YAML query performance vs system yq | ~35 |
-| [dsv.md](dsv.md) | CSV/TSV parsing performance | ~8 |
-| [cross-language.md](cross-language.md) | Multi-parser JSON comparison | ~15 |
-| [rust-parsers.md](rust-parsers.md) | Rust JSON parser comparison (x86_64 + ARM) | ~20 |
-| [rust-yaml-parsers.md](rust-yaml-parsers.md) | Rust YAML parser comparison (x86_64 + ARM) | ~16 |
-| [../parsing/yaml.md](../parsing/yaml.md) | YAML optimization phases | ~15 |
+| File                                         | Description                                | Sections |
+|----------------------------------------------|--------------------------------------------|----------|
+| [jq.md](jq.md)                               | JSON query performance vs system jq        | ~40      |
+| [yq.md](yq.md)                               | YAML query performance vs system yq        | ~35      |
+| [json-validate.md](json-validate.md)         | JSON validation (RFC 8259) throughput      | ~12      |
+| [dsv.md](dsv.md)                             | CSV/TSV parsing performance                | ~8       |
+| [cross-language.md](cross-language.md)       | Multi-parser JSON comparison               | ~15      |
+| [rust-parsers.md](rust-parsers.md)           | Rust JSON parser comparison (x86_64 + ARM) | ~20      |
+| [rust-yaml-parsers.md](rust-yaml-parsers.md) | Rust YAML parser comparison (x86_64 + ARM) | ~16      |
+| [../parsing/yaml.md](../parsing/yaml.md)     | YAML optimization phases                   | ~15      |
 
 ---
 
@@ -89,6 +90,37 @@ Comprehensive benchmarks comparing `succinctly jq .` vs `jq .` for JSON formatti
 - Pattern: strings
 - Pattern: unicode
 - Pattern: users
+
+---
+
+## [json-validate.md](json-validate.md) - JSON Validation Benchmarks
+
+Benchmarks for `succinctly json validate` - strict RFC 8259 JSON validation throughput.
+
+### Platforms Covered
+- Apple M4 Pro (ARM)
+- AMD Ryzen 9 7950X (x86_64)
+
+### Benchmark Sections
+
+#### Apple M4 Pro (ARM)
+- 1KB Files (10 patterns)
+- 10KB Files (10 patterns)
+- 100KB Files (10 patterns)
+- 1MB Files (10 patterns)
+- 10MB Files (10 patterns)
+- Performance by Pattern Type
+
+#### AMD Ryzen 9 7950X (x86_64)
+- 1KB Files (10 patterns)
+- 10KB Files (10 patterns)
+- 100KB Files (10 patterns)
+- 1MB Files (10 patterns)
+- 10MB Files (10 patterns)
+- Performance by Pattern Type (x86_64)
+
+#### Analysis
+- Key Findings (cross-platform comparison)
 
 ---
 
@@ -571,14 +603,14 @@ cargo bench --bench neon_movemask
 ## Finding Specific Benchmarks
 
 ### By Platform
-- **AMD Ryzen 9 7950X (x86_64)**: [jq.md](jq.md), [yq.md](yq.md), [dsv.md](dsv.md), [cross-language.md](cross-language.md), [rust-parsers.md](rust-parsers.md), [rust-yaml-parsers.md](rust-yaml-parsers.md), [yaml.md](../parsing/yaml.md)
+- **AMD Ryzen 9 7950X (x86_64)**: [jq.md](jq.md), [yq.md](yq.md), [dsv.md](dsv.md), [json-validate.md](json-validate.md), [cross-language.md](cross-language.md), [rust-parsers.md](rust-parsers.md), [rust-yaml-parsers.md](rust-yaml-parsers.md), [yaml.md](../parsing/yaml.md)
 - **ARM Neoverse-V2 (Graviton 4)**: [jq.md](jq.md), [yq.md](yq.md), [dsv.md](dsv.md), [rust-parsers.md](rust-parsers.md), [rust-yaml-parsers.md](rust-yaml-parsers.md)
 - **ARM Neoverse-V1 (Graviton 3)**: [jq.md](jq.md), [yq.md](yq.md), [dsv.md](dsv.md)
 - **Apple M1 Max**: [jq.md](jq.md), [yq.md](yq.md), [dsv.md](dsv.md), [cross-language.md](cross-language.md), [yaml.md](../parsing/yaml.md)
-- **Apple M4 Pro**: [jq.md](jq.md), [yq.md](yq.md)
+- **Apple M4 Pro**: [jq.md](jq.md), [yq.md](yq.md), [dsv.md](dsv.md), [json-validate.md](json-validate.md)
 
 ### By Format
-- **JSON**: [jq.md](jq.md), [cross-language.md](cross-language.md), [rust-parsers.md](rust-parsers.md)
+- **JSON**: [jq.md](jq.md), [json-validate.md](json-validate.md), [cross-language.md](cross-language.md), [rust-parsers.md](rust-parsers.md)
 - **YAML**: [yq.md](yq.md), [rust-yaml-parsers.md](rust-yaml-parsers.md), [yaml.md](../parsing/yaml.md)
 - **DSV/CSV/TSV**: [dsv.md](dsv.md)
 
