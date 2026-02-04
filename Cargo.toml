@@ -185,3 +185,7 @@ harness = false
 [[bench]]
 name = "json_escape_micro"
 harness = false
+
+[[bench]]
+name = "json_validate_bench"
+harness = false

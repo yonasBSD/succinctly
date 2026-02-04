@@ -217,6 +217,15 @@ pub static BENCHMARKS: &[BenchmarkInfo] = &[
         cli_subcommand: Some("jq"),
         working_dir: ".",
     },
+    BenchmarkInfo {
+        name: "json_validate_bench",
+        description: "JSON RFC 8259 validation throughput",
+        category: BenchmarkCategory::Json,
+        bench_type: BenchmarkType::Criterion,
+        criterion_name: Some("json_validate_bench"),
+        cli_subcommand: None,
+        working_dir: ".",
+    },
     // ========== YAML ==========
     BenchmarkInfo {
         name: "yaml_bench",

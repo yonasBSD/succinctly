@@ -108,20 +108,51 @@ fn test_invalid_json_exit_code_1() -> Result<()> {
     Ok(())
 }
 
+/// Strip ANSI escape codes from a string.
+fn strip_ansi_codes(s: &str) -> String {
+    // ANSI escape sequences: ESC [ ... m (where ... is digits and semicolons)
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Consume the escape sequence
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                              // Consume until 'm' or end
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 #[test]
 fn test_quiet_mode_no_output() -> Result<()> {
     let (stdout, stderr, exit_code) = run_validate_stdin(r#"{"invalid": }"#, &["--quiet"])?;
     assert_eq!(exit_code, 1);
     assert!(stdout.is_empty(), "stdout should be empty in quiet mode");
     // Filter out cargo compilation output (lines starting with "Compiling", "Finished", etc.)
+    // Note: cargo may output ANSI color codes, so we strip them before checking prefixes
     let app_stderr: String = stderr
         .lines()
         .filter(|line| {
-            !line.trim().starts_with("Compiling")
-                && !line.trim().starts_with("Finished")
-                && !line.trim().starts_with("Running")
-                && !line.trim().starts_with("Blocking")
-                && !line.trim().starts_with("warning:")
+            let stripped = strip_ansi_codes(line);
+            let trimmed = stripped.trim();
+            !trimmed.starts_with("Compiling")
+                && !trimmed.starts_with("Finished")
+                && !trimmed.starts_with("Running")
+                && !trimmed.starts_with("Blocking")
+                && !trimmed.starts_with("warning:")
+                && !trimmed.starts_with("Downloading")
+                && !trimmed.starts_with("Downloaded")
         })
         .collect::<Vec<_>>()
         .join("\n");
