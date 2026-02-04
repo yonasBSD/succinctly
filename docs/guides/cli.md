@@ -114,6 +114,86 @@ Supports case-insensitive size units:
 - Maximum structural character density
 - Deeply nested with many structural tokens
 
+### JSON Validation
+
+Validate JSON files strictly according to RFC 8259 with detailed error messages.
+
+```bash
+succinctly json validate [OPTIONS] [FILES...]
+```
+
+#### Options
+
+- `-q, --quiet`: Quiet mode, exit code only (no output)
+- `-C, --color`: Force color output even when not a TTY
+- `-M, --no-color`: Disable color output
+
+#### Exit Codes
+
+- `0`: JSON is valid
+- `1`: JSON is invalid (validation error)
+- `2`: I/O error (file not found, permission denied, etc.)
+
+#### Examples
+
+```bash
+# Validate from stdin
+echo '{"name": "Alice"}' | succinctly json validate
+# Exit code 0 (valid), no output
+
+# Validate a file
+succinctly json validate config.json
+
+# Validate multiple files
+succinctly json validate file1.json file2.json file3.json
+
+# Quiet mode (exit code only)
+succinctly json validate --quiet input.json && echo "Valid"
+
+# Colorized error output
+succinctly json validate --color invalid.json
+```
+
+#### Error Output
+
+When JSON is invalid, the validator shows detailed error messages with:
+- Error type and description
+- File location (filename:line:column)
+- Code snippet with visual error indicator
+
+```
+error: expected string key, found '}'
+  --> input.json:3:15
+     |
+   3 |   "name": "Alice",}
+     |                   ^
+```
+
+#### Validation Rules (RFC 8259)
+
+The validator enforces strict RFC 8259 compliance:
+
+**Numbers:**
+- No leading `+` sign (`+1` is invalid)
+- No leading zeros (`007` is invalid, but `0` and `0.5` are valid)
+- Decimal point must have digits on both sides (`1.` and `.5` are invalid)
+- Exponent must have at least one digit (`1e` is invalid)
+
+**Strings:**
+- Control characters (U+0000 through U+001F) must be escaped
+- Valid escapes: `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`
+- Surrogate pairs must be properly paired (high surrogate D800-DBFF followed by low surrogate DC00-DFFF)
+
+**Structure:**
+- No trailing commas in objects or arrays
+- Object keys must be strings
+- Only one root value allowed (no trailing content)
+
+**Whitespace:**
+- Only space (0x20), tab (0x09), newline (0x0A), and carriage return (0x0D) allowed outside strings
+
+---
+
 ## Examples
 
 ### Basic Generation
@@ -399,6 +479,7 @@ SUCCINCTLY_PRESERVE_INPUT=1 succinctly jq . input.json
 - `-R, --raw-input`: Read each line as a string instead of JSON
 - `-s, --slurp`: Read all inputs into an array
 - `--input-dsv <DELIMITER>`: Read input as DSV (delimiter-separated values); each row becomes a JSON array of strings
+- `--validate`: Validate JSON strictly according to RFC 8259 before processing; reports detailed validation errors with line:column positions
 
 ### Variables
 
@@ -427,6 +508,9 @@ cat data.json | succinctly jq '.items[]'
 
 # Output matches jq by default
 succinctly jq . input.json | diff - <(jq . input.json)
+
+# Validate JSON before processing (RFC 8259 strict)
+succinctly jq --validate '.users[]' input.json
 ```
 
 ### Assignment Operators
