@@ -42,7 +42,11 @@ pub struct Position {
 
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}, column {} (offset {})", self.line, self.column, self.offset)
+        write!(
+            f,
+            "line {}, column {} (offset {})",
+            self.line, self.column, self.offset
+        )
     }
 }
 
@@ -51,14 +55,9 @@ impl fmt::Display for Position {
 pub enum ValidationErrorKind {
     // Structural errors
     /// Expected a specific character but found something else.
-    UnexpectedCharacter {
-        expected: &'static str,
-        found: char,
-    },
+    UnexpectedCharacter { expected: &'static str, found: char },
     /// Unexpected end of input.
-    UnexpectedEof {
-        expected: &'static str,
-    },
+    UnexpectedEof { expected: &'static str },
     /// Extra content after the root JSON value.
     TrailingContent,
 
@@ -66,21 +65,13 @@ pub enum ValidationErrorKind {
     /// String was not closed before end of input.
     UnclosedString,
     /// Invalid escape sequence in string.
-    InvalidEscape {
-        sequence: char,
-    },
+    InvalidEscape { sequence: char },
     /// Invalid unicode escape sequence.
-    InvalidUnicodeEscape {
-        reason: &'static str,
-    },
+    InvalidUnicodeEscape { reason: &'static str },
     /// Unpaired surrogate in unicode escape.
-    UnpairedSurrogate {
-        codepoint: u16,
-    },
+    UnpairedSurrogate { codepoint: u16 },
     /// Unescaped control character in string.
-    ControlCharacter {
-        byte: u8,
-    },
+    ControlCharacter { byte: u8 },
 
     // Number errors
     /// Number has leading zero (e.g., 01, 007).
@@ -88,15 +79,11 @@ pub enum ValidationErrorKind {
     /// Number has leading plus sign.
     LeadingPlus,
     /// Invalid number format.
-    InvalidNumber {
-        reason: &'static str,
-    },
+    InvalidNumber { reason: &'static str },
 
     // Other errors
     /// Invalid keyword (not null, true, or false).
-    InvalidKeyword {
-        found: String,
-    },
+    InvalidKeyword { found: String },
     /// Invalid UTF-8 sequence.
     InvalidUtf8,
 }
@@ -128,7 +115,11 @@ impl fmt::Display for ValidationErrorKind {
             Self::LeadingPlus => write!(f, "leading plus sign not allowed in numbers"),
             Self::InvalidNumber { reason } => write!(f, "invalid number: {}", reason),
             Self::InvalidKeyword { found } => {
-                write!(f, "invalid keyword '{}' (expected null, true, or false)", found)
+                write!(
+                    f,
+                    "invalid keyword '{}' (expected null, true, or false)",
+                    found
+                )
             }
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 sequence"),
         }
@@ -443,34 +434,36 @@ impl<'a> Validator<'a> {
                 if (0xD800..=0xDBFF).contains(&high) {
                     // High surrogate - must be followed by \uXXXX low surrogate
                     if self.peek() != Some(b'\\') {
-                        return Err(self.error(ValidationErrorKind::UnpairedSurrogate {
-                            codepoint: high,
-                        }));
+                        return Err(
+                            self.error(ValidationErrorKind::UnpairedSurrogate { codepoint: high })
+                        );
                     }
                     self.advance();
                     if self.peek() != Some(b'u') {
-                        return Err(self.error(ValidationErrorKind::UnpairedSurrogate {
-                            codepoint: high,
-                        }));
+                        return Err(
+                            self.error(ValidationErrorKind::UnpairedSurrogate { codepoint: high })
+                        );
                     }
                     self.advance();
 
                     let low = self.validate_unicode_escape()?;
                     if !(0xDC00..=0xDFFF).contains(&low) {
-                        return Err(self.error(ValidationErrorKind::UnpairedSurrogate {
-                            codepoint: high,
-                        }));
+                        return Err(
+                            self.error(ValidationErrorKind::UnpairedSurrogate { codepoint: high })
+                        );
                     }
                 } else if (0xDC00..=0xDFFF).contains(&high) {
                     // Lone low surrogate
-                    return Err(self.error(ValidationErrorKind::UnpairedSurrogate {
-                        codepoint: high,
-                    }));
+                    return Err(
+                        self.error(ValidationErrorKind::UnpairedSurrogate { codepoint: high })
+                    );
                 }
 
                 Ok(())
             }
-            Some(c) => Err(self.error(ValidationErrorKind::InvalidEscape { sequence: c as char })),
+            Some(c) => Err(self.error(ValidationErrorKind::InvalidEscape {
+                sequence: c as char,
+            })),
             None => Err(self.error(ValidationErrorKind::UnclosedString)),
         }
     }
@@ -799,13 +792,19 @@ mod tests {
     #[test]
     fn test_invalid_empty() {
         let err = validate(b"").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnexpectedEof { .. }
+        ));
     }
 
     #[test]
     fn test_invalid_whitespace_only() {
         let err = validate(b"   ").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnexpectedEof { .. }
+        ));
     }
 
     #[test]
@@ -850,7 +849,10 @@ mod tests {
     #[test]
     fn test_invalid_number_trailing_dot() {
         let err = validate(b"1.").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::InvalidNumber { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidNumber { .. }
+        ));
     }
 
     #[test]
@@ -865,10 +867,16 @@ mod tests {
     #[test]
     fn test_invalid_number_empty_exponent() {
         let err = validate(b"1e").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::InvalidNumber { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidNumber { .. }
+        ));
 
         let err = validate(b"1e+").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::InvalidNumber { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidNumber { .. }
+        ));
     }
 
     #[test]
@@ -901,20 +909,29 @@ mod tests {
     #[test]
     fn test_invalid_lone_high_surrogate() {
         let err = validate(br#""\uD83D""#).unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnpairedSurrogate { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnpairedSurrogate { .. }
+        ));
     }
 
     #[test]
     fn test_invalid_lone_low_surrogate() {
         let err = validate(br#""\uDE00""#).unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnpairedSurrogate { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnpairedSurrogate { .. }
+        ));
     }
 
     #[test]
     fn test_invalid_bad_surrogate_pair() {
         // High surrogate followed by non-surrogate
         let err = validate(br#""\uD83D\u0041""#).unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnpairedSurrogate { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnpairedSurrogate { .. }
+        ));
     }
 
     #[test]
@@ -941,25 +958,40 @@ mod tests {
     #[test]
     fn test_invalid_unclosed_object() {
         let err = validate(br#"{"key": "value""#).unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnexpectedEof { .. }
+        ));
     }
 
     #[test]
     fn test_invalid_unclosed_array() {
         let err = validate(b"[1, 2, 3").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::UnexpectedEof { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnexpectedEof { .. }
+        ));
     }
 
     #[test]
     fn test_invalid_keyword() {
         let err = validate(b"nul").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::InvalidKeyword { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidKeyword { .. }
+        ));
 
         let err = validate(b"tru").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::InvalidKeyword { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidKeyword { .. }
+        ));
 
         let err = validate(b"fals").unwrap_err();
-        assert!(matches!(err.kind, ValidationErrorKind::InvalidKeyword { .. }));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidKeyword { .. }
+        ));
 
         // "undefined" starts with 'u' which is not a valid JSON value start
         let err = validate(b"undefined").unwrap_err();

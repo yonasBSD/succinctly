@@ -589,6 +589,11 @@ struct JqCommand {
     #[arg(short = 's', long)]
     slurp: bool,
 
+    /// Validate JSON strictly according to RFC 8259 before processing.
+    /// Reports detailed validation errors with line:column positions.
+    #[arg(long)]
+    validate: bool,
+
     // === Output Options ===
     /// Compact output (no pretty printing)
     #[arg(short = 'c', long)]

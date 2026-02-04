@@ -174,7 +174,8 @@ fn test_valid_false() -> Result<()> {
 
 #[test]
 fn test_valid_nested_structure() -> Result<()> {
-    let json = r#"{"users": [{"name": "Alice", "active": true}, {"name": "Bob", "active": false}]}"#;
+    let json =
+        r#"{"users": [{"name": "Alice", "active": true}, {"name": "Bob", "active": false}]}"#;
     let (_, _, exit_code) = run_validate_stdin(json, &[])?;
     assert_eq!(exit_code, 0);
     Ok(())
@@ -260,7 +261,8 @@ fn test_invalid_escape_sequence() -> Result<()> {
 #[test]
 fn test_invalid_control_character() -> Result<()> {
     // Tab character directly in string (should be escaped as \t)
-    let (_, stderr, exit_code) = run_validate_stdin("{\"msg\": \"hello\tworld\"}", &["--no-color"])?;
+    let (_, stderr, exit_code) =
+        run_validate_stdin("{\"msg\": \"hello\tworld\"}", &["--no-color"])?;
     // Note: tab is valid whitespace in JSON strings per spec, so this should pass
     // Let me check - actually raw tab in a string requires escaping per RFC 8259
     // "All Unicode characters may be placed within the quotation marks, except for
@@ -428,10 +430,7 @@ fn test_multiple_files_one_invalid() -> Result<()> {
 /// Helper to verify pipe alignment in error output.
 /// Returns the column position of the '|' character on each line, or None if not found.
 fn find_pipe_columns(stderr: &str) -> Vec<usize> {
-    stderr
-        .lines()
-        .filter_map(|line| line.find('|'))
-        .collect()
+    stderr.lines().filter_map(|line| line.find('|')).collect()
 }
 
 /// Creates a JSON object with an error at a specific line number.
@@ -467,11 +466,18 @@ fn test_alignment_single_digit_line() -> Result<()> {
     assert_eq!(exit_code, 1);
 
     // Verify the error is on line 9
-    assert!(stderr.contains(":9:"), "Error should be on line 9, got:\n{}", stderr);
+    assert!(
+        stderr.contains(":9:"),
+        "Error should be on line 9, got:\n{}",
+        stderr
+    );
 
     // Verify pipe alignment: all '|' should be at the same column
     let pipe_cols = find_pipe_columns(&stderr);
-    assert!(pipe_cols.len() >= 2, "Should have at least 2 lines with pipes");
+    assert!(
+        pipe_cols.len() >= 2,
+        "Should have at least 2 lines with pipes"
+    );
     let first_col = pipe_cols[0];
     for col in &pipe_cols {
         assert_eq!(
@@ -492,11 +498,18 @@ fn test_alignment_double_digit_line() -> Result<()> {
     assert_eq!(exit_code, 1);
 
     // Verify the error is on line 10
-    assert!(stderr.contains(":10:"), "Error should be on line 10, got:\n{}", stderr);
+    assert!(
+        stderr.contains(":10:"),
+        "Error should be on line 10, got:\n{}",
+        stderr
+    );
 
     // Verify pipe alignment
     let pipe_cols = find_pipe_columns(&stderr);
-    assert!(pipe_cols.len() >= 2, "Should have at least 2 lines with pipes");
+    assert!(
+        pipe_cols.len() >= 2,
+        "Should have at least 2 lines with pipes"
+    );
     let first_col = pipe_cols[0];
     for col in &pipe_cols {
         assert_eq!(
@@ -517,11 +530,18 @@ fn test_alignment_triple_digit_line() -> Result<()> {
     assert_eq!(exit_code, 1);
 
     // Verify the error is on line 999
-    assert!(stderr.contains(":999:"), "Error should be on line 999, got:\n{}", stderr);
+    assert!(
+        stderr.contains(":999:"),
+        "Error should be on line 999, got:\n{}",
+        stderr
+    );
 
     // Verify pipe alignment
     let pipe_cols = find_pipe_columns(&stderr);
-    assert!(pipe_cols.len() >= 2, "Should have at least 2 lines with pipes");
+    assert!(
+        pipe_cols.len() >= 2,
+        "Should have at least 2 lines with pipes"
+    );
     let first_col = pipe_cols[0];
     for col in &pipe_cols {
         assert_eq!(
@@ -542,11 +562,18 @@ fn test_alignment_four_digit_line() -> Result<()> {
     assert_eq!(exit_code, 1);
 
     // Verify the error is on line 1000
-    assert!(stderr.contains(":1000:"), "Error should be on line 1000, got:\n{}", stderr);
+    assert!(
+        stderr.contains(":1000:"),
+        "Error should be on line 1000, got:\n{}",
+        stderr
+    );
 
     // Verify pipe alignment
     let pipe_cols = find_pipe_columns(&stderr);
-    assert!(pipe_cols.len() >= 2, "Should have at least 2 lines with pipes");
+    assert!(
+        pipe_cols.len() >= 2,
+        "Should have at least 2 lines with pipes"
+    );
     let first_col = pipe_cols[0];
     for col in &pipe_cols {
         assert_eq!(

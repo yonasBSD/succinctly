@@ -178,10 +178,7 @@ fn print_error(err: &ValidationError, input: &[u8], filename: Option<&str>, sche
         Some(f) => format!("{}:{}:{}", f, pos.line, pos.column),
         None => format!("<stdin>:{}:{}", pos.line, pos.column),
     };
-    eprintln!(
-        "  {}--> {}{}",
-        scheme.location, location, scheme.reset
-    );
+    eprintln!("  {}--> {}{}", scheme.location, location, scheme.reset);
 
     // Print context snippet
     if let Some(snippet) = get_error_snippet(input, pos.line, pos.column, pos.offset) {
