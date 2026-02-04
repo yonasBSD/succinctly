@@ -13,6 +13,7 @@ use succinctly::dsv::{build_index as build_dsv_index, DsvConfig, DsvRows};
 use succinctly::jq::eval_generic::{eval_with_cursor, to_owned as generic_to_owned, GenericResult};
 use succinctly::jq::{self, Expr, JqValue, OwnedValue, Program};
 use succinctly::json::light::{JsonCursor, StandardJson};
+use succinctly::json::validate::{self, ValidationError};
 use succinctly::json::JsonIndex;
 
 use super::JqCommand;
@@ -575,6 +576,97 @@ impl OutputConfig {
     }
 }
 
+/// Validate JSON bytes and print a formatted error message if invalid.
+/// Returns Ok(()) if valid, Err with exit code if invalid.
+fn validate_json_input(input: &[u8], filename: Option<&str>) -> Result<(), i32> {
+    if let Err(err) = validate::validate(input) {
+        print_validation_error(&err, input, filename);
+        Err(exit_codes::COMPILE_ERROR) // Use compile error exit code for validation failures
+    } else {
+        Ok(())
+    }
+}
+
+/// Print a formatted validation error message.
+fn print_validation_error(err: &ValidationError, input: &[u8], filename: Option<&str>) {
+    let pos = &err.position;
+
+    // Print error header
+    eprintln!("jq: validation error: {}", err.kind);
+
+    // Print location
+    let location = match filename {
+        Some(f) => format!("{}:{}:{}", f, pos.line, pos.column),
+        None => format!("<stdin>:{}:{}", pos.line, pos.column),
+    };
+    eprintln!("  --> {}", location);
+
+    // Print context snippet if possible
+    if let Some((line_content, caret_offset)) = get_error_line(input, pos.line, pos.column) {
+        let line_num_width = pos.line.to_string().len().max(3);
+        let blank_padding = " ".repeat(line_num_width + 2);
+
+        eprintln!("{}|", blank_padding);
+        eprintln!(
+            " {:>width$} | {}",
+            pos.line,
+            line_content,
+            width = line_num_width
+        );
+        eprintln!("{}| {}^", blank_padding, " ".repeat(caret_offset));
+    }
+
+    eprintln!();
+}
+
+/// Extract the line containing an error for display.
+fn get_error_line(input: &[u8], line: usize, column: usize) -> Option<(String, usize)> {
+    let text = String::from_utf8_lossy(input);
+    let mut current_line = 1;
+    let mut line_start = 0;
+
+    for (i, ch) in text.char_indices() {
+        if current_line == line {
+            line_start = i;
+            break;
+        }
+        if ch == '\n' {
+            current_line += 1;
+        }
+    }
+
+    if current_line != line && line > 1 {
+        return None;
+    }
+
+    let line_end = text[line_start..]
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(text.len());
+
+    let line_content = &text[line_start..line_end];
+
+    // Truncate long lines
+    let max_width = 80;
+    let (display_content, caret_offset) = if line_content.len() > max_width {
+        let error_col = column.saturating_sub(1);
+        if error_col < max_width / 2 {
+            let truncated = &line_content[..max_width.min(line_content.len())];
+            (format!("{}...", truncated), error_col)
+        } else {
+            let start = error_col.saturating_sub(max_width / 2);
+            let end = (start + max_width).min(line_content.len());
+            let truncated = &line_content[start..end];
+            let pos_in_truncated = error_col.saturating_sub(start);
+            (format!("...{}...", truncated), pos_in_truncated + 3)
+        }
+    } else {
+        (line_content.to_string(), column.saturating_sub(1))
+    };
+
+    Some((display_content, caret_offset))
+}
+
 /// Run the jq command with the given arguments.
 /// Returns the exit code (0 for success, non-zero for various errors).
 pub fn run_jq(args: JqCommand) -> Result<i32> {
@@ -738,9 +830,20 @@ pub fn run_jq(args: JqCommand) -> Result<i32> {
         // Check if we can use the identity fast path (raw bytes output, no materialization)
         let use_identity_fast_path = expr.is_identity() && output_config.can_use_raw_identity();
 
-        for raw in raw_inputs {
+        for (idx, raw) in raw_inputs.iter().enumerate() {
+            // Validate JSON if --validate flag is set
+            if args.validate {
+                let filename: Option<String> = if files.is_empty() {
+                    None
+                } else {
+                    Some(files[idx].to_string_lossy().to_string())
+                };
+                if let Err(exit_code) = validate_json_input(raw, filename.as_deref()) {
+                    return Ok(exit_code);
+                }
+            }
             // Process as JSON stream (handle multiple JSON values in one input)
-            let values = find_json_values(&raw);
+            let values = find_json_values(raw);
             for (start, end) in values {
                 let json_bytes = &raw[start..end];
 
@@ -778,7 +881,11 @@ pub fn run_jq(args: JqCommand) -> Result<i32> {
         }
     } else {
         // Original path: parse through serde_json (loses number formatting)
-        let inputs = get_inputs(&args)?;
+        let inputs = match get_inputs(&args) {
+            Ok(Ok(inputs)) => inputs,
+            Ok(Err(e)) => return Err(e),
+            Err(exit_code) => return Ok(exit_code), // Validation error
+        };
 
         for input in inputs {
             let results = evaluate_input(&input, &expr, &context)?;
@@ -924,10 +1031,11 @@ fn get_input_files(args: &JqCommand) -> Vec<std::path::PathBuf> {
 }
 
 /// Get input values based on arguments.
-fn get_inputs(args: &JqCommand) -> Result<Vec<OwnedValue>> {
+/// Returns Err(i32) for validation failures (exit code), Ok(Err) for other errors.
+fn get_inputs(args: &JqCommand) -> std::result::Result<Result<Vec<OwnedValue>>, i32> {
     // Null input mode: use null as the single input
     if args.null_input {
-        return Ok(vec![OwnedValue::Null]);
+        return Ok(Ok(vec![OwnedValue::Null]));
     }
 
     // Get input files
@@ -935,18 +1043,25 @@ fn get_inputs(args: &JqCommand) -> Result<Vec<OwnedValue>> {
 
     // Collect raw input from files or stdin
     let raw_inputs = if files.is_empty() {
-        vec![read_stdin()?]
+        match read_stdin() {
+            Ok(s) => vec![(None, s)],
+            Err(e) => return Ok(Err(e)),
+        }
     } else {
-        files
-            .iter()
-            .map(|path| read_file(path))
-            .collect::<Result<Vec<_>>>()?
+        let mut inputs = Vec::new();
+        for (idx, path) in files.iter().enumerate() {
+            match read_file(path) {
+                Ok(s) => inputs.push((Some(idx), s)),
+                Err(e) => return Ok(Err(e)),
+            }
+        }
+        inputs
     };
 
     // Process based on input mode
     let mut values = Vec::new();
 
-    for raw in raw_inputs {
+    for (file_idx, raw) in raw_inputs {
         if let Some(delimiter) = args.input_dsv {
             // DSV input: each row becomes a JSON array of strings
             let parsed = parse_dsv_input(&raw, delimiter);
@@ -961,17 +1076,25 @@ fn get_inputs(args: &JqCommand) -> Result<Vec<OwnedValue>> {
             let parsed = parse_json_seq(&raw);
             values.extend(parsed);
         } else {
-            // JSON input: parse as JSON stream
-            let parsed = parse_json_stream(&raw)?;
+            // JSON input: validate first if --validate is set
+            if args.validate {
+                let filename = file_idx.map(|idx| files[idx].to_string_lossy().to_string());
+                validate_json_input(raw.as_bytes(), filename.as_deref())?;
+            }
+            // Parse as JSON stream
+            let parsed = match parse_json_stream(&raw) {
+                Ok(p) => p,
+                Err(e) => return Ok(Err(e)),
+            };
             values.extend(parsed);
         }
     }
 
     // Slurp mode: wrap all inputs in an array
     if args.slurp {
-        Ok(vec![OwnedValue::Array(values)])
+        Ok(Ok(vec![OwnedValue::Array(values)]))
     } else {
-        Ok(values)
+        Ok(Ok(values))
     }
 }
 

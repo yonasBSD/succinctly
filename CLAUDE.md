@@ -64,8 +64,13 @@ cargo build --release --features cli
 sjq '.users[].name' input.json
 sjq -r '.users[] | [.name, .age] | @csv' input.json
 sjq -r '.users[] | [.name, .age] | @dsv("|")' input.json
+sjq --validate '.users[]' input.json  # Strict RFC 8259 validation before processing
 sjq-locate input.json --offset 42
 sjq-locate input.json --line 5 --column 10
+
+# JSON validation (RFC 8259 strict)
+./target/release/succinctly json validate input.json
+./target/release/succinctly json validate --quiet input.json  # Exit code only
 
 # YAML operations (syq is an alias for succinctly yq)
 syq '.users[].name' config.yaml
