@@ -8,7 +8,7 @@ Performance benchmarks for DSV parsing via `succinctly jq --input-dsv`.
 
 | Metric             | ARM (M1 Max) | ARM (M4 Pro) | x86_64 (Ryzen 9)  | ARM (Graviton 4) | ARM (Graviton 3) |
 |--------------------|--------------|--------------|-------------------|------------------|------------------|
-| **CLI Throughput** | 6-29 MiB/s   | 9-107 MiB/s  | 10-103 MiB/s      | 7-89 MiB/s       | 7-90 MiB/s       |
+| **CLI Throughput** | 6-29 MiB/s   | 9-112 MiB/s  | 10-103 MiB/s      | 7-89 MiB/s       | 7-90 MiB/s       |
 | **API Iteration**  | -            | -            | 85-1676 MiB/s     | ~1000 MiB/s      | ~1000 MiB/s      |
 | **Parse Speed**    | ~0.8 GB/s    | ~0.9 GB/s    | 1.3-3.7 GB/s      | ~3.8 GB/s        | ~3.8 GB/s        |
 
@@ -23,7 +23,7 @@ Performance benchmarks for DSV parsing via `succinctly jq --input-dsv`.
 - **CPU**: Apple M4 Pro
 - **SIMD**: NEON (16 bytes/iter)
 - **Build**: `cargo build --release --features cli`
-- **Date**: 2026-02-04 (with SIMD string escaping optimization)
+- **Date**: 2026-02-04 (with zero-copy JSON string optimization)
 
 ### Platform 2: AMD Ryzen 9 7950X (x86_64)
 - **CPU**: AMD Ryzen 9 7950X (Zen 4)
@@ -64,16 +64,16 @@ Full jq pipeline including DSV parsing, iteration, and JSON output.
 
 | Pattern      | Time   | Throughput  |
 |--------------|--------|-------------|
-| strings      |  91ms  | 109.8 MiB/s |
-| wide         | 218ms  |  45.9 MiB/s |
-| multiline    | 236ms  |  42.4 MiB/s |
-| quoted       | 337ms  |  29.6 MiB/s |
-| pathological | 396ms  |  25.3 MiB/s |
-| users        | 500ms  |  20.0 MiB/s |
-| numeric      | 573ms  |  17.5 MiB/s |
-| tabular      | 584ms  |  17.1 MiB/s |
-| mixed        | 586ms  |  17.1 MiB/s |
-| long         | 1.09s  |   9.2 MiB/s |
+| strings      |  93ms  | 108.0 MiB/s |
+| wide         | 219ms  |  45.6 MiB/s |
+| multiline    | 243ms  |  41.1 MiB/s |
+| quoted       | 342ms  |  29.2 MiB/s |
+| pathological | 395ms  |  25.3 MiB/s |
+| users        | 507ms  |  19.7 MiB/s |
+| numeric      | 580ms  |  17.2 MiB/s |
+| tabular      | 582ms  |  17.2 MiB/s |
+| mixed        | 587ms  |  17.0 MiB/s |
+| long         | 1.10s  |   9.1 MiB/s |
 
 ### x86_64 (Ryzen 9) - 10MB Files
 
@@ -238,111 +238,111 @@ Full jq pipeline including DSV parsing, iteration, and JSON output.
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    5.50s |   18.2 MiB/s |  143 MB |
-| **10mb**  |  583.9ms |   17.1 MiB/s |   19 MB |
-| **1mb**   |   62.1ms |   16.1 MiB/s |    6 MB |
-| **100kb** |    9.0ms |   10.9 MiB/s |    5 MB |
-| **10kb**  |    3.9ms |    2.5 MiB/s |    4 MB |
+| **100mb** |    5.49s |   18.2 MiB/s |  144 MB |
+| **10mb**  |  581.5ms |   17.2 MiB/s |   19 MB |
+| **1mb**   |   65.9ms |   15.2 MiB/s |    6 MB |
+| **100kb** |    9.9ms |    9.9 MiB/s |    5 MB |
+| **10kb**  |    4.0ms |    2.5 MiB/s |    4 MB |
 | **1kb**   |    3.6ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: users**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    4.98s |   20.1 MiB/s |  145 MB |
-| **10mb**  |  499.9ms |   20.0 MiB/s |   20 MB |
-| **1mb**   |   53.1ms |   18.8 MiB/s |    7 MB |
-| **100kb** |    7.9ms |   12.4 MiB/s |    5 MB |
-| **10kb**  |    3.6ms |    2.7 MiB/s |    4 MB |
-| **1kb**   |    3.3ms |    0.3 MiB/s |    4 MB |
+| **100mb** |    4.95s |   20.2 MiB/s |  144 MB |
+| **10mb**  |  506.9ms |   19.7 MiB/s |   19 MB |
+| **1mb**   |   53.8ms |   18.6 MiB/s |    6 MB |
+| **100kb** |    8.2ms |   12.0 MiB/s |    5 MB |
+| **10kb**  |    3.7ms |    2.6 MiB/s |    4 MB |
+| **1kb**   |    3.5ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: numeric**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    5.60s |   17.9 MiB/s |  144 MB |
-| **10mb**  |  572.6ms |   17.5 MiB/s |   19 MB |
-| **1mb**   |   61.3ms |   16.3 MiB/s |    6 MB |
-| **100kb** |    8.7ms |   11.3 MiB/s |    5 MB |
-| **10kb**  |    3.8ms |    2.6 MiB/s |    4 MB |
-| **1kb**   |    3.4ms |    0.3 MiB/s |    4 MB |
+| **100mb** |    5.64s |   17.7 MiB/s |  144 MB |
+| **10mb**  |  579.9ms |   17.2 MiB/s |   19 MB |
+| **1mb**   |   59.4ms |   16.8 MiB/s |    6 MB |
+| **100kb** |    8.7ms |   11.2 MiB/s |    5 MB |
+| **10kb**  |    3.9ms |    2.5 MiB/s |    4 MB |
+| **1kb**   |    3.5ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: strings (fastest)**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |  893.9ms |  111.9 MiB/s |  143 MB |
-| **10mb**  |   91.1ms |  109.8 MiB/s |   18 MB |
-| **1mb**   |   11.5ms |   87.1 MiB/s |    6 MB |
-| **100kb** |    3.9ms |   24.9 MiB/s |    5 MB |
-| **10kb**  |    3.2ms |    3.1 MiB/s |    4 MB |
-| **1kb**   |    3.2ms |    0.3 MiB/s |    4 MB |
+| **100mb** |  894.2ms |  111.8 MiB/s |  143 MB |
+| **10mb**  |   92.6ms |  108.0 MiB/s |   19 MB |
+| **1mb**   |   12.1ms |   82.8 MiB/s |    6 MB |
+| **100kb** |    4.2ms |   23.5 MiB/s |    5 MB |
+| **10kb**  |    3.4ms |    2.9 MiB/s |    4 MB |
+| **1kb**   |    3.3ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: quoted**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    3.22s |   31.0 MiB/s |  143 MB |
-| **10mb**  |  337.5ms |   29.6 MiB/s |   19 MB |
-| **1mb**   |   37.1ms |   27.0 MiB/s |    6 MB |
-| **100kb** |    6.5ms |   15.0 MiB/s |    5 MB |
-| **10kb**  |    3.5ms |    2.8 MiB/s |    4 MB |
-| **1kb**   |    3.3ms |    0.3 MiB/s |    4 MB |
+| **100mb** |    3.23s |   31.0 MiB/s |  143 MB |
+| **10mb**  |  342.1ms |   29.2 MiB/s |   19 MB |
+| **1mb**   |   38.7ms |   25.8 MiB/s |    6 MB |
+| **100kb** |    7.0ms |   14.0 MiB/s |    5 MB |
+| **10kb**  |    3.7ms |    2.6 MiB/s |    4 MB |
+| **1kb**   |    3.5ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: multiline**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    2.17s |   46.1 MiB/s |  145 MB |
-| **10mb**  |  236.0ms |   42.4 MiB/s |   19 MB |
-| **1mb**   |   27.8ms |   36.0 MiB/s |    6 MB |
-| **100kb** |    5.7ms |   17.1 MiB/s |    5 MB |
-| **10kb**  |    3.4ms |    2.9 MiB/s |    4 MB |
-| **1kb**   |    3.3ms |    0.3 MiB/s |    4 MB |
+| **100mb** |    2.16s |   46.4 MiB/s |  144 MB |
+| **10mb**  |  243.1ms |   41.1 MiB/s |   19 MB |
+| **1mb**   |   28.5ms |   35.1 MiB/s |    6 MB |
+| **100kb** |    6.2ms |   15.9 MiB/s |    5 MB |
+| **10kb**  |    3.7ms |    2.7 MiB/s |    4 MB |
+| **1kb**   |    3.5ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: wide**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    2.22s |   45.1 MiB/s |  144 MB |
-| **10mb**  |  218.0ms |   45.9 MiB/s |   19 MB |
-| **1mb**   |   25.0ms |   40.0 MiB/s |    6 MB |
-| **100kb** |    5.1ms |   19.2 MiB/s |    5 MB |
-| **10kb**  |    3.4ms |    2.9 MiB/s |    4 MB |
-| **1kb**   |    3.4ms |    0.3 MiB/s |    4 MB |
+| **100mb** |    2.20s |   45.5 MiB/s |  143 MB |
+| **10mb**  |  219.2ms |   45.6 MiB/s |   19 MB |
+| **1mb**   |   25.2ms |   39.7 MiB/s |    6 MB |
+| **100kb** |    5.4ms |   18.1 MiB/s |    5 MB |
+| **10kb**  |    3.7ms |    2.7 MiB/s |    4 MB |
+| **1kb**   |    3.5ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: long (slowest)**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |   10.57s |    9.5 MiB/s |  143 MB |
-| **10mb**  |    1.09s |    9.2 MiB/s |   19 MB |
-| **1mb**   |  115.6ms |    8.6 MiB/s |    6 MB |
-| **100kb** |   14.7ms |    6.6 MiB/s |    5 MB |
-| **10kb**  |    4.4ms |    2.2 MiB/s |    4 MB |
-| **1kb**   |    3.3ms |    0.3 MiB/s |    4 MB |
+| **100mb** |   10.59s |    9.4 MiB/s |  143 MB |
+| **10mb**  |    1.10s |    9.1 MiB/s |   19 MB |
+| **1mb**   |  117.9ms |    8.5 MiB/s |    6 MB |
+| **100kb** |   14.6ms |    6.7 MiB/s |    5 MB |
+| **10kb**  |    4.5ms |    2.2 MiB/s |    4 MB |
+| **1kb**   |    3.6ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: mixed**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    5.78s |   17.3 MiB/s |  143 MB |
-| **10mb**  |  586.1ms |   17.1 MiB/s |   19 MB |
-| **1mb**   |   61.7ms |   16.2 MiB/s |    6 MB |
-| **100kb** |    8.8ms |   11.1 MiB/s |    5 MB |
-| **10kb**  |    3.7ms |    2.6 MiB/s |    4 MB |
+| **100mb** |    5.82s |   17.2 MiB/s |  144 MB |
+| **10mb**  |  587.2ms |   17.0 MiB/s |   19 MB |
+| **1mb**   |   63.2ms |   15.8 MiB/s |    6 MB |
+| **100kb** |    9.4ms |   10.4 MiB/s |    5 MB |
+| **10kb**  |    3.9ms |    2.5 MiB/s |    4 MB |
 | **1kb**   |    3.4ms |    0.3 MiB/s |    4 MB |
 
 **Pattern: pathological**
 
 | Size      | Time     | Throughput   | Memory   |
 |-----------|----------|--------------|----------|
-| **100mb** |    3.83s |   26.1 MiB/s |  142 MB |
-| **10mb**  |  395.9ms |   25.3 MiB/s |   19 MB |
-| **1mb**   |   44.1ms |   22.7 MiB/s |    6 MB |
-| **100kb** |    7.0ms |   14.0 MiB/s |    5 MB |
+| **100mb** |    3.82s |   26.2 MiB/s |  143 MB |
+| **10mb**  |  395.2ms |   25.3 MiB/s |   19 MB |
+| **1mb**   |   43.0ms |   23.3 MiB/s |    6 MB |
+| **100kb** |    7.2ms |   13.5 MiB/s |    5 MB |
 | **10kb**  |    3.6ms |    2.7 MiB/s |    4 MB |
-| **1kb**   |    3.3ms |    0.3 MiB/s |    4 MB |
+| **1kb**   |    3.4ms |    0.3 MiB/s |    4 MB |
 
 ## Query Comparison
 
